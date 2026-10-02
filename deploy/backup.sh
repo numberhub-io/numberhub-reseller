@@ -6,6 +6,7 @@
 # backup on the same disk does not survive the disk, and without SECRET_KEY the
 # stored bot tokens and API keys in a backup cannot be decrypted.
 set -eu
+umask 077          # backups hold customer data and encrypted secrets: owner-only
 APP=${APP:-/opt/numberhub-reseller}
 URL=$(grep -E '^DB_URL=' "$APP/.env" 2>/dev/null | tail -n 1 | cut -d= -f2- || true)
 DB=${URL#sqlite+aiosqlite:///}
