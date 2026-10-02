@@ -47,7 +47,7 @@ WELCOME = (
     "1️⃣ Create a bot in @BotFather and send me its token.\n"
     "2️⃣ Send me your NumberHub API key. Each number your customers buy is paid from your NumberHub "
     "wallet — only when its code arrives.\n"
-    "3️⃣ Set your markup. Customers top up with you, your way; you add their balance in your bot.\n\n"
+    "3️⃣ Set your commission. Customers top up with you, your way; you add their balance in your bot.\n\n"
     "💰 You keep the difference. No code = no charge, for you and your customer."
 )
 HELP = (
@@ -60,7 +60,7 @@ HELP = (
     "bot: /admin → ➕ Add balance.\n\n"
     "<b>What does it cost me?</b> NumberHub's price for each delivered number, from your wallet. "
     "If no code arrives, neither you nor your customer pays.\n\n"
-    "<b>Your markup</b> is added on top of NumberHub's price — change it any time in /admin."
+    "<b>Your commission</b> is added on top of NumberHub's price — change it any time in /admin."
 )
 
 
@@ -158,7 +158,7 @@ async def show_mine(c: CallbackQuery):
         s = await repo.stats(r.id, 7)
         icon = {"active": "✅ selling", "disabled": "⏸ paused", "key_invalid": "⚠️ API key rejected"}.get(r.status, r.status)
         lines.append(f"<b>@{esc(r.bot_username)}</b> — {icon}\n👥 {s['members']} customers · 7 days: "
-                     f"{s['orders']} sold · profit ≈ {money(s['sales'] - s['cost'])} · markup {r.markup_pct.normalize():f}%\n")
+                     f"{s['orders']} sold · profit ≈ {money(s['sales'] - s['cost'])} · commission {r.markup_pct.normalize():f}%\n")
         kb.button(text=f"🔗 @{r.bot_username}", url=f"https://t.me/{r.bot_username}")
         if r.status == Reseller.ACTIVE:
             kb.button(text="⏸ Pause", callback_data=Bld(a="pause", rid=r.id))
@@ -234,8 +234,8 @@ async def got_key(m: Message, state: FSMContext):
     kb.adjust(4, 1)
     await m.answer(
         f"✅ Key works. NumberHub wallet: <b>{money(dec(bal.get('available')))}</b> available.\n\n"
-        "<b>Step 3 of 3 — your markup</b>\n\nHow much do you add on top of NumberHub's price? "
-        "Tap one or send a number (0–300).\n<i>Example: 30% → a $1.00 number sells for $1.30.</i>",
+        "<b>Step 3 of 3 — your commission</b>\n\nHow much do you add on top of NumberHub's price? "
+        "Tap one or send a number (0–300).\n<i>Example: 30% → a $1.00 number sells for $1.30 and you earn $0.30.</i>",
         reply_markup=kb.as_markup())
 
 
@@ -278,7 +278,7 @@ async def finish_create(m: Message, owner_id: int, state: FSMContext, markup: De
         await m.edit_text(text, reply_markup=kb.as_markup(), disable_web_page_preview=True)
     else:
         await m.answer(text, reply_markup=kb.as_markup(), disable_web_page_preview=True)
-    log.info("reseller %s created by %s (@%s, markup %s%%)", reseller.id, owner_id, reseller.bot_username, markup)
+    log.info("reseller %s created by %s (@%s, commission %s%%)", reseller.id, owner_id, reseller.bot_username, markup)
 
 
 @router.message(StateFilter(Create.newkey), F.text)
@@ -300,6 +300,14 @@ async def got_newkey(m: Message, state: FSMContext):
     await runtime.restart(reseller.id)
     await m.answer(f"✅ New key saved for @{esc(reseller.bot_username)} — it is selling again.",
                    reply_markup=home_kb())
+
+
+@router.callback_query()
+async def stale(c: CallbackQuery, state: FSMContext):
+    """A button this bot doesn't know (an old message): never leave it spinning."""
+    await state.clear()
+    await c.answer("This button is from an old message.")
+    await c.message.answer(WELCOME, reply_markup=home_kb(), disable_web_page_preview=True)
 
 
 # ─── platform operators ──────────────────────────────────────────────────────

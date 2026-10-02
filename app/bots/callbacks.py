@@ -10,6 +10,11 @@ class SvcPage(CallbackData, prefix="sp"):
     page: int
 
 
+class AZ(CallbackData, prefix="az"):
+    l: str = ""                # "" (or old "*") = the letter grid; "+" = more popular; "A".."Z" / "#"
+    page: int = 0
+
+
 class Svc(CallbackData, prefix="s"):
     code: str
     page: int = 0              # countries page

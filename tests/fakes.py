@@ -50,6 +50,9 @@ class FakeNumberHub:
         self.cancel_lock = 0                         # seconds_remaining for DELETE
         self.cancel_code_first = False
         self.reject_key = False
+        # (service, country) -> the price POST /numbers really reserves, when the
+        # list under-reports it (live NumberHub did this from 09-23 to 10-02).
+        self.true_reserve: dict[tuple[str, str], str] = {}
 
     # ── state helpers for tests ──
     def set_status(self, nh_id: int, status: str, code: str | None = None) -> None:
@@ -153,7 +156,7 @@ class FakeNumberHub:
         row = next((r for r in self.countries.get(body["service"], []) if r["country"] == body["country"]), None)
         if row is None:
             return 409, {"error": "sold_out"}
-        price = Decimal(row["price_max"])
+        price = Decimal(self.true_reserve.get((body["service"], body["country"]), row["price_max"]))
         if Decimal(body["max_price"]) < price:
             return 409, {"error": "price_exceeded", "price": f"{price:.2f}", "max_price": body["max_price"]}
         if self.wallet - self.held < price:

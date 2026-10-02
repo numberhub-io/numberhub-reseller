@@ -1,0 +1,30 @@
+# systemd unit for the reseller platform (one process runs every bot).
+#   sudo cp deploy/numberhub-reseller.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now numberhub-reseller
+# Run ONE instance only: two processes polling the same bot tokens fight over
+# Telegram updates (TelegramConflictError) and both miss messages.
+[Unit]
+Description=NumberHub reseller bots
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=reseller
+Group=reseller
+WorkingDirectory=/opt/numberhub-reseller
+EnvironmentFile=/opt/numberhub-reseller/.env
+ExecStart=/opt/numberhub-reseller/.venv/bin/python -X utf8 main.py
+Restart=always
+RestartSec=5
+# main.py waits up to 60 s for purchases in flight before it exits.
+TimeoutStopSec=90
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/numberhub-reseller
+
+[Install]
+WantedBy=multi-user.target

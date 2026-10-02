@@ -192,6 +192,23 @@ async def test_failures():
         check("unknown country -> sold_out", e.reason == "sold_out")
     failed = [o for o in await repo.member_orders(m.id, 50)]
     check("failed purchases are hidden from the member's orders", not failed)
+    # The list under-reports what a buy really reserves (live NumberHub did, from
+    # 09-23 to 10-02): refused once, then the real price is shown and the next tap buys.
+    api.true_reserve[("wa", "6")] = "0.40"                 # listed price_max 0.25
+    rows = await selling.countries(r, "wa", fresh=True)
+    shown = next(x for x in rows if x["country"] == "6")["member_price"]
+    try:
+        await selling.buy(r, await repo.get_member(m.id), "wa", "6", shown)
+        check("an under-reported route is refused once", False)
+    except SellError as e:
+        check("an under-reported route is refused once, with the real price",
+              e.reason == "price_changed" and e.price == D("0.52") and (await repo.get_member(m.id)).held == 0,
+              f"{shown} -> {e.price}")
+    again = next(x for x in await selling.countries(r, "wa") if x["country"] == "6")["member_price"]
+    check("the screen redraws with the price NumberHub really reserves", again == D("0.52"), str(again))
+    o = await selling.buy(r, await repo.get_member(m.id), "wa", "6", again)
+    check("the next tap buys (no endless 'price changed' loop)",
+          o.status == "waiting" and o.member_price == D("0.52"), o.status)
     runtime._bots.pop(r.id, None)
 
 
@@ -222,6 +239,17 @@ async def test_lost_reply():
     rec = await repo.get_order(buying[0].id)
     check("recovery replays the same request: linked, still ONE order for it",
           rec.nh_id is not None and len(api.orders) == 2 and rec.status == "waiting")
+    # A restored backup, or a second database on the same API key, repeats order
+    # ids. NumberHub keeps a key for 24 h, so a repeated key would be refused
+    # (idempotency_conflict, seen live) or replay the OLD order and its code.
+    from types import SimpleNamespace
+    import datetime as _dt
+    twin = SimpleNamespace(reseller_id=rec.reseller_id, id=rec.id,
+                           created_at=rec.created_at + _dt.timedelta(microseconds=1))
+    check("same ids in another database -> a different Idempotency-Key",
+          selling.idempotency_key(twin) != selling.idempotency_key(rec), selling.idempotency_key(rec))
+    check("the key is stable across reads (what recovery relies on)",
+          selling.idempotency_key(await repo.get_order(rec.id)) == selling.idempotency_key(rec))
 
 
 async def test_cancel():
@@ -329,14 +357,61 @@ async def test_bot_flow():
     await dp.feed_update(bot, msg(ALICE + 100, "/start"))
     check("/start shows the welcome and balance", "Welcome to" in session.last_text() and "$0.00" in session.last_text())
     check("no admin button for a customer", button(session, "Admin") is None)
+    check("no separate Support button in the menu", button(session, "Support") is None)
+    # A catalog shaped like the live one: most popular first, raw names, ~40 apps on S.
+    selling._svc_cache = (0.0, [])
+    api.services = ([{"code": "ot", "name": "Any other"}, {"code": "tg", "name": "Telegram"},
+                     {"code": "wa", "name": "Whatsapp"}, {"code": "ig", "name": "Instagram+Threads"},
+                     {"code": "wb", "name": "WeChat"}, {"code": "ya", "name": "yandex"},
+                     {"code": "vk", "name": "vk.com"}, {"code": "cn", "name": " Caffe Nero"},
+                     {"code": "gx", "name": "Google,youtube,Gmail"}]
+                    + [{"code": f"s{i:02d}", "name": f"Shop {i:02d}"} for i in range(40)])
+    n_apps = len(api.services)
     await dp.feed_update(bot, tap(ALICE + 100, button(session, "Buy a number")))
-    check("services list", "Choose a service" in session.last_text() and button(session, "WhatsApp"))
+    check("app picker: popular apps with icons, then more popular, then A–Z",
+          "Which app" in session.last_text() and button(session, "💬 WhatsApp")
+          and button(session, "✈️ Telegram") and button(session, "More popular apps")
+          and button(session, f"All {n_apps} apps, A–Z") and button(session, "Any other app"))
+    await dp.feed_update(bot, tap(ALICE + 100, button(session, "More popular apps")))
+    more = [b.text for row in session.last_markup().inline_keyboard for b in row]
+    check("more popular: the catalog's next apps in its own order, clean names",
+          "More popular apps" in session.last_text() and more[:4] == ["WeChat", "Yandex", "vk.com", "Caffe Nero"]
+          and "Google, youtube, Gmail" in more, str(more[:5]))
+    check("no wall of identical 📱 icons", not any("📱" in x for x in more))
+    await dp.feed_update(bot, tap(ALICE + 100, button(session, f"All {n_apps} apps")))
+    check("A–Z grid: the count, only letters that have apps",
+          f"All apps ({n_apps})" in session.last_text() and button(session, "W")
+          and button(session, "S") and button(session, "Q") is None)
+    await dp.feed_update(bot, tap(ALICE + 100, button(session, "W")))
+    w = [b.text for row in session.last_markup().inline_keyboard for b in row]
+    check("a letter lists its apps A to Z, without icons",
+          "W</b> · 2 apps" in session.last_text() and w[:2] == ["WeChat", "WhatsApp"], str(w[:3]))
+    await dp.feed_update(bot, tap(ALICE + 100, "az:S:0"))
+    s1 = [b.text for row in session.last_markup().inline_keyboard for b in row]
+    check("a long letter pages at 30 with ➡️", "Shop 00" in s1 and "Shop 29" in s1
+          and "Shop 30" not in s1 and "1/2" in s1 and "➡️" in s1)
+    await dp.feed_update(bot, tap(ALICE + 100, button(session, "➡️")))
+    s2 = [b.text for row in session.last_markup().inline_keyboard for b in row]
+    check("…and the next page has the rest", "Shop 39" in s2 and "2/2" in s2 and "⬅️" in s2)
+    await dp.feed_update(bot, tap(ALICE + 100, "az:C:0"))
+    check("names are cleaned (a stray leading space)", button(session, "Caffe Nero") is not None)
+    await dp.feed_update(bot, tap(ALICE + 100, "az:*:0"))
+    check("an old 'All services' button opens the A–Z grid", "All apps" in session.last_text())
+    await dp.feed_update(bot, tap(ALICE + 100, "az:W:0"))
     await dp.feed_update(bot, msg(ALICE + 100, "whats"))
     check("typing a name searches", "Results for" in session.last_text() and button(session, "WhatsApp"))
     await dp.feed_update(bot, tap(ALICE + 100, button(session, "WhatsApp")))
     labels = [b.text for row in session.last_markup().inline_keyboard for b in row]
-    check("countries best first, with the member's price and delivery %",
-          labels[0].startswith("🇺🇸 USA · $0.39 · 62%") and any("⏳" in x for x in labels), labels[0])
+    check("countries best first with the customer's price (no confusing %)",
+          labels[0] == "🇺🇸 USA · $0.39" and not any("%" in x for x in labels)
+          and any("⏳" in x for x in labels), labels[0])
+    check("the country page says how many countries", "3 countries" in session.last_text())
+    await dp.feed_update(bot, msg(ALICE + 100, "indo"))
+    check("typing a country name on the country page finds it",
+          "countries for" in session.last_text() and button(session, "Indonesia"))
+    await dp.feed_update(bot, tap(ALICE + 100, "n:buy"))
+    check("the popular grid now shows each app's cheapest price", button(session, "💬 WhatsApp · $0.33+") is not None)
+    await dp.feed_update(bot, tap(ALICE + 100, "s:wa:0"))
     await dp.feed_update(bot, tap(ALICE + 100, button(session, "USA")))
     check("confirm screen: price, refund promise, balance", "$0.39" in session.last_text()
           and "automatic refund" in session.last_text() and button(session, "Add balance"))
@@ -365,6 +440,11 @@ async def test_bot_flow():
     check("the menu offers 'Again' with the service and flag", button(session, "WhatsApp 🇺🇸") is not None)
     await dp.feed_update(bot, tap(ALICE + 100, "n:buy"))
     check("a single page shows no '1/1' row", button(session, "1/1") is None)
+    n_alerts = len(session.alerts())
+    await dp.feed_update(bot, tap(ALICE + 100, "bd:create:0:"))     # a builder button, stale here
+    check("an unknown/old button is answered (never spins) and opens the menu",
+          len(session.alerts()) == n_alerts + 1 and "old message" in session.alerts()[-1]
+          and button(session, "Buy a number") is not None)
     await dp.feed_update(bot, tap(ALICE + 100, "n:lang"))
     await dp.feed_update(bot, tap(ALICE + 100, "l:ru"))
     check("language switch translates the menu", "Купить" in str(session.last_markup()))
@@ -376,8 +456,8 @@ async def test_bot_flow():
     check("the owner sees ⚙️ Admin panel", button(session, "Admin panel") is not None)
     await dp.feed_update(bot, msg(OWNER, "/admin"))
     dash = session.last_text()
-    check("dashboard: customers, sales, markup, NumberHub wallet",
-          "Customers:" in dash and "markup" in dash.lower() and "available" in dash, dash[:60])
+    check("dashboard: customers, sales, commission with an example, NumberHub wallet",
+          "Customers:" in dash and "commission" in dash.lower() and "you earn" in dash and "available" in dash, dash[:60])
     await dp.feed_update(bot, tap(OWNER, button(session, "Add balance")))
     await dp.feed_update(bot, msg(OWNER, f"{ALICE + 200} 3.5"))
     bob = await repo.find_member(r.id, str(ALICE + 200))

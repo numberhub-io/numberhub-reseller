@@ -123,16 +123,68 @@ async def countries(reseller: Reseller, service: str, fresh: bool = False) -> li
         ceiling = dec(r.get("price_max") or r.get("price"))
         if ceiling <= 0:
             continue
+        ceiling = max(ceiling, learned_ceiling(reseller.id, service, str(r.get("country"))))
         out.append({**r, "ceiling": ceiling, "member_price": member_price(ceiling, reseller.markup_pct),
                     "emoji": flag(r.get("flag"))})
     out.sort(key=_quality_key)
     _country_cache[key] = (time.monotonic(), out)
+    stocked = [r["member_price"] for r in out if r.get("in_stock")] or [r["member_price"] for r in out]
+    if stocked:
+        _from_price[key] = (time.monotonic(), min(stocked))
     return out
+
+
+# Cheapest member price per (reseller, service), for "💬 WhatsApp · $0.24+".
+_from_price: dict[tuple[int, str], tuple[float, Decimal]] = {}
+FROM_PRICE_TTL = 900
+
+
+def from_price(reseller_id: int, service: str) -> Decimal | None:
+    hit = _from_price.get((reseller_id, service))
+    return hit[1] if hit and time.monotonic() - hit[0] < FROM_PRICE_TTL else None
+
+
+async def warm_popular(reseller: Reseller) -> None:
+    """Keep the popular apps' "from" prices fresh (one request every 0.5 s, well
+    inside the API's 60 per 10 s), so the service grid shows them instantly."""
+    from app.catalog_ui import POPULAR
+    for code, _icon, _name in POPULAR:
+        hit = _from_price.get((reseller.id, code))
+        if hit and time.monotonic() - hit[0] < 600:
+            continue
+        try:
+            await countries(reseller, code, fresh=True)
+        except SellError:
+            return
+        except Exception:  # noqa: BLE001
+            log.debug("warm %s/%s failed", reseller.id, code)
+        await asyncio.sleep(0.5)
 
 
 def invalidate_prices(reseller_id: int) -> None:
     for k in [k for k in _country_cache if k[0] == reseller_id]:
         _country_cache.pop(k, None)
+
+
+# What NumberHub really reserved when it refused a buy as `price_exceeded`. The
+# list can lag or under-report a route's top price (it did on live NumberHub
+# from 2026-09-23 to 10-02: every thin route was refused), so the refusal's own
+# price wins over the list for a while. Otherwise the member would see "price
+# changed", tap again and be refused again, forever.
+_learned: dict[tuple[int, str, str], tuple[float, Decimal]] = {}
+LEARNED_TTL = 900
+
+
+def learned_ceiling(reseller_id: int, service: str, country: str) -> Decimal:
+    hit = _learned.get((reseller_id, service, str(country)))
+    return hit[1] if hit and time.monotonic() - hit[0] < LEARNED_TTL else Decimal("0")
+
+
+def learn_ceiling(reseller_id: int, service: str, country: str, price) -> None:
+    value = dec(price)
+    if value > 0:
+        _learned[(reseller_id, service, str(country))] = (time.monotonic(), value)
+        _country_cache.pop((reseller_id, service), None)
 
 
 # ─── buying ──────────────────────────────────────────────────────────────────
@@ -196,7 +248,8 @@ async def buy(reseller: Reseller, member: Member, service: str, country: str,
         raise SellError("price_changed", price)
     if not await repo.member_try_hold(member.id, price):
         raise SellError("no_credit", price)
-    svc_name = service_name(await services(reseller), service)
+    from app.catalog_ui import nice_name
+    svc_name = nice_name(service, service_name(await services(reseller), service))
     order = await repo.create_order(reseller_id=reseller.id, member_id=member.id, service=service,
                                     service_name=svc_name, country=str(country),
                                     country_name=row.get("name"), country_iso=(row.get("flag") or None),
@@ -210,6 +263,8 @@ async def buy(reseller: Reseller, member: Member, service: str, country: str,
         raise SellError("processing")
     except NumberHubError as exc:
         await repo.fail_order(order.id)
+        if exc.code == "price_exceeded":
+            learn_ceiling(reseller.id, service, str(country), exc.data.get("price"))
         raise _map_error(exc, reseller) from exc
     except Exception:
         await repo.fail_order(order.id)
@@ -222,7 +277,15 @@ async def buy(reseller: Reseller, member: Member, service: str, country: str,
 
 
 def idempotency_key(order: Order) -> str:
-    return f"nhr-{order.reseller_id}-{order.id}-v1"
+    """Unique per order across databases. NumberHub keeps a key for 24 h per API
+    key, and the same key can sit in two databases (a test copy, a restored
+    backup), where order ids repeat. With only the ids, the live test's second
+    run collided with the first ("nhr-1-1-v1" -> idempotency_conflict), and an
+    identical body would have replayed the OLD order and its old code. The
+    creation time to the microsecond, read back from the database, is the same
+    on every retry and never repeats."""
+    stamp = order.created_at.strftime("%Y%m%d%H%M%S%f") if order.created_at else "0"
+    return f"nhr-{order.reseller_id}-{order.id}-{stamp}"
 
 
 def original_ceiling(member_price_: Decimal, markup_pct: Decimal) -> Decimal:

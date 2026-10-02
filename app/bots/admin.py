@@ -45,13 +45,25 @@ async def dashboard(reseller: Reseller):
         profit = s["sales"] - s["cost"]
         return f"📊 {label}: <b>{s['orders']}</b> sold · {money(s['sales'])} · profit ≈ <b>{money(profit)}</b>"
 
+    pct = f"{reseller.markup_pct.normalize():f}"
+    # A worked example from a real route when its price is known, else $1.00.
+    cust = selling.from_price(reseller.id, "wa")
+    if cust is not None:
+        nh = selling.original_ceiling(cust, reseller.markup_pct)
+        example = (f"<i>e.g. 💬 WhatsApp: NumberHub {money(nh)} → your customers {money(cust)} "
+                   f"→ you earn {money(cust - nh)}</i>")
+    else:
+        cust = selling.member_price(Decimal("1.00"), reseller.markup_pct)
+        example = f"<i>e.g. a $1.00 number sells for {money(cust)} → you earn {money(cust - Decimal('1.00'))}</i>"
+
     text = "\n".join([
         f"⚙️ <b>Admin panel</b> · @{esc(reseller.bot_username)}",
         "",
         f"👥 Customers: <b>{day['members']}</b>",
         line("Today", day), line("7 days", week), line("30 days", month),
         "",
-        f"💲 Your markup: <b>{reseller.markup_pct.normalize():f}%</b> on top of NumberHub's price",
+        f"💲 Your commission: <b>{pct}%</b> on top of NumberHub's price",
+        f"     {example}",
         f"🏦 NumberHub wallet: {wallet}",
         f"🔗 Share your bot: <code>t.me/{esc(reseller.bot_username)}</code>",
         "",
@@ -63,7 +75,7 @@ async def dashboard(reseller: Reseller):
     kb.button(text="➖ Remove balance", callback_data=Adm(a="remove"))
     kb.button(text="👥 Customers", callback_data=Adm(a="members"))
     kb.button(text="📣 Broadcast", callback_data=Adm(a="broadcast"))
-    kb.button(text="💲 Markup", callback_data=Adm(a="markup"))
+    kb.button(text="💲 Commission", callback_data=Adm(a="markup"))
     kb.button(text="📝 Welcome text", callback_data=Adm(a="welcome"))
     kb.button(text="🆘 Support contact", callback_data=Adm(a="support"))
     kb.button(text="🚫 Block / unblock", callback_data=Adm(a="block"))
@@ -76,7 +88,7 @@ async def dashboard(reseller: Reseller):
 PROMPTS = {
     "add": "➕ <b>Add balance</b>\n\nSend the customer's ID (or @username) and the amount.\nExample: <code>123456789 5</code>\n\n<i>Customers find their ID under 💰 Balance.</i>",
     "remove": "➖ <b>Remove balance</b>\n\nSend the customer's ID (or @username) and the amount.\nExample: <code>123456789 2.50</code>",
-    "markup": "💲 <b>Markup</b>\n\nSend your markup in percent (0–{max}). Now: <b>{now}%</b>.\nExample: <code>30</code> — a $1.00 number sells for $1.30.",
+    "markup": "💲 <b>Your commission</b>\n\nSend the percent you add on top of NumberHub's price (0–{max}). Now: <b>{now}%</b>.\nExample: <code>30</code> — a $1.00 number sells for $1.30 and you earn $0.30.",
     "welcome": "📝 <b>Welcome text</b>\n\nSend the text your customers see in the menu (up to 800 characters).\nSend <code>-</code> to go back to the default text.",
     "support": "🆘 <b>Support contact</b>\n\nSend your contact for questions and top-ups: an @username or a link (https://…).",
     "broadcast": "📣 <b>Broadcast</b>\n\nSend the message to deliver to all <b>{n}</b> customers.",
@@ -200,7 +212,7 @@ def register(r: Router) -> None:
         v = v.quantize(Decimal("0.01"))
         await repo.update_reseller(reseller.id, markup_pct=v)
         selling.invalidate_prices(reseller.id)
-        await done(m, reseller, state, f"✅ Markup set to <b>{v.normalize():f}%</b>. Prices update right away.")
+        await done(m, reseller, state, f"✅ Commission set to <b>{v.normalize():f}%</b>. Prices update right away.")
 
     @r.message(StateFilter(AdminForm.welcome), F.text)
     @owner_only

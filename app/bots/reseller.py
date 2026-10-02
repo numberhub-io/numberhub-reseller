@@ -15,15 +15,17 @@ from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app import repo, selling
-from app.bots.callbacks import Adm, Buy, Cty, Lang, Nav, Noop, Ord, Svc, SvcPage
+from app.bots.callbacks import AZ, Adm, Buy, Cty, Lang, Nav, Noop, Ord, Svc, SvcPage
+from app.catalog_ui import ANY_OTHER, LETTERS, POPULAR, by_letter, icon, letter_counts, more_popular, nice_name
 from app.i18n import LANGS, resolve, t
 from app.models import Member, Reseller
 from app.selling import SellError
 from app.texts import esc, money, order_card
 
 log = logging.getLogger(__name__)
-SVC_PAGE = 12
-CTY_PAGE = 8
+AZ_PAGE = 30
+POPULAR_CODES = {code for code, _icon, _name in POPULAR}
+CTY_PAGE = 15
 STATUS_ICON = {"buying": "⏳", "pending": "🔎", "waiting": "⏳", "received": "✅", "completed": "✅",
                "canceled": "❌", "expired": "⌛", "failed": "❌"}
 
@@ -111,16 +113,15 @@ async def menu_screen(reseller: Reseller, member: Member, lang: str, is_owner: b
     sizes = [1]
     if member.last_service and member.last_country:
         from app.numberhub import flag
-        name = selling.service_name(await selling.services(reseller), member.last_service)
+        name = await display_name(reseller, member.last_service)
         last = await repo.member_orders(member.id, limit=1)
         emoji = flag(last[0].country_iso) if last else ""
         kb.button(text=t(lang, "btn_again", service=name[:24], flag=emoji).strip(), callback_data=Nav(to="again"))
         sizes.append(1)
     kb.button(text=t(lang, "btn_orders"), callback_data=Nav(to="orders"))
     kb.button(text=t(lang, "btn_balance"), callback_data=Nav(to="balance"))
-    kb.button(text=t(lang, "btn_support"), callback_data=Nav(to="support"))
     kb.button(text=t(lang, "btn_language"), callback_data=Nav(to="lang"))
-    sizes += [2, 2]
+    sizes += [2, 1]
     if is_owner:
         kb.button(text="⚙️ Admin panel", callback_data=Adm(a="home"))
         sizes.append(1)
@@ -128,33 +129,95 @@ async def menu_screen(reseller: Reseller, member: Member, lang: str, is_owner: b
     return text, kb.as_markup()
 
 
-async def services_screen(reseller: Reseller, lang: str, page: int = 0):
+async def display_name(reseller: Reseller, code: str) -> str:
+    return nice_name(code, selling.service_name(await selling.services(reseller), code))
+
+
+def _svc_label(reseller: Reseller, code: str, name: str) -> str:
+    """'💬 WhatsApp · $0.24+' — the + marks the cheapest country's price."""
+    low = selling.from_price(reseller.id, code)
+    return f"{icon(code)} {name}" + (f" · {money(low)}+" if low is not None else "")
+
+
+def _pairs(n: int) -> list[int]:
+    return [2] * (n // 2) + ([1] if n % 2 else [])
+
+
+async def services_screen(reseller: Reseller, lang: str):
+    """Popular apps first, one tap away; then the next most popular; then A–Z.
+    Typing a name works on every screen."""
     items = await selling.services(reseller)
-    pages = max(1, (len(items) + SVC_PAGE - 1) // SVC_PAGE)
-    page = max(0, min(page, pages - 1))
+    have = {s["code"] for s in items}
     kb = InlineKeyboardBuilder()
-    for s in items[page * SVC_PAGE:(page + 1) * SVC_PAGE]:
-        kb.button(text=s["name"][:30], callback_data=Svc(code=s["code"], page=0))
-    nav = 0
-    if pages > 1:            # no "1/1" row on a single page
-        if page > 0:
-            kb.button(text="⬅️", callback_data=SvcPage(page=page - 1))
-            nav += 1
-        kb.button(text=f"{page + 1}/{pages}", callback_data=Noop())
-        nav += 1
-        if page < pages - 1:
-            kb.button(text="➡️", callback_data=SvcPage(page=page + 1))
-            nav += 1
+    shown = 0
+    for code, _icon, name in POPULAR:
+        if code in have:
+            kb.button(text=_svc_label(reseller, code, name)[:40], callback_data=Svc(code=code, page=0))
+            shown += 1
+    sizes = _pairs(shown)
+    if more_popular(items):
+        kb.button(text=t(lang, "btn_more_popular"), callback_data=AZ(l="+"))
+        sizes.append(1)
+    kb.button(text=t(lang, "btn_all_services", n=len(items)), callback_data=AZ())
+    sizes.append(1)
+    if ANY_OTHER in have:
+        kb.button(text=t(lang, "btn_any_other"), callback_data=Svc(code=ANY_OTHER, page=0))
+        sizes.append(1)
     kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
-    shown = len(items[page * SVC_PAGE:(page + 1) * SVC_PAGE])
-    kb.adjust(*([2] * (shown // 2) + ([1] if shown % 2 else [])), *([nav] if nav else []), 1)
+    sizes.append(1)
+    kb.adjust(*sizes)
     return t(lang, "svc_title"), kb.as_markup()
+
+
+async def az_screen(reseller: Reseller, lang: str, letter: str = "", page: int = 0):
+    """letter "" = the A–Z grid (also "*", the old "all services" button);
+    "+" = more popular apps; "A".."Z"/"#" = that letter's apps, A to Z.
+    App buttons carry no icon: 800 identical 📱 made the list a wall."""
+    items = await selling.services(reseller)
+    kb = InlineKeyboardBuilder()
+    if letter in ("", "*"):
+        counts = letter_counts(items)
+        letters = [x for x in LETTERS if counts.get(x)]
+        for x in letters:
+            kb.button(text=x, callback_data=AZ(l=x))
+        kb.button(text=t(lang, "btn_back"), callback_data=Nav(to="buy"))
+        kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+        kb.adjust(*([6] * (len(letters) // 6) + ([len(letters) % 6] if len(letters) % 6 else [])), 2)
+        return t(lang, "az_title", n=len(items)), kb.as_markup()
+    if letter == "+":
+        for s in more_popular(items):
+            kb.button(text=nice_name(s["code"], s["name"])[:32], callback_data=Svc(code=s["code"], page=0))
+        kb.button(text=t(lang, "btn_all_services", n=len(items)), callback_data=AZ())
+        kb.button(text=t(lang, "btn_back"), callback_data=Nav(to="buy"))
+        kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+        kb.adjust(*_pairs(len(more_popular(items))), 1, 2)
+        return t(lang, "more_title"), kb.as_markup()
+    rows = by_letter(items, letter)
+    pages = max(1, (len(rows) + AZ_PAGE - 1) // AZ_PAGE)
+    page = max(0, min(page, pages - 1))
+    chunk = rows[page * AZ_PAGE:(page + 1) * AZ_PAGE]
+    for name, code in chunk:
+        kb.button(text=name[:32], callback_data=Svc(code=code, page=0))
+    sizes = _pairs(len(chunk))
+    if pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(("⬅️", AZ(l=letter, page=page - 1)))
+        nav.append((f"{page + 1}/{pages}", Noop()))
+        if page < pages - 1:
+            nav.append(("➡️", AZ(l=letter, page=page + 1)))
+        for txt, cb in nav:
+            kb.button(text=txt, callback_data=cb)
+        sizes.append(len(nav))
+    kb.button(text=t(lang, "btn_letters"), callback_data=AZ())
+    kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+    sizes.append(2)
+    kb.adjust(*sizes)
+    return t(lang, "az_letter", letter=letter, n=len(rows)), kb.as_markup()
 
 
 def _country_label(r: dict) -> str:
     label = f"{r['emoji']} {r.get('name') or r['country']} · {money(r['member_price'])}"
-    if r.get("rate") is not None:
-        label += f" · {r['rate']}%"
     if not r.get("in_stock"):
         label += " ⏳"
     return label[:60]
@@ -162,7 +225,7 @@ def _country_label(r: dict) -> str:
 
 async def countries_screen(reseller: Reseller, lang: str, code: str, page: int = 0):
     rows = await selling.countries(reseller, code)
-    name = selling.service_name(await selling.services(reseller), code)
+    name = await display_name(reseller, code)
     kb = InlineKeyboardBuilder()
     if not rows:
         kb.button(text=t(lang, "btn_back"), callback_data=Nav(to="buy"))
@@ -187,7 +250,7 @@ async def countries_screen(reseller: Reseller, lang: str, code: str, page: int =
     kb.button(text=t(lang, "btn_back"), callback_data=Nav(to="buy"))
     kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
     kb.adjust(*([1] * len(chunk)), *([nav] if nav else []), 2)
-    text = t(lang, "cty_title", service=esc(name))
+    text = t(lang, "cty_title", service=esc(name), n=len(rows))
     if any(not r.get("in_stock") for r in chunk):
         text += f"\n<i>{t(lang, 'cty_legend')}</i>"
     return text, kb.as_markup()
@@ -202,11 +265,10 @@ async def confirm_screen(reseller: Reseller, member: Member, lang: str, code: st
         kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
         kb.adjust(2)
         return t(lang, "err_sold_out"), kb.as_markup()
-    name = selling.service_name(await selling.services(reseller), code)
+    name = await display_name(reseller, code)
     price = row["member_price"]
-    rate = t(lang, "confirm_rate", rate=row["rate"]) if row.get("rate") is not None else ""
     text = t(lang, "confirm", service=esc(name), flag=row["emoji"], country=esc(row.get("name") or cc),
-             price=money(price), rate=rate, available=money(member.available))
+             price=money(price), rate="", available=money(member.available))
     if not row.get("in_stock"):
         text += t(lang, "confirm_queued")
     if note:
@@ -286,16 +348,8 @@ def build_router(reseller_id: int) -> Router:
             await _show(c, *await services_screen(reseller, lang))
         elif to == "orders":
             await _show(c, *await orders_screen(member, lang))
-        elif to == "balance":
+        elif to in ("balance", "support"):   # support lives on the balance screen now
             await _show(c, *balance_screen(reseller, member, lang))
-        elif to == "support":
-            text = t(lang, "support", support=support_label(reseller, lang), id=member.telegram_id)
-            kb = InlineKeyboardBuilder()
-            if support_url(reseller):
-                kb.button(text=t(lang, "btn_support"), url=support_url(reseller))
-            kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
-            kb.adjust(1)
-            await _show(c, text, kb.as_markup())
         elif to == "lang":
             kb = InlineKeyboardBuilder()
             for code, label in LANGS.items():
@@ -335,14 +389,21 @@ def build_router(reseller_id: int) -> Router:
 
     # ── buying ──
     @r.callback_query(SvcPage.filter())
-    async def svc_page(c: CallbackQuery, callback_data: SvcPage, reseller: Reseller, lang: str):
-        await _show(c, *await services_screen(reseller, lang, callback_data.page))
+    async def svc_page(c: CallbackQuery, reseller: Reseller, lang: str):
+        await _show(c, *await services_screen(reseller, lang))
+        await c.answer()
+
+    @r.callback_query(AZ.filter())
+    async def az(c: CallbackQuery, callback_data: AZ, reseller: Reseller, lang: str):
+        await _show(c, *await az_screen(reseller, lang, callback_data.l, callback_data.page))
         await c.answer()
 
     @r.callback_query(Svc.filter())
-    async def svc(c: CallbackQuery, callback_data: Svc, reseller: Reseller, lang: str):
+    async def svc(c: CallbackQuery, callback_data: Svc, reseller: Reseller, lang: str, state: FSMContext):
         try:
             await _show(c, *await countries_screen(reseller, lang, callback_data.code, callback_data.page))
+            # Typing now finds a COUNTRY for this service (falls back to apps).
+            await state.update_data(svc=callback_data.code)
             await c.answer()
         except SellError:
             await c.answer(t(lang, "err_busy"), show_alert=True)
@@ -426,17 +487,57 @@ def build_router(reseller_id: int) -> Router:
 
     # ── free text = service search (last, after the admin input states) ──
     @r.message(StateFilter(None), F.text, ~F.text.startswith("/"))
-    async def search(m: Message, reseller: Reseller, lang: str):
-        found = await selling.search_services(reseller, m.text)
+    async def search(m: Message, reseller: Reseller, lang: str, state: FSMContext):
+        raw = m.text.strip()[:40]
+        q, ql = esc(raw), raw.lower()
+        # On a country list: the text is most likely a country for that app.
+        svc_code = (await state.get_data()).get("svc")
+        if svc_code:
+            try:
+                rows = await selling.countries(reseller, svc_code)
+            except SellError:
+                rows = []
+            hits = [row for row in rows if ql in (row.get("name") or "").lower()]
+            if hits:
+                kb = InlineKeyboardBuilder()
+                for row in hits[:CTY_PAGE]:
+                    kb.button(text=_country_label(row), callback_data=Cty(code=svc_code, cc=str(row["country"])))
+                kb.button(text=t(lang, "btn_back"), callback_data=Svc(code=svc_code, page=0))
+                kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+                kb.adjust(*([1] * min(len(hits), CTY_PAGE)), 2)
+                name = await display_name(reseller, svc_code)
+                await m.answer(t(lang, "cty_results", service=esc(name), q=q), reply_markup=kb.as_markup())
+                return
+        # Apps: by our clean name (ChatGPT, X (Twitter)…) and the catalog's own.
+        items = await selling.services(reseller)
+        scored = []
+        for s in items:
+            nice = nice_name(s["code"], s["name"]).lower()
+            api = (s["name"] or "").lower()
+            if nice.startswith(ql) or api.startswith(ql) or s["code"] == ql:
+                scored.append((0, s))
+            elif ql in nice or ql in api:
+                scored.append((1, s))
+        found = [s for _, s in sorted(scored, key=lambda x: x[0])][:12]
         kb = InlineKeyboardBuilder()
         for s in found:
-            kb.button(text=s["name"][:30], callback_data=Svc(code=s["code"], page=0))
-        kb.button(text=t(lang, "btn_buy"), callback_data=Nav(to="buy"))
+            name = nice_name(s["code"], s["name"])
+            label = f"{icon(s['code'])} {name}" if s["code"] in POPULAR_CODES else name
+            kb.button(text=label[:36], callback_data=Svc(code=s["code"], page=0))
+        kb.button(text=t(lang, "btn_all_services", n=len(items)), callback_data=AZ())
         kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
-        kb.adjust(*([2] * (len(found) // 2) + ([1] if len(found) % 2 else [])), 2)
-        q = esc(m.text.strip()[:40])
+        kb.adjust(*([2] * (len(found) // 2) + ([1] if len(found) % 2 else [])), 1, 1)
         await m.answer(t(lang, "svc_results", q=q) if found else t(lang, "svc_none", q=q),
                        reply_markup=kb.as_markup())
+
+    # ── any button this bot no longer knows (an old message, a bot that used to
+    #    run another router): answer it so it never spins, and open the menu ──
+    @r.callback_query()
+    async def stale(c: CallbackQuery, reseller: Reseller, member: Member, lang: str, is_owner: bool,
+                    state: FSMContext):
+        await state.clear()
+        await c.answer(t(lang, "toast_stale"))
+        await _show(c, *await menu_screen(reseller, member, lang, is_owner))
 
     return r
 
