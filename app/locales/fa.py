@@ -41,6 +41,7 @@ T = {
     "st_expired": "⌛ کدی نرسید — {price} به موجودی شما برگشت",
     "st_failed": "❌ شماره‌ای گرفته نشد — {price} به موجودی شما برگشت",
     "card_code": "🔑 کد: <code>{code}</code>",
+    "code_flash": "📞 کد با تماس از این شماره آمد: رقم‌های آخر آن را وارد کنید، <code>{last6}</code> (یا اگر برنامه ۴ رقم خواست <code>{last4}</code>).",
     "card_more_codes": "🔑 کدهای قبلی: {codes}",
     "card_held": "💵 {price} رزرو شد — فقط در صورت رسیدن کد کسر می‌شود",
     "card_paid": "💵 پرداخت‌شده: {price}",

@@ -47,6 +47,7 @@ T = {
     "st_expired": "⌛ No code arrived — {price} returned to your balance",
     "st_failed": "❌ Could not get a number — {price} returned to your balance",
     "card_code": "🔑 Code: <code>{code}</code>",
+    "code_flash": "📞 The code came as a phone call from this number: enter its last digits, <code>{last6}</code> (or <code>{last4}</code> if the app asks for 4).",
     "card_more_codes": "🔑 Earlier codes: {codes}",
     "card_held": "💵 {price} reserved — charged only if the code arrives",
     "card_paid": "💵 Paid: {price}",

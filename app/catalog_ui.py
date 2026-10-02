@@ -1,5 +1,5 @@
 """How services look in the bot: the popular apps first (icon + clean name), then
-the next most popular ones, then every service by its first letter, all with tidy
+a curated second tier, then every service by its first letter, all with tidy
 names instead of the raw catalog ones."""
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ import re
 POPULAR = [
     ("wa", "💬", "WhatsApp"), ("tg", "✈️", "Telegram"),
     ("ig", "📸", "Instagram"), ("fb", "👍", "Facebook"),
-    ("lf", "🎵", "TikTok"), ("go", "🔍", "Google · Gmail"),
-    ("dr", "🤖", "ChatGPT"), ("tw", "🐦", "X (Twitter)"),
+    ("lf", "🎵", "TikTok"), ("go", "🔍", "Google/Gmail"),
+    ("dr", "🤖", "ChatGPT"), ("tw", "🐦", "X/Twitter"),
     ("ds", "🎮", "Discord"), ("fu", "👻", "Snapchat"),
     ("am", "🛒", "Amazon"), ("wx", "🍏", "Apple"),
     ("mm", "🪟", "Microsoft"), ("vi", "💜", "Viber"),
@@ -18,18 +18,31 @@ POPULAR = [
     ("mt", "🕹", "Steam"), ("bw", "🔒", "Signal"),
     ("nf", "🎬", "Netflix"), ("ub", "🚗", "Uber"),
 ]
+# "🔥 More popular apps": well-known apps past the grid, by NumberHub code. A
+# hand-picked list, because NumberHub's catalog is ranked only for its first ~23
+# entries and lists the other ~800 in no particular order.
+MORE = [
+    ("tn", "LinkedIn"), ("wb", "WeChat"), ("me", "LINE"), ("kt", "KakaoTalk"),
+    ("bye", "WhatsApp Business"), ("mb", "Yahoo"), ("dp", "ProtonMail"), ("anj", "Gemini"),
+    ("acz", "Claude"), ("ka", "Shopee"), ("hx", "AliExpress"), ("ep", "Temu"),
+    ("aez", "Shein"), ("dh", "eBay"), ("wr", "Walmart"), ("jg", "Grab"),
+    ("tx", "Bolt"), ("tu", "Lyft"), ("rl", "inDriver"), ("uk", "Airbnb"),
+    ("alj", "Spotify"), ("hb", "Twitch"), ("aiw", "Roblox"), ("aon", "Binance"),
+    ("re", "Coinbase"), ("ij", "Revolut"), ("mo", "Bumble"), ("vz", "Hinge"),
+    ("qv", "Badoo"), ("ya", "Yandex"), ("vk", "VK"), ("tl", "Truecaller"),
+]
 ANY_OTHER = "ot"
 _POP = {code: (icon, name) for code, icon, name in POPULAR}
+_NAMES = {code: name for code, _icon, name in POPULAR} | dict(MORE)
 LETTERS = [chr(c) for c in range(ord("A"), ord("Z") + 1)] + ["#"]
-MORE_POPULAR = 30          # the "🔥 More popular apps" page
 
 
 def nice_name(code: str, api_name: str | None) -> str:
     """'facebook' -> 'Facebook', 'Google,youtube,Gmail' -> 'Google, youtube, Gmail',
     ' Caffe Nero' -> 'Caffe Nero'. Brand casing (eBay, myBCA) and domains (vk.com)
     are kept as they are."""
-    if code in _POP:
-        return _POP[code][1]
+    if code in _NAMES:
+        return _NAMES[code]
     name = re.sub(r"\s+", " ", (api_name or code)).strip()
     name = re.sub(r",(?=\S)", ", ", name)
     if name and name == name.lower() and "." not in name:
@@ -47,8 +60,9 @@ def letter_of(name: str) -> str:
 
 
 def more_popular(items: list[dict]) -> list[dict]:
-    """The catalog comes most-popular first: the next apps after the grid's own."""
-    return [s for s in items if s["code"] not in _POP and s["code"] != ANY_OTHER][:MORE_POPULAR]
+    """The curated second tier, in its own order, for the codes the catalog has."""
+    have = {s["code"]: s for s in items}
+    return [have[code] for code, _name in MORE if code in have]
 
 
 def by_letter(items: list[dict], letter: str) -> list[tuple[str, str]]:

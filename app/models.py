@@ -28,7 +28,8 @@ class Reseller(Base):
     """One selling bot: the reseller's Telegram bot + their NumberHub API key."""
     __tablename__ = "resellers"
     ACTIVE = "active"
-    DISABLED = "disabled"      # by the reseller or a platform operator
+    DISABLED = "disabled"      # paused by the reseller (they can resume it)
+    SUSPENDED = "suspended"    # disabled by a platform operator (only /enable lifts it)
     KEY_INVALID = "key_invalid"  # NumberHub rejected the API key (revoked/rotated)
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
@@ -95,6 +96,9 @@ class Order(Base):
     # canceled, expired.
     OPEN = ("buying", "pending", "waiting")
     CHARGED_STATUSES = ("received", "completed")
+    # Nothing more can happen. Any other status NumberHub reports (received, or a
+    # transient one such as requesting/reactivating) keeps being polled.
+    TERMINAL = ("completed", "canceled", "expired", "failed")
     # settled
     UNSETTLED = 0
     CHARGED = 1

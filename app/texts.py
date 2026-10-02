@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 import html
+import re
 from decimal import Decimal
 
 from aiogram.types import InlineKeyboardMarkup
@@ -57,6 +58,8 @@ def order_card(member: Member, order: Order) -> tuple[str, InlineKeyboardMarkup]
         lines.append(t(lang, "card_number", phone=esc(phone_fmt(order.phone))))
     lines.append("")
     st = order.status
+    if st not in ("buying", "pending", "waiting", "completed", "canceled", "expired", "failed"):
+        st = "received"           # received, or a transient NumberHub status after a code
     if st == "waiting":
         lines.append(t(lang, "st_waiting", left=mmss(seconds_until(order.expires_at))))
         if not codes:
@@ -71,6 +74,9 @@ def order_card(member: Member, order: Order) -> tuple[str, InlineKeyboardMarkup]
         lines.append(t(lang, f"st_{st}", price=money(order.member_price)))
     if codes:
         lines.append(t(lang, "card_code", code=esc(codes[-1])))
+        hint = flash_hint(lang, codes[-1])
+        if hint:
+            lines.append(hint)
         if len(codes) > 1:
             lines.append(t(lang, "card_more_codes", codes=", ".join(f"<code>{esc(c)}</code>" for c in codes[:-1])))
     if st in ("buying", "pending", "waiting"):
@@ -97,9 +103,26 @@ def order_card(member: Member, order: Order) -> tuple[str, InlineKeyboardMarkup]
     return "\n".join(lines), kb.as_markup()
 
 
+_CALLER = re.compile(r"^\+?\d{10,15}$")
+
+
+def flash_hint(lang: str, code: str) -> str:
+    """Some apps verify with a call: NumberHub then hands over the CALLER's
+    number (441616961154) and the code is its last digits. Say so, or the
+    member types 12 digits, the app refuses, and they paid for nothing."""
+    digits = str(code or "").strip()
+    if not _CALLER.match(digits):
+        return ""
+    digits = digits.lstrip("+")
+    return t(lang, "code_flash", last6=digits[-6:], last4=digits[-4:])
+
+
 def code_arrived(member: Member, order: Order, code: str) -> str:
-    return t(member.language or "en", "msg_code", code=esc(code), service=esc(order.service_name or order.service),
+    lang = member.language or "en"
+    text = t(lang, "msg_code", code=esc(code), service=esc(order.service_name or order.service),
              phone=esc(phone_fmt(order.phone)))
+    hint = flash_hint(lang, code)
+    return f"{text}\n\n{hint}" if hint else text
 
 
 def number_ready(member: Member, order: Order) -> str:
@@ -112,13 +135,23 @@ def refunded(member: Member, order: Order) -> str:
              price=money(order.member_price))
 
 
+_NEW_KEY = ("Send a new key in the bot where you created this shop: 🤖 My bots → 🔑 New API key. "
+            "Use a key from the same NumberHub account, so the open orders keep working.")
 OWNER_ALERTS = {
     "low_balance": ("⚠️ <b>A customer could not buy: your NumberHub balance is too low.</b>\n"
                     "Top up at numberhub.io or in @TheNumberHubBot to keep selling."),
     "daily_limit": ("⚠️ <b>Sales stopped: your NumberHub API key reached its daily spend limit.</b>\n"
-                    "Raise or remove the limit at numberhub.io → Account → API keys."),
-    "bad_key": ("⚠️ <b>NumberHub rejected your API key</b> (revoked or rotated).\n"
-                "Open the builder bot → My bots → 🔑 Change API key."),
+                    "The limit counts every number ordered, including ones that got no code and were "
+                    "refunded. Raise or remove it at numberhub.io → Account → API keys."),
+    "bad_key": "⚠️ <b>NumberHub rejected your API key</b> (revoked or rotated), so sales are paused.\n" + _NEW_KEY,
+    "key_scope": ("⚠️ <b>Your NumberHub API key is missing a permission</b>, so sales are paused.\n"
+                  "The key needs catalog, orders (read and write) and wallet access. " + _NEW_KEY),
+    "key_ip": ("⚠️ <b>Your NumberHub API key only works from certain IP addresses</b>, and this "
+               "server is not one of them, so sales are paused.\nRemove the IP limit on the key at "
+               "numberhub.io → Account → API keys, or " + _NEW_KEY[0].lower() + _NEW_KEY[1:]),
+    "route_cap": ("⚠️ <b>A customer could not buy: your NumberHub account has the most open orders it "
+                  "may have for one app and country</b> (all your shops count together). It frees up "
+                  "as those orders finish."),
 }
 
 

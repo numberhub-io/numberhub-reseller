@@ -41,6 +41,7 @@ T = {
     "st_expired": "⌛ कोई कोड नहीं आया — {price} बैलेंस में वापस",
     "st_failed": "❌ नंबर नहीं मिल सका — {price} बैलेंस में वापस",
     "card_code": "🔑 कोड: <code>{code}</code>",
+    "code_flash": "📞 कोड इस नंबर से कॉल के रूप में आया: इसके आख़िरी अंक डालें, <code>{last6}</code> (या <code>{last4}</code>, अगर ऐप 4 अंक माँगे)।",
     "card_more_codes": "🔑 पिछले कोड: {codes}",
     "card_held": "💵 {price} रिज़र्व — सिर्फ़ कोड आने पर कटेगा",
     "card_paid": "💵 भुगतान: {price}",

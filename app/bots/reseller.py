@@ -48,11 +48,23 @@ class Context(BaseMiddleware):
         self.reseller_id = reseller_id
 
     async def __call__(self, handler, event, data):
+        # Private chats only: an order card shown in a group would hand the
+        # member's number and SMS code to everyone in it.
+        chat = event.chat if isinstance(event, Message) else (event.message.chat if event.message else None)
+        if chat is None or chat.type != "private":
+            if isinstance(event, CallbackQuery):
+                try:
+                    await event.answer()
+                except Exception:  # noqa: BLE001
+                    pass
+            return None
         reseller = await repo.get_reseller(self.reseller_id)
         user = data.get("event_from_user")
         if reseller is None or user is None:
             return None
         is_owner = user.id == reseller.owner_id
+        if is_owner:
+            await _leave_admin_form(event, data.get("state"))
         member = await repo.get_or_create_member(reseller.id, user.id, user.username, user.full_name,
                                                  resolve(user.language_code))
         lang = member.language or "en"
@@ -67,6 +79,23 @@ class Context(BaseMiddleware):
             return None
         data.update(reseller=reseller, member=member, lang=lang, is_owner=is_owner)
         return await handler(event, data)
+
+
+async def _leave_admin_form(event, state: FSMContext | None) -> None:
+    """An admin prompt (broadcast, welcome text, …) ends as soon as the owner does
+    anything else: a command, or a button outside the admin panel. Otherwise a
+    later search ("whatsapp") would go out to every customer as a broadcast."""
+    if state is None:
+        return
+    current = await state.get_state()
+    if not current or not current.startswith("AdminForm:"):
+        return
+    if isinstance(event, Message):
+        leaving = (event.text or "").startswith("/")
+    else:
+        leaving = not (event.data or "").startswith("a:")
+    if leaving:
+        await state.set_state(None)
 
 
 async def _reply(event, text: str) -> None:
@@ -231,7 +260,7 @@ async def countries_screen(reseller: Reseller, lang: str, code: str, page: int =
     name = await display_name(reseller, code)
     kb = InlineKeyboardBuilder()
     if not rows:
-        kb.button(text=t(lang, "btn_back"), callback_data=Nav(to="buy"))
+        kb.button(text=t(lang, "btn_back"), callback_data=Nav(to="apps"))
         kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
         kb.adjust(2)
         return f"<b>{esc(name)}</b>\n\n{t(lang, 'cty_empty')}", kb.as_markup()
@@ -250,7 +279,7 @@ async def countries_screen(reseller: Reseller, lang: str, code: str, page: int =
         if page < pages - 1:
             kb.button(text="➡️", callback_data=Svc(code=code, page=page + 1))
             nav += 1
-    kb.button(text=t(lang, "btn_back"), callback_data=Nav(to="buy"))
+    kb.button(text=t(lang, "btn_back"), callback_data=Nav(to="apps"))
     kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
     kb.adjust(*([1] * len(chunk)), *([nav] if nav else []), 2)
     text = t(lang, "cty_title", service=esc(name), n=len(rows))
@@ -259,12 +288,13 @@ async def countries_screen(reseller: Reseller, lang: str, code: str, page: int =
     return text, kb.as_markup()
 
 
-async def confirm_screen(reseller: Reseller, member: Member, lang: str, code: str, cc: str, note: str = ""):
+async def confirm_screen(reseller: Reseller, member: Member, lang: str, code: str, cc: str, note: str = "",
+                         back_page: int = 0):
     rows = await selling.countries(reseller, code)
     row = next((r for r in rows if str(r["country"]) == str(cc)), None)
     kb = InlineKeyboardBuilder()
     if row is None:
-        kb.button(text=t(lang, "btn_back"), callback_data=Svc(code=code, page=0))
+        kb.button(text=t(lang, "btn_back"), callback_data=Svc(code=code, page=back_page))
         kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
         kb.adjust(2)
         return t(lang, "err_sold_out"), kb.as_markup()
@@ -282,7 +312,7 @@ async def confirm_screen(reseller: Reseller, member: Member, lang: str, code: st
     if member.available < price:
         kb.button(text=t(lang, "btn_topup"), callback_data=Nav(to="balance"))
         sizes.append(1)
-    kb.button(text=t(lang, "btn_back"), callback_data=Svc(code=code, page=0))
+    kb.button(text=t(lang, "btn_back"), callback_data=Svc(code=code, page=back_page))
     kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
     sizes.append(2)
     kb.adjust(*sizes)
@@ -345,9 +375,15 @@ def build_router(reseller_id: int) -> Router:
     @r.callback_query(Nav.filter())
     async def nav(c: CallbackQuery, callback_data: Nav, reseller: Reseller, member: Member, lang: str,
                   is_owner: bool, state: FSMContext):
+        data = await state.get_data()
         await state.clear()
         to = callback_data.to
-        if to == "buy":
+        if to == "apps" and data.get("az"):
+            # Back from a country list: to the A–Z page the app was picked on.
+            letter, page = data["az"]
+            await state.update_data(az=[letter, page])
+            await _show(c, *await az_screen(reseller, lang, letter, page))
+        elif to in ("buy", "apps"):
             await _show(c, *await services_screen(reseller, lang))
         elif to == "orders":
             await _show(c, *await orders_screen(member, lang))
@@ -361,7 +397,12 @@ def build_router(reseller_id: int) -> Router:
             kb.adjust(2)
             await _show(c, t(lang, "lang_title"), kb.as_markup())
         elif to == "again" and member.last_service and member.last_country:
-            await _show(c, *await confirm_screen(reseller, member, lang, member.last_service, member.last_country))
+            try:
+                await _show(c, *await confirm_screen(reseller, member, lang, member.last_service,
+                                                     member.last_country))
+            except SellError:
+                await c.answer(t(lang, "err_busy"), show_alert=True)
+                return
         else:
             await _show(c, *await menu_screen(reseller, member, lang, is_owner))
         await c.answer()
@@ -397,24 +438,32 @@ def build_router(reseller_id: int) -> Router:
         await c.answer()
 
     @r.callback_query(AZ.filter())
-    async def az(c: CallbackQuery, callback_data: AZ, reseller: Reseller, lang: str):
+    async def az(c: CallbackQuery, callback_data: AZ, reseller: Reseller, lang: str, state: FSMContext):
         await _show(c, *await az_screen(reseller, lang, callback_data.l, callback_data.page))
+        # Remember the page, so Back from a country list comes here again.
+        await state.update_data(az=[callback_data.l, callback_data.page] if callback_data.l not in ("", "*")
+                                else None)
         await c.answer()
 
     @r.callback_query(Svc.filter())
     async def svc(c: CallbackQuery, callback_data: Svc, reseller: Reseller, lang: str, state: FSMContext):
         try:
             await _show(c, *await countries_screen(reseller, lang, callback_data.code, callback_data.page))
-            # Typing now finds a COUNTRY for this service (falls back to apps).
-            await state.update_data(svc=callback_data.code)
+            # Typing now finds a COUNTRY for this service (falls back to apps),
+            # and Back from a country returns to this page of the list.
+            await state.update_data(svc=callback_data.code, cpage=callback_data.page)
             await c.answer()
         except SellError:
             await c.answer(t(lang, "err_busy"), show_alert=True)
 
     @r.callback_query(Cty.filter())
-    async def cty(c: CallbackQuery, callback_data: Cty, reseller: Reseller, member: Member, lang: str):
+    async def cty(c: CallbackQuery, callback_data: Cty, reseller: Reseller, member: Member, lang: str,
+                  state: FSMContext):
+        data = await state.get_data()
+        page = int(data.get("cpage") or 0) if data.get("svc") == callback_data.code else 0
         try:
-            await _show(c, *await confirm_screen(reseller, member, lang, callback_data.code, callback_data.cc))
+            await _show(c, *await confirm_screen(reseller, member, lang, callback_data.code, callback_data.cc,
+                                                 back_page=page))
             await c.answer()
         except SellError:
             await c.answer(t(lang, "err_busy"), show_alert=True)
@@ -426,20 +475,26 @@ def build_router(reseller_id: int) -> Router:
         try:
             order = await selling.buy(reseller, member, callback_data.code, callback_data.cc, shown)
         except SellError as exc:
+            if exc.reason == "duplicate":
+                return                  # a double tap: the first tap is buying and shows the card
             fresh = await repo.get_member(member.id) or member
             if exc.reason == "price_changed":
                 note = t(lang, "err_price_changed", price=money(exc.price))
-                await _show(c, *await confirm_screen(reseller, fresh, lang, callback_data.code, callback_data.cc, note))
-                return
+                try:
+                    await _show(c, *await confirm_screen(reseller, fresh, lang, callback_data.code,
+                                                         callback_data.cc, note))
+                    return
+                except SellError as again:
+                    exc = again
             kb = InlineKeyboardBuilder()
             if exc.reason == "no_credit" and support_url(reseller):
                 kb.button(text=t(lang, "btn_support"), url=support_url(reseller))
-            if exc.reason == "no_credit":
-                # Back to the same number, ready to buy once the balance is added.
+            if exc.reason in ("no_credit", "busy", "failed"):
+                # Back to the same number, ready to try again.
                 kb.button(text=t(lang, "btn_back"), callback_data=Cty(code=callback_data.code, cc=callback_data.cc))
             if exc.reason in ("sold_out",):
                 kb.button(text=t(lang, "btn_back"), callback_data=Svc(code=callback_data.code, page=0))
-            if exc.reason == "processing":
+            if exc.reason in ("processing", "too_many_open"):
                 kb.button(text=t(lang, "btn_orders"), callback_data=Nav(to="orders"))
             kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
             kb.adjust(1)
@@ -447,7 +502,11 @@ def build_router(reseller_id: int) -> Router:
             return
         except Exception:  # noqa: BLE001
             log.exception("buy crashed")
-            await _show(c, t(lang, "err_failed"))
+            kb = InlineKeyboardBuilder()
+            kb.button(text=t(lang, "btn_orders"), callback_data=Nav(to="orders"))
+            kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+            kb.adjust(1)
+            await _show(c, t(lang, "err_failed"), kb.as_markup())
             return
         await repo.set_member_last(member.id, callback_data.code, callback_data.cc)
         text, kb = order_card(member, order)
@@ -500,7 +559,9 @@ def build_router(reseller_id: int) -> Router:
                 rows = await selling.countries(reseller, svc_code)
             except SellError:
                 rows = []
-            hits = [row for row in rows if ql in (row.get("name") or "").lower()]
+            # By name, or by the 2-letter code (de, us, gb) that works in any language.
+            hits = [row for row in rows if ql in (row.get("name") or "").lower()
+                    or (len(ql) == 2 and ql == (row.get("flag") or "").lower())]
             if hits:
                 kb = InlineKeyboardBuilder()
                 for row in hits[:CTY_PAGE]:
@@ -527,9 +588,14 @@ def build_router(reseller_id: int) -> Router:
             name = nice_name(s["code"], s["name"])
             label = f"{icon(s['code'])} {name}" if s["code"] in POPULAR_CODES else name
             kb.button(text=label[:36], callback_data=Svc(code=s["code"], page=0))
+        tail = []
+        if svc_code:
+            # Typed on a country list and matched nothing there: the way back to it.
+            kb.button(text=t(lang, "btn_back"), callback_data=Svc(code=svc_code, page=0))
+            tail.append(1)
         kb.button(text=t(lang, "btn_all_services", n=len(items)), callback_data=AZ())
         kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
-        kb.adjust(*([2] * (len(found) // 2) + ([1] if len(found) % 2 else [])), 1, 1)
+        kb.adjust(*_pairs(len(found)), *tail, 1, 1)
         await m.answer(t(lang, "svc_results", q=q) if found else t(lang, "svc_none", q=q),
                        reply_markup=kb.as_markup())
 
@@ -550,6 +616,7 @@ def parse_amount(raw: str) -> Decimal | None:
         v = Decimal(raw.replace("$", "").replace(",", ".").strip())
     except (InvalidOperation, ValueError):
         return None
-    if not v.is_finite() or v <= 0 or v > 100000:
+    if not v.is_finite() or v > 100000:
         return None
-    return v.quantize(Decimal("0.01"))
+    v = v.quantize(Decimal("0.01"))
+    return v if v > 0 else None        # "0.004" would have added "$0.00"

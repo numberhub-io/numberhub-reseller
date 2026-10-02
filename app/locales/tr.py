@@ -41,6 +41,7 @@ T = {
     "st_expired": "⌛ Kod gelmedi — {price} bakiyenize iade edildi",
     "st_failed": "❌ Numara alınamadı — {price} bakiyenize iade edildi",
     "card_code": "🔑 Kod: <code>{code}</code>",
+    "code_flash": "📞 Kod bu numaradan gelen bir aramayla geldi: son rakamlarını girin, <code>{last6}</code> (uygulama 4 hane isterse <code>{last4}</code>).",
     "card_more_codes": "🔑 Önceki kodlar: {codes}",
     "card_held": "💵 {price} ayrıldı — yalnızca kod gelirse ödenir",
     "card_paid": "💵 Ödendi: {price}",

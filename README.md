@@ -50,8 +50,8 @@ Background loops in `main.py`:
 
 | Loop | Every | What it does |
 |---|---|---|
-| sync | 5 s (`SYNC_INTERVAL_SEC`) | For each running shop with open orders: one `GET /orders?limit=100`, copies status, number and codes into the local order, settles orders that ended, sends codes to customers, and refreshes the live order card (at most every 20 s unless something changed) |
-| sweep | 30 s | Settles any ended order still unsettled, and finishes purchases whose reply from NumberHub was lost (see [Money rules](#money-rules)) |
+| sync | 5 s (`SYNC_INTERVAL_SEC`) | For each shop with open orders, 8 shops at a time, even while its Telegram bot is reconnecting: one `GET /orders?limit=100`, plus a few `GET /numbers/{id}` per pass for live orders older than the newest 100. It copies status, number and codes into the local order, settles orders that ended, sends codes to customers, and refreshes the live order card (at most every 20 s unless something changed). A 429 or a key problem backs that shop off instead of retrying every 5 s |
+| sweep | 30 s | Settles any ended order still unsettled, finishes purchases whose outcome was unclear, and cancels any number nobody holds money for (see [Money rules](#money-rules)) |
 | warm | 120 s | Refreshes the "from" price of the 20 popular apps for each shop, one request every 0.5 s, so the app picker can show `WhatsApp · $0.24+` without waiting |
 
 NumberHub allows 60 requests per 10 seconds per API key. One sync request per shop every 5 seconds plus the warm loop stays well under that.
@@ -61,30 +61,34 @@ NumberHub allows 60 requests per 10 seconds per API key. One sync request per sh
 Everything below is in the customer's Telegram language when it is one of the 14 supported ones (English, Russian, Arabic, Spanish, Portuguese, French, Indonesian, Hindi, Bengali, Turkish, Persian, Urdu, Chinese, Vietnamese). Customers can switch with 🌐 Language. Customers never see the word NumberHub; the shop is the reseller's.
 
 1. Menu. A welcome line (the reseller can write their own), the customer's balance, and buttons for buying, 🔁 buying the same app and country again, 🧾 My orders, 💰 Balance and 🌐 Language.
-2. Pick an app. The 20 most used apps are one tap away with their icon and the cheapest price, for example `💬 WhatsApp · $0.24+`. Below them: 🔥 More popular apps (the next 30 in NumberHub's popularity order), 🔤 All apps A to Z (a letter grid; each letter lists its apps alphabetically, 30 per page) and ❓ Any other app for sites that are not listed. Typing a name on any screen searches, so `tik` finds TikTok.
+2. Pick an app. The 20 most used apps are one tap away with their icon and the cheapest price, for example `💬 WhatsApp · $0.24+`. Below them: 🔥 More popular apps (32 more well-known apps such as LinkedIn, WeChat, Shopee and Binance, picked by hand because NumberHub ranks only the top of its catalog), 🔤 All apps A to Z (a letter grid; each letter lists its apps alphabetically, 30 per page) and ❓ Any other app for sites that are not listed. Typing a name on any screen searches, so `tik` finds TikTok.
 3. Pick a country. Countries come best first: in stock and delivering well, then weaker ones, then countries with no number free right now (marked ⏳; buying one queues the order until a number appears). Each button shows the customer's price, for example `🇺🇸 USA · $0.39`. Typing a country name filters the list.
 4. Confirm. The price, a line that says the customer is charged only if the code arrives, and the customer's balance. If the balance is too low, the screen says how to top up.
-5. The order card. The number (tap to copy), a 20 minute countdown, and the code as soon as it arrives. The code is also sent as a separate message. A cancel button unlocks after about 2 minutes (NumberHub refuses earlier cancels) and shows the seconds left until then. The card updates by itself.
+5. The order card. The number (tap to copy), a 20 minute countdown, and the code as soon as it arrives. The code is also sent as a separate message. When an app verified by phone call, the "code" is the caller's number, and the card says to type its last 6 (or 4) digits. A cancel button unlocks after about 2 minutes (NumberHub refuses earlier cancels) and shows the seconds left until then. The card updates by itself.
 6. No code means no charge. If the time runs out or the customer cancels, the reserved amount goes back and the customer gets a message saying so.
 
-Under 💰 Balance customers see their ID. That is what they send to the reseller when they want to top up.
+Under 💰 Balance customers see their ID. That is what they send to the reseller when they want to top up. The shop bot only works in private chats; in a group it stays silent, so nobody's number or code is shown to the group.
 
 ## Guide for resellers
 
 ### What you need
 
 1. A Telegram bot token. In Telegram open @BotFather, send `/newbot`, choose a name and a username, and copy the token (it looks like `123456789:AAH...`).
-2. A NumberHub API key with money in the wallet. Sign in at numberhub.io, open Account, then API keys, then Create key. The key starts with `nh_`. One key per bot is a good habit, and you can give the key a daily spend limit.
+2. A NumberHub API key with money in the wallet. Sign in at numberhub.io, open Account, then API keys, then Create key, and leave every permission ticked (the shop needs catalog, orders read and write, and wallet). The key starts with `nh_`. One key per bot is a good habit. A daily spend limit on the key counts every number ordered, including the ones that got no code and were refunded, so set it well above what you expect to sell.
 
 ### Create your bot
 
 Open the builder bot and tap ➕ Create my bot. It asks for three things:
 
-1. The bot token. The builder deletes your message as soon as it has read it, checks the token with Telegram, and refuses a token that is already connected.
-2. The API key. It is deleted from the chat too, checked live against NumberHub, and your wallet balance is shown.
-3. Your commission: tap 20%, 30%, 50% or 100%, or type any number from 0 to 300.
+1. The bot token. The builder deletes your message as soon as it has read it and checks the token with Telegram. If the bot used a webhook somewhere else, the builder switches it over.
+2. The API key. It is deleted from the chat too and checked live against NumberHub, permission by permission, and your wallet balance is shown. After three rejected keys in 10 minutes the builder asks you to wait: a burst of bad keys from one server makes NumberHub block that server, which would stop every shop.
+3. Your commission: tap 20%, 30% (marked ⭐, the default), 50% or 100%, or type any number from 0 to 300.
 
-Your bot starts selling immediately. 🤖 My bots in the builder lists your bots (up to 3 per person) with sales, profit and status, and lets you pause or resume a bot or replace its API key. A paused bot stops selling but keeps running: customers are told it is paused, and orders bought before the pause still get their codes and can still be cancelled.
+Your own @username becomes the shop's support contact, so customers know who to send their ID to. You can change it in the admin panel.
+
+If you revoke the bot's token in @BotFather, tap ➕ Create my bot again and send the new token of the same bot. The builder recognises the bot and reconnects it with all its customers, balances and orders; nobody else can take over a bot you connected.
+
+Your bot starts selling immediately. 🤖 My bots in the builder lists your bots (up to 3 per person) with sales, profit and status, and lets you pause or resume a bot or replace its API key. A paused bot stops selling but keeps running: customers are told it is paused, and orders bought before the pause still get their codes and can still be cancelled. While the bot has open orders, a new API key must come from the same NumberHub account, because those orders live there; the builder checks this.
 
 ### Your admin panel
 
@@ -111,7 +115,9 @@ The shop bot messages you, at most once an hour per problem, when:
 
 - your NumberHub balance is too low for a customer's purchase (top up at numberhub.io; sales continue as soon as there is money),
 - your API key reached its daily spend limit,
-- NumberHub rejected your API key (it was revoked or rotated). Send a new one with 🤖 My bots, then 🔑 New API key.
+- NumberHub rejected your API key (it was revoked or rotated). Send a new one with 🤖 My bots, then 🔑 New API key,
+- the key is missing a permission, or only works from certain IP addresses,
+- your account has as many open orders for one app and country as NumberHub allows (all your shops count together).
 
 While any of these lasts, customers who try to buy are told that buying is paused for a moment, and nothing is held from them.
 
@@ -121,11 +127,12 @@ These rules are covered by `tests/run_tests.py`.
 
 A purchase goes like this:
 
-1. The bot looks up the current price and checks it against the price on the button the customer tapped. If the price went up, nothing is held and the confirm screen is shown again with the new price.
-2. The customer's price is held on their balance with one conditional SQL update that fails if the balance is too low. Nothing is charged yet.
-3. The bot buys at NumberHub with `POST /numbers`, sending `max_price` (the route's highest price) and an `Idempotency-Key` that is unique to this local order.
-4. If NumberHub says no, the hold goes back at once. If the reply is lost (timeout, network error, 5xx), the request is retried with the same key, so NumberHub returns the first result instead of buying a second number. If the outcome is still unknown, the order stays in the `buying` state and the sweep loop asks again a minute later with the same key and a byte for byte identical body, rebuilt from the stored price and commission.
-5. When the NumberHub order ends, the local order is settled exactly once: the hold is charged if a code arrived and released if not. The claim and the balance change happen in one transaction, so the sync loop, the sweep loop and a customer's cancel tap cannot settle the same order twice.
+1. The bot looks up the current price and checks it against the price on the button the customer tapped. If the price went up, nothing is held and the confirm screen is shown again with the new price. A customer without enough balance is told so before any request reaches NumberHub.
+2. The customer's price is held on their balance and the order row is created, in one transaction. Nothing is charged yet. A customer can run one purchase at a time, so a double tap buys one number.
+3. The bot buys at NumberHub with `POST /numbers`, sending `max_price` (the route's highest price) and an `Idempotency-Key` that is unique to this order, including across databases (it carries the order's creation time).
+4. If NumberHub's purchase handler says no (sold out, price changed, wallet empty), the hold goes back at once. Any other trouble keeps the hold: a lost reply, a 5xx, or an answer from the layers in front of the handler (429, 401/403, "still in progress") after a request may already have arrived. The bot retries with the same key, so NumberHub returns the first result instead of buying a second number. If the outcome is still unknown, the order stays `buying` and the sweep asks again every 30 seconds with the same key and a byte for byte identical body. It never touches an order a live purchase is still working on, and gives the hold back after 20 hours (NumberHub forgets keys after 24, and a later replay would be a new purchase).
+5. If a purchase that was given up on turns out to exist, the customer's hold is taken again and the order reopens. If the customer no longer has the money, the number is cancelled at NumberHub so no code arrives that nobody pays for.
+6. When the NumberHub order ends, the local order is settled exactly once: the hold is charged if a code arrived and released if not. The claim and the balance change happen in one transaction, so the sync loop, the sweep loop and a customer's cancel tap cannot settle the same order twice. Status updates only move forward, so a list fetched before a cancel can't reopen the cancelled order.
 
 Other rules:
 
@@ -164,7 +171,7 @@ Every setting is an environment variable, or a line in `.env`.
 | `DB_URL` | `sqlite+aiosqlite:///./reseller.db` | Database. SQLite is the tested choice |
 | `NUMBERHUB_API` | `https://api.numberhub.io/v1` | NumberHub API base URL |
 | `NUMBERHUB_SITE` | `https://numberhub.io` | Shown to resellers in the builder's instructions |
-| `DEFAULT_MARKUP_PCT` | `30` | Commission a new shop starts with |
+| `DEFAULT_MARKUP_PCT` | `30` | The commission the builder marks as recommended (⭐) when a shop is created |
 | `MAX_MARKUP_PCT` | `300` | Highest commission a reseller may set |
 | `SYNC_INTERVAL_SEC` | `5` | How often open orders are synced with NumberHub |
 | `MAX_OPEN_PER_MEMBER` | `10` | Open orders one customer may have |
@@ -172,17 +179,22 @@ Every setting is an environment variable, or a line in `.env`.
 
 ## Deploy on a Linux server
 
-The steps below assume Ubuntu or Debian with systemd and put the app in `/opt/numberhub-reseller`, run by a user called `reseller`. The unit file and backup script are in `deploy/`.
+The steps below assume Ubuntu or Debian with systemd. The code lives in `/opt/numberhub-reseller` and belongs to your admin account; the service runs as a separate user called `reseller` that can read the code but write only its data directory, `/var/lib/numberhub-reseller`. The unit file and backup script are in `deploy/`.
+
+The repository is private, so clone it with an account that can read it (your own SSH key, or a read-only deploy key on the server):
 
 ```bash
-sudo adduser --system --group --home /opt/numberhub-reseller reseller
 sudo apt install -y python3-venv sqlite3 git
-sudo -u reseller git clone git@github.com:numberhub-io/numberhub-reseller.git /opt/numberhub-reseller
+sudo adduser --system --group --home /var/lib/numberhub-reseller reseller
+sudo mkdir /opt/numberhub-reseller && sudo chown "$USER": /opt/numberhub-reseller
+git clone git@github.com:numberhub-io/numberhub-reseller.git /opt/numberhub-reseller
 cd /opt/numberhub-reseller
-sudo -u reseller python3 -m venv .venv
-sudo -u reseller .venv/bin/pip install -r requirements.txt
-sudo -u reseller cp .env.example .env      # then edit it: SECRET_KEY, BUILDER_BOT_TOKEN, ADMIN_IDS
-sudo chmod 600 .env
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+cp .env.example .env
+# edit .env: SECRET_KEY, BUILDER_BOT_TOKEN, ADMIN_IDS, and
+#   DB_URL=sqlite+aiosqlite:////var/lib/numberhub-reseller/reseller.db
+sudo chown root:reseller .env && sudo chmod 640 .env
 sudo cp deploy/numberhub-reseller.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now numberhub-reseller
@@ -195,16 +207,28 @@ To update:
 
 ```bash
 cd /opt/numberhub-reseller
-sudo -u reseller git pull
-sudo -u reseller .venv/bin/pip install -r requirements.txt
+git pull
+.venv/bin/pip install -r requirements.txt
 sudo systemctl restart numberhub-reseller
 ```
 
-A restart is safe: on SIGTERM the process stops taking new updates and waits up to 60 seconds for purchases already in progress. Anything that was cut off anyway is finished by the sweep loop after the restart.
+A restart is safe: on SIGTERM every bot stops taking new updates first, then purchases already in progress get up to 60 seconds, and only then are the connections closed. Anything still unclear after that is finished by the sweep loop after the restart. The process then exits on its own, so systemd's `Restart=always` brings it back after a crash too.
 
 The database schema is created on first start (`create_all`). There is no migration tool yet, so a release that adds a column to an existing table has to come with its own `ALTER TABLE` step.
 
-Backups: `deploy/backup.sh` makes a consistent copy with `sqlite3 .backup` while the bots run and keeps 14 days. Run it from cron, for example `17 */6 * * * /opt/numberhub-reseller/deploy/backup.sh`, and copy the backups and `SECRET_KEY` to a second machine. A backup on the same disk does not survive the disk.
+Backups: `deploy/backup.sh` reads `DB_URL` from `.env`, makes a consistent copy with `sqlite3 .backup` while the bots run, and keeps 14 days in a `backups` folder next to the database. Run it from root's cron, for example `17 */6 * * * /opt/numberhub-reseller/deploy/backup.sh`, and copy the backups and `SECRET_KEY` to a second machine. A backup on the same disk does not survive the disk.
+
+To restore a backup, stop the service first and remove the old WAL files, or SQLite may replay them over the restored copy:
+
+```bash
+sudo systemctl stop numberhub-reseller
+cd /var/lib/numberhub-reseller
+sudo rm -f reseller.db-wal reseller.db-shm
+gunzip -c backups/reseller-20261002T061700Z.db.gz | sudo -u reseller tee reseller.db > /dev/null
+sudo systemctl start numberhub-reseller
+```
+
+A restore takes balances and orders back to the moment of the backup. Purchases made after it are still on the resellers' NumberHub accounts; compare with their NumberHub order lists before adding any balance back by hand.
 
 ## Operating the platform
 
@@ -213,10 +237,10 @@ Operators listed in `ADMIN_IDS` have three commands in the builder bot:
 | Command | What it does |
 |---|---|
 | `/platform` | Every shop with its number, owner, status, customers and 7 day sales |
-| `/disable 12` | Stops new sales in shop number 12. Its customers are told it is paused; open orders still finish |
+| `/disable 12` | Stops new sales in shop number 12. Its customers are told it is paused and open orders still finish. The owner can't undo it (no resume, no new key, no broadcasts) |
 | `/enable 12` | Lets it sell again |
 
-Useful log lines: `reseller N created by ...` (a new shop), `bought order ...` (a sale), `order N settled: member X charged|refunded`, `recovered purchase` (a lost reply that the sweep finished), and `sync failed for reseller N` (look at the traceback below it).
+Useful log lines: `reseller N created by ...` (a new shop), `reseller N reconnected` (a new token for an existing bot), `bought order ...` (a sale), `order N settled: member X charged|refunded`, `recovered purchase` (an unclear purchase that the sweep finished), `given back` (a number nobody was holding money for, cancelled at NumberHub), and `sync failed for reseller N` (look at the traceback below it). A line at ERROR level always deserves a look.
 
 ## Tests
 
@@ -258,7 +282,7 @@ It loads the catalog, buys the cheapest WhatsApp number in stock, checks the hol
 
 ## Troubleshooting
 
-The bot does not answer at all. Check `journalctl -u numberhub-reseller` for `stopped with an error`. A revoked bot token stops that one shop; the reseller has to create the bot again with the new token. If the log shows `TelegramConflictError`, a second copy of the process (or another program) is polling the same token.
+The bot does not answer at all. Check `journalctl -u numberhub-reseller` for `stopped with an error` (the bot retries on its own, with backoff) or `Telegram rejected the token`. A revoked token stops that one shop until the owner sends the new token through ➕ Create my bot, which reconnects the same bot. If the log shows `TelegramConflictError`, a second copy of the process (or another program) is polling the same token.
 
 Customers keep seeing "price changed". The price on NumberHub moved between the list and the purchase. The bot shows the new price and the next tap buys; if it repeats for one route, the route's price is moving fast or is out of stock.
 
@@ -266,4 +290,4 @@ Customers keep seeing "price changed". The price on NumberHub moved between the 
 
 A customer says they were charged without a code. A charge only happens when NumberHub reports the order as received or completed, or reports a code. In the database, `orders` holds each order's status and codes and `member_tx` has an audit row for every change to the customer's balance.
 
-`SECRET_KEY` was lost. The stored bot tokens and API keys cannot be decrypted. Customer balances and orders are still in the database, but each reseller has to connect their bot token and API key again.
+`SECRET_KEY` was lost. The stored bot tokens and API keys cannot be decrypted, and the log says so for each shop. Customer balances and orders are still in the database: each reseller sends their bot token again through ➕ Create my bot, then their API key, and the shop comes back as it was.

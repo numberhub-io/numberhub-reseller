@@ -45,7 +45,7 @@ async def dashboard(reseller: Reseller):
         profit = s["sales"] - s["cost"]
         return f"📊 {label}: <b>{s['orders']}</b> sold · {money(s['sales'])} · profit ≈ <b>{money(profit)}</b>"
 
-    pct = f"{reseller.markup_pct.normalize():f}"
+    commission = pct(reseller.markup_pct)
     # A worked example from a real route when its price is known, else $1.00.
     cust = selling.from_price(reseller.id, "wa")
     if cust is not None:
@@ -62,7 +62,7 @@ async def dashboard(reseller: Reseller):
         f"👥 Customers: <b>{day['members']}</b>",
         line("Today", day), line("7 days", week), line("30 days", month),
         "",
-        f"💲 Your commission: <b>{pct}%</b> on top of NumberHub's price",
+        f"💲 Your commission: <b>{commission}%</b> on top of NumberHub's price",
         f"     {example}",
         f"🏦 NumberHub wallet: {wallet}",
         f"🔗 Share your bot: <code>t.me/{esc(reseller.bot_username)}</code>",
@@ -83,6 +83,15 @@ async def dashboard(reseller: Reseller):
     kb.button(text="🏠 Menu", callback_data=Nav(to="menu"))
     kb.adjust(2, 2, 2, 2, 2)
     return text, kb.as_markup()
+
+
+AMBIGUOUS = ("❌ More than one of your customers has used that username. Send their ID instead "
+             "(they find it under 💰 Balance; 👥 Customers lists it too).")
+
+
+def pct(v: Decimal) -> str:
+    """30 -> '30', 12.50 -> '12.5' (never '3E+1')."""
+    return f"{Decimal(v).normalize():f}"
 
 
 PROMPTS = {
@@ -144,9 +153,12 @@ def register(r: Router) -> None:
             kb = InlineKeyboardBuilder()
             kb.button(text="⬅️ Admin panel", callback_data=Adm(a="home"))
             await show(c, "\n".join(lines), kb.as_markup())
+        elif a == "broadcast" and reseller.status == Reseller.SUSPENDED:
+            await c.answer("This bot was disabled by the platform: broadcasts are off.", show_alert=True)
+            return
         elif a in PROMPTS:
             n = len(await repo.member_chat_ids(reseller.id)) if a == "broadcast" else 0
-            text = PROMPTS[a].format(max=settings.max_markup_pct.normalize(), now=reseller.markup_pct.normalize(), n=n)
+            text = PROMPTS[a].format(max=pct(settings.max_markup_pct), now=pct(reseller.markup_pct), n=n)
             await state.set_state(getattr(AdminForm, a))
             await show(c, text, _cancel_kb())
         await c.answer()
@@ -160,7 +172,10 @@ def register(r: Router) -> None:
         parts = (m.text or "").split()
         if len(parts) != 2:
             return None, None, "Send two things: the customer's ID (or @username) and the amount, e.g. <code>123456789 5</code>"
-        member = await repo.find_member(reseller.id, parts[0])
+        try:
+            member = await repo.find_member(reseller.id, parts[0])
+        except repo.AmbiguousMember:
+            return None, None, AMBIGUOUS
         if member is None:
             return None, None, "❌ No customer with that ID or username. They must open your bot once first."
         amount = parse_amount(parts[1])
@@ -175,7 +190,9 @@ def register(r: Router) -> None:
         if err:
             await m.answer(err, reply_markup=_cancel_kb())
             return
-        await repo.member_adjust(reseller.id, member.id, amount)
+        if not await repo.member_adjust(reseller.id, member.id, amount):
+            await m.answer("❌ That didn't go through. Please try again.", reply_markup=_cancel_kb())
+            return
         fresh = await repo.get_member(member.id)
         await selling.send(m.bot, fresh.telegram_id, t(fresh.language, "msg_credited", amount=money(amount),
                                                           balance=money(fresh.available)))
@@ -207,12 +224,12 @@ def register(r: Router) -> None:
         except (InvalidOperation, ValueError):
             v = Decimal("-1")
         if not v.is_finite() or v < 0 or v > settings.max_markup_pct:
-            await m.answer(f"❌ Send a number from 0 to {settings.max_markup_pct.normalize()}.", reply_markup=_cancel_kb())
+            await m.answer(f"❌ Send a number from 0 to {pct(settings.max_markup_pct)}.", reply_markup=_cancel_kb())
             return
         v = v.quantize(Decimal("0.01"))
         await repo.update_reseller(reseller.id, markup_pct=v)
-        selling.invalidate_prices(reseller.id)
-        await done(m, reseller, state, f"✅ Commission set to <b>{v.normalize():f}%</b>. Prices update right away.")
+        selling.forget_prices(reseller.id)
+        await done(m, reseller, state, f"✅ Commission set to <b>{pct(v)}%</b>. Prices update right away.")
 
     @r.message(StateFilter(AdminForm.welcome), F.text)
     @owner_only
@@ -256,7 +273,11 @@ def register(r: Router) -> None:
     @r.message(StateFilter(AdminForm.block), F.text)
     @owner_only
     async def f_block(m: Message, reseller: Reseller, state: FSMContext, is_owner: bool = False):
-        member = await repo.find_member(reseller.id, m.text.strip())
+        try:
+            member = await repo.find_member(reseller.id, m.text.strip())
+        except repo.AmbiguousMember:
+            await m.answer(AMBIGUOUS, reply_markup=_cancel_kb())
+            return
         if member is None:
             await m.answer("❌ No customer with that ID or username.", reply_markup=_cancel_kb())
             return

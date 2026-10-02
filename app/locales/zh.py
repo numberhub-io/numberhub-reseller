@@ -41,6 +41,7 @@ T = {
     "st_expired": "⌛ 未收到验证码——{price} 已退回余额",
     "st_failed": "❌ 未能获取号码——{price} 已退回余额",
     "card_code": "🔑 验证码：<code>{code}</code>",
+    "code_flash": "📞 验证码以来电方式送达：请输入这个号码的最后几位 <code>{last6}</code>（如果应用要求 4 位，输入 <code>{last4}</code>）。",
     "card_more_codes": "🔑 之前的验证码：{codes}",
     "card_held": "💵 已冻结 {price}——收到验证码才扣费",
     "card_paid": "💵 已支付：{price}",

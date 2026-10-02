@@ -53,6 +53,18 @@ class FakeNumberHub:
         # (service, country) -> the price POST /numbers really reserves, when the
         # list under-reports it (live NumberHub did this from 09-23 to 10-02).
         self.true_reserve: dict[tuple[str, str], str] = {}
+        # Like the real server's layers in front of the purchase handler:
+        self.rate_limit_next = 0                     # next N requests: 429 rate_limited
+        self.then_rate_limit = 0                     # after the next lost reply, N requests get 429
+        self.in_progress_next = 0                    # next N replays: 409 idempotency_in_progress
+        self.scopes = {"catalog:read", "orders:read", "orders:write", "wallet:read"}
+
+    def _scope(self, method: str, path: str) -> str:
+        if path == "/balance":
+            return "wallet:read"
+        if path in ("/services", "/countries"):
+            return "catalog:read"
+        return "orders:write" if method in ("POST", "DELETE") else "orders:read"
 
     # ── state helpers for tests ──
     def set_status(self, nh_id: int, status: str, code: str | None = None) -> None:
@@ -88,8 +100,14 @@ class FakeNumberHub:
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path.replace("/v1", "", 1)
         self.calls.append((request.method, path))
+        if self.rate_limit_next > 0:
+            self.rate_limit_next -= 1
+            return self._json(429, {"error": "rate_limited"})
         if request.headers.get("authorization") != f"Bearer {self.key}" or self.reject_key:
-            return self._json(401, {"error": "unauthorized"})
+            return self._json(401, {"error": "invalid_api_key"})
+        need = self._scope(request.method, path)
+        if need not in self.scopes:
+            return self._json(403, {"error": "insufficient_scope", "required_scope": need})
         if request.method == "GET" and path == "/balance":
             return self._json(200, {"balance": f"{self.wallet:.2f}", "available": f"{self.wallet - self.held:.2f}",
                                     "held": f"{self.held:.2f}", "currency": "USD"})
@@ -102,7 +120,8 @@ class FakeNumberHub:
             return self._buy(request)
         if request.method == "GET" and path == "/orders":
             rows = sorted(self.orders.values(), key=lambda o: -o["id"])
-            return self._json(200, {"orders": [self.public(o) for o in rows[: int(request.url.params.get("limit", 40))]]})
+            limit = max(1, min(100, int(request.url.params.get("limit", 40))))   # the server clamps to 100
+            return self._json(200, {"orders": [self.public(o) for o in rows[:limit]]})
         if path.startswith("/numbers/"):
             nh_id = int(path.split("/")[2])
             o = self.orders.get(nh_id)
@@ -132,6 +151,9 @@ class FakeNumberHub:
             prev_raw, prev = self.idem[key]
             if prev_raw != hash(raw):
                 return self._json(409, {"error": "idempotency_conflict"})
+            if self.in_progress_next > 0:
+                self.in_progress_next -= 1
+                return self._json(409, {"error": "idempotency_in_progress"}, {"Retry-After": "2"})
             self._maybe_lose(request)
             return httpx.Response(prev["status"], json=prev["body"], headers={"Idempotency-Replayed": "true"})
         status, out = self._do_buy(body)
@@ -143,6 +165,8 @@ class FakeNumberHub:
         """The server acted, but the reply never arrives."""
         if self.lose_replies > 0:
             self.lose_replies -= 1
+            self.rate_limit_next += self.then_rate_limit     # and the retries then hit 429
+            self.then_rate_limit = 0
             raise httpx.ReadTimeout("lost reply", request=request)
 
     def _do_buy(self, body: dict) -> tuple[int, dict]:
@@ -186,6 +210,8 @@ class FakeSession(BaseSession):
         self.bot_id = bot_id
         self.username = username
         self.msg_id = 100
+        self.fail_get_me = 0          # next N getMe calls fail (a network blip at boot)
+        self.fail_send = 0            # next N sendMessage calls hit a flood limit
 
     async def close(self) -> None:
         pass
@@ -195,6 +221,14 @@ class FakeSession(BaseSession):
 
     async def make_request(self, bot, method, timeout=None):  # noqa: ANN001
         self.requests.append(method)
+        if isinstance(method, GetMe) and self.fail_get_me > 0:
+            self.fail_get_me -= 1
+            from aiogram.exceptions import TelegramNetworkError
+            raise TelegramNetworkError(method=method, message="boot blip")
+        if isinstance(method, SendMessage) and self.fail_send > 0:
+            self.fail_send -= 1
+            from aiogram.exceptions import TelegramRetryAfter
+            raise TelegramRetryAfter(method=method, message="flood", retry_after=3)
         if isinstance(method, GetMe):
             return User(id=self.bot_id, is_bot=True, first_name="My Shop", username=self.username)
         if isinstance(method, (SendMessage, EditMessageText)):

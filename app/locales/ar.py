@@ -41,6 +41,7 @@ T = {
     "st_expired": "⌛ لم يصل أي رمز — أُعيد {price} إلى رصيدك",
     "st_failed": "❌ تعذّر الحصول على رقم — أُعيد {price} إلى رصيدك",
     "card_code": "🔑 الرمز: <code>{code}</code>",
+    "code_flash": "📞 وصل الرمز كمكالمة من هذا الرقم: أدخل آخر أرقامه <code>{last6}</code> (أو <code>{last4}</code> إذا طلب التطبيق 4 أرقام).",
     "card_more_codes": "🔑 رموز سابقة: {codes}",
     "card_held": "💵 {price} محجوز — يُخصم فقط عند وصول الرمز",
     "card_paid": "💵 المدفوع: {price}",

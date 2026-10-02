@@ -374,9 +374,9 @@ async def test_bot_flow():
           and button(session, f"All {n_apps} apps, A–Z") and button(session, "Any other app"))
     await dp.feed_update(bot, tap(ALICE + 100, button(session, "More popular apps")))
     more = [b.text for row in session.last_markup().inline_keyboard for b in row]
-    check("more popular: the catalog's next apps in its own order, clean names",
-          "More popular apps" in session.last_text() and more[:4] == ["WeChat", "Yandex", "vk.com", "Caffe Nero"]
-          and "Google, youtube, Gmail" in more, str(more[:5]))
+    check("more popular: the curated list, in its order, for the apps the catalog has",
+          "More popular apps" in session.last_text() and more[:3] == ["WeChat", "Yandex", "VK"]
+          and "Caffe Nero" not in more, str(more[:5]))
     check("no wall of identical 📱 icons", not any("📱" in x for x in more))
     await dp.feed_update(bot, tap(ALICE + 100, button(session, f"All {n_apps} apps")))
     check("A–Z grid: the count, only letters that have apps",
@@ -395,6 +395,8 @@ async def test_bot_flow():
     check("…and the next page has the rest", "Shop 39" in s2 and "2/2" in s2 and "⬅️" in s2)
     await dp.feed_update(bot, tap(ALICE + 100, "az:C:0"))
     check("names are cleaned (a stray leading space)", button(session, "Caffe Nero") is not None)
+    await dp.feed_update(bot, tap(ALICE + 100, "az:G:0"))
+    check("…and commas spaced", button(session, "Google, youtube, Gmail") is not None)
     await dp.feed_update(bot, tap(ALICE + 100, "az:*:0"))
     check("an old 'All services' button opens the A–Z grid", "All apps" in session.last_text())
     await dp.feed_update(bot, tap(ALICE + 100, "az:W:0"))
@@ -465,7 +467,12 @@ async def test_bot_flow():
     check("the customer is told, in their language", any("3.50" in x and "saldo" in x for x in session.texts()))
     await dp.feed_update(bot, tap(OWNER, Adm(a="remove").pack()))
     await dp.feed_update(bot, msg(OWNER, f"@{bob.username} 10"))
+    check("a username several customers have used is refused (send the ID)",
+          "More than one" in session.last_text() and (await repo.get_member(bob.id)).balance == D("3.50"))
+    await dp.feed_update(bot, msg(OWNER, f"{bob.telegram_id} 10"))
     check("can't remove more than they have", "available" in session.last_text())
+    await dp.feed_update(bot, msg(OWNER, f"{bob.telegram_id} 0.004"))
+    check("an amount that rounds to $0.00 is refused", "positive number" in session.last_text())
     await dp.feed_update(bot, tap(OWNER, Adm(a="markup").pack()))
     await dp.feed_update(bot, msg(OWNER, "50"))
     rr = await repo.get_reseller(r.id)
@@ -584,6 +591,302 @@ async def test_paused_shop():
     runtime._bots.pop(r.id, None)
 
 
+def _fast_recovery():
+    """recover_buying() without its 60 s age gate (the tests can't wait)."""
+    orig = repo.stale_buying
+
+    def patched(older_than_sec=60):
+        return orig(older_than_sec=0)
+    return orig, patched
+
+
+async def _recover_now():
+    orig, patched = _fast_recovery()
+    repo.stale_buying = patched
+    try:
+        await selling.recover_buying()
+    finally:
+        repo.stale_buying = orig
+
+
+async def test_review_money():
+    print("review: an unclear purchase answer never releases the hold (2026-10-02)")
+    api = FakeNumberHub()
+    r = await make_reseller(api, bot_id=801)
+    session = FakeSession()
+    runtime._bots[r.id] = fake_bot(session)
+    m = await member(r, ALICE + 400, "5")
+
+    # NumberHub bought it, the reply was lost, the retries hit "in progress".
+    api.lose_replies, api.in_progress_next = 1, 2
+    try:
+        await selling.buy(r, m, "wa", "187", None)
+        check("lost reply + in progress -> 'processing'", False)
+    except SellError as e:
+        o = [x for x in await repo.member_orders(m.id, 5)][0]
+        check("lost reply + in progress -> 'processing', hold kept, order BUYING",
+              e.reason == "processing" and o.status == Order.BUYING
+              and (await repo.get_member(m.id)).held == D("0.39") and len(api.orders) == 1, e.reason)
+    await _recover_now()
+    o = await repo.get_order(o.id)
+    check("recovery links the number NumberHub bought (no second purchase)",
+          o.status == "waiting" and len(api.orders) == 1 and o.nh_id in api.orders)
+    check("…and sends the member the number they were told is processing",
+          any("+1555000" in x for x in session.texts()) and o.message_id is not None)
+
+    # The same, with 429s on the retries and on the first recovery attempt.
+    api.lose_replies, api.then_rate_limit = 1, 2
+    try:
+        await selling.buy(r, await repo.get_member(m.id), "tg", "187", None)
+    except SellError as e:
+        check("lost reply + 429 -> 'processing', not a release", e.reason == "processing")
+    o2 = [x for x in await repo.member_orders(m.id, 5) if x.service == "tg"][0]
+    api.rate_limit_next = 1
+    await _recover_now()
+    check("a 429 on the recovery leaves it BUYING with its hold (it proves nothing)",
+          (await repo.get_order(o2.id)).status == Order.BUYING
+          and (await repo.get_member(m.id)).held == D("0.39") + D("1.43"))
+    await _recover_now()
+    o2 = await repo.get_order(o2.id)
+    check("the next sweep links it: ONE number for it at NumberHub", o2.status == "waiting" and len(api.orders) == 2)
+
+    # A failed row whose purchase turns out to exist: re-held, or given back.
+    m2 = await member(r, ALICE + 401, "1")
+    row = await repo.create_order_with_hold(reseller_id=r.id, member_id=m2.id, service="wa", service_name="WhatsApp",
+                                            country="187", member_price=D("0.39"), markup_pct_at_buy=D("30"))
+    await repo.fail_order(row.id)
+    _, made = api._do_buy({"service": "wa", "country": "187", "max_price": "0.30"})
+    check("link refuses a row that already gave its hold back", not await repo.link_order(row.id, made["number"]))
+    check("…the late purchase is taken on again with a fresh hold",
+          await selling._attach(r, row.id, made["number"])
+          and (await repo.get_order(row.id)).status == "waiting"
+          and (await repo.get_order(row.id)).settled == Order.UNSETTLED
+          and (await repo.get_member(m2.id)).held == D("0.39"))
+    m3 = await member(r, ALICE + 402, "0.39")
+    row3 = await repo.create_order_with_hold(reseller_id=r.id, member_id=m3.id, service="wa", service_name="WhatsApp",
+                                             country="187", member_price=D("0.39"), markup_pct_at_buy=D("30"))
+    await repo.fail_order(row3.id)
+    await repo.member_adjust(r.id, m3.id, D("-0.39"))
+    _, made3 = api._do_buy({"service": "wa", "country": "187", "max_price": "0.30"})
+    nh3 = made3["number"]["id"]
+    ok3 = await selling._attach(r, row3.id, made3["number"])
+    check("…and when the member can't cover it any more, the number is given back at NumberHub",
+          not ok3 and api.orders[nh3]["status"] == "canceled" and (await repo.get_order(row3.id)).status == Order.FAILED
+          and (await repo.get_member(m3.id)).held == 0)
+
+    # A double tap buys once.
+    m4 = await member(r, ALICE + 403, "5")
+    api.lose_replies = 1                                  # slows the first buy down
+    res = await asyncio.gather(selling.buy(r, m4, "wa", "6", None), selling.buy(r, m4, "wa", "6", None),
+                               return_exceptions=True)
+    dup = [x for x in res if isinstance(x, SellError) and x.reason == "duplicate"]
+    check("a double tap on Buy buys ONE number", len(dup) == 1 and
+          len([o for o in await repo.member_orders(m4.id, 5)]) == 1)
+
+    # Old orders past NumberHub's 24 h key memory are never replayed.
+    m5 = await member(r, ALICE + 404, "1")
+    old = await repo.create_order_with_hold(reseller_id=r.id, member_id=m5.id, service="wa", service_name="WhatsApp",
+                                            country="187", member_price=D("0.39"), markup_pct_at_buy=D("30"))
+    from sqlalchemy import update as _upd
+    from app.db import session_factory
+    async with session_factory() as s:
+        await s.execute(_upd(Order).where(Order.id == old.id)
+                        .values(created_at=dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=21)))
+        await s.commit()
+    posts = len([c for c in api.calls if c[0] == "POST"])
+    await _recover_now()
+    check("a BUYING row older than 20 h is released, not replayed",
+          (await repo.get_order(old.id)).status == Order.FAILED and (await repo.get_member(m5.id)).held == 0
+          and len([c for c in api.calls if c[0] == "POST"]) == posts)
+
+    # Balances are compared in cents: exactly the price available is enough.
+    m6 = await member(r, ALICE + 405, "0.30")
+    await repo.member_try_hold(m6.id, D("0.10"))
+    check("0.30 balance, 0.10 held: a 0.20 hold goes through", await repo.member_try_hold(m6.id, D("0.20")))
+    runtime._bots.pop(r.id, None)
+
+
+async def test_review_sync():
+    print("review: sync never reopens, re-edits or drops a code")
+    api = FakeNumberHub()
+    r = await make_reseller(api, bot_id=802)
+    session = FakeSession()
+    runtime._bots[r.id] = fake_bot(session)
+    m = await member(r, ALICE + 500, "5")
+    o = await selling.buy(r, m, "wa", "187", None)
+    await repo.set_card(o.id, ALICE + 500, 70)
+    stale = dict(api.public(api.orders[o.nh_id]))         # a list fetched before the cancel
+    ok, _, _ = await selling.cancel(r, await repo.get_member(m.id), o.id)
+    await repo.apply_nh_state(o.id, stale)
+    check("a stale 'waiting' snapshot can't reopen a cancelled order",
+          ok and (await repo.get_order(o.id)).status == "canceled")
+
+    o2 = await selling.buy(r, await repo.get_member(m.id), "wa", "187", None)
+    await repo.set_card(o2.id, ALICE + 500, 71)
+    o3 = await selling.buy(r, await repo.get_member(m.id), "wa", "6", None)
+    await repo.set_card(o3.id, ALICE + 500, 71)           # 📱 New number drawn on the same message
+    check("a message shows one order: the older one lets go of it",
+          (await repo.get_order(o2.id)).message_id is None and (await repo.get_order(o3.id)).message_id == 71)
+
+    session.fail_send = 1                                  # Telegram's flood limit on the code message
+    api.set_status(o3.nh_id, "received", "556677")
+    await selling.sync_reseller(r)
+    check("a code message that hit a flood limit is not marked sent",
+          (await repo.get_order(o3.id)).codes_announced == 0)
+    await selling.sync_reseller(r)
+    check("…and is sent on the next pass", (await repo.get_order(o3.id)).codes_announced == 1
+          and any("556677" in x for x in session.texts()))
+    from aiogram.methods import EditMessageText
+    before = len([x for x in session.requests if isinstance(x, EditMessageText)])
+    await selling.sync_reseller(r)
+    await selling.sync_reseller(r)
+    after = len([x for x in session.requests if isinstance(x, EditMessageText)])
+    check("a delivered card is not re-edited on every 5 s pass", after == before, f"{after - before} edits")
+
+    from app.texts import code_arrived
+    cur = await repo.get_order(o3.id)
+    flash = code_arrived(await repo.get_member(m.id), cur, "441616961154")
+    check("a code that is a caller's number tells the member to use its last digits",
+          "961154" in flash and "1154" in flash and "call" in flash)
+    check("…a normal code gets no such hint", "call" not in code_arrived(await repo.get_member(m.id), cur, "556677"))
+    api.orders[o3.nh_id]["status"] = "requesting"         # "another code" pressed in NumberHub's own app
+    await selling.sync_reseller(r)
+    cur = await repo.get_order(o3.id)
+    from app.texts import order_card
+    check("an unknown NumberHub status keeps being polled and reads as a delivered card",
+          cur.status == "requesting" and cur.id in {x.id for x in await repo.recently_received(r.id)}
+          and "st_requesting" not in order_card(await repo.get_member(m.id), cur)[0])
+    runtime._bots.pop(r.id, None)
+
+
+async def test_review_bots():
+    print("review: bot screens and the builder")
+    from app.bots import builder
+    from app.bots.reseller import build_router
+    api = FakeNumberHub()
+    r = await make_reseller(api, bot_id=803)
+    session = FakeSession()
+    bot = fake_bot(session)
+    runtime._bots[r.id] = bot
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(build_router(r.id))
+    group = Update.model_validate({"update_id": next(_uid), "message": {
+        "message_id": next(_uid), "date": 0, "chat": {"id": -100123, "type": "supergroup", "title": "g"},
+        "from": _user(ALICE + 600), "text": "/start",
+        "entities": [{"type": "bot_command", "offset": 0, "length": 6}]}})
+    n = len(session.requests)
+    await dp.feed_update(bot, group)
+    check("a group chat gets nothing (cards would show numbers and codes to the group)", len(session.requests) == n)
+
+    await member(r, ALICE + 601, "1")
+    await dp.feed_update(bot, msg(OWNER, "/admin"))
+    await dp.feed_update(bot, tap(OWNER, Adm(a="broadcast").pack()))
+    await dp.feed_update(bot, msg(OWNER, "/buy"))
+    await dp.feed_update(bot, msg(OWNER, "whatsapp"))
+    sent_to_customer = [x for x in session.requests if type(x).__name__ == "SendMessage" and x.chat_id == ALICE + 601]
+    check("an open broadcast prompt ends when the owner does something else (no accidental broadcast)",
+          not sent_to_customer and "Results for" in session.last_text())
+    await dp.feed_update(bot, tap(OWNER, Adm(a="markup").pack()))
+    check("commission prompt shows plain numbers (no '3E+1')", "E+" not in session.last_text())
+    runtime._bots.pop(r.id, None)
+
+    # Builder: reconnect the same bot with a new token, ration bad keys, check scopes.
+    bsession = FakeSession(bot_id=803, username="my_shop_bot")
+    bbot = fake_bot(bsession)
+    bdp = Dispatcher(storage=MemoryStorage())
+    builder.router._parent_router = None     # test_builder attached it to its own dispatcher
+    bdp.include_router(builder.router)
+    orig_make, orig_restart, orig_nh = runtime.make_bot, runtime.restart, builder.NumberHub
+    restarted = []
+    runtime.make_bot = lambda token: fake_bot(FakeSession(bot_id=803, username="my_shop_bot"))
+
+    async def fake_restart(rid):
+        restarted.append(rid)
+    runtime.restart = fake_restart
+    builder.NumberHub = lambda key: api.client(key)
+    try:
+        await bdp.feed_update(bbot, tap(OWNER, "bd:create:0:"))
+        await bdp.feed_update(bbot, msg(OWNER, "123456789:" + "C" * 35))
+        check("the same bot with a new token reconnects (no 'already connected')",
+              "Reconnecting" in bsession.last_text())
+        await bdp.feed_update(bbot, msg(OWNER, api.key))
+        rows = await repo.list_resellers(owner_id=OWNER)
+        rr = await repo.get_reseller(r.id)
+        check("…the same shop row keeps its customers, with the new token",
+              restarted == [r.id] and crypto.decrypt(rr.bot_token_enc).endswith("C" * 35)
+              and len([x for x in rows if x.bot_id == 803]) == 1)
+        await bdp.feed_update(bbot, tap(OWNER + 1, "bd:create:0:"))
+        await bdp.feed_update(bbot, msg(OWNER + 1, "123456789:" + "D" * 35))
+        check("someone else can't take the bot over", "someone else" in bsession.last_text())
+        builder._key_fails.clear()
+        builder._all_fails.clear()
+        await bdp.feed_update(bbot, tap(OWNER + 2, "bd:create:0:"))
+        runtime.make_bot = lambda token: fake_bot(FakeSession(bot_id=904, username="other_bot"))
+        await bdp.feed_update(bbot, msg(OWNER + 2, "123456789:" + "E" * 35))
+        for i in range(3):
+            await bdp.feed_update(bbot, msg(OWNER + 2, f"nh_live_wrongkey{i}-0123456789abc"))
+        calls = len(api.calls)
+        await bdp.feed_update(bbot, msg(OWNER + 2, "nh_live_wrongkey9-0123456789abc"))
+        check("bad keys are rationed: the 4th never reaches NumberHub (it would block the server's IP)",
+              "Too many keys" in bsession.last_text() and len(api.calls) == calls)
+        builder._key_fails.clear()
+        api.scopes.discard("orders:read")
+        await bdp.feed_update(bbot, msg(OWNER + 2, api.key))
+        check("a key without a needed permission is refused, naming it",
+              "missing a permission" in bsession.last_text() and "orders:read" in bsession.last_text())
+        api.scopes.add("orders:read")
+        await bdp.feed_update(bbot, msg(OWNER + 2, api.key))
+        check("…with every permission it is accepted", "Step 3 of 3" in bsession.last_text())
+        await bdp.feed_update(bbot, tap(OWNER + 2, "bd:markup:0:-50"))
+        check("a forged commission button is refused", not await repo.list_resellers(owner_id=OWNER + 2))
+        # New API key from another NumberHub account while the shop has open orders.
+        await member(r, ALICE + 602, "2")
+        await selling.buy(r, await repo.find_member(r.id, str(ALICE + 602)), "wa", "187", None)
+        other = FakeNumberHub(key="nh_live_otheraccount-0123456789")
+        builder.NumberHub = lambda key: (other if key == other.key else api).client(key)
+        await bdp.feed_update(bbot, tap(OWNER, f"bd:newkey:{r.id}:"))
+        await bdp.feed_update(bbot, msg(OWNER, other.key))
+        check("a key from another NumberHub account is refused while orders are open",
+              "different NumberHub account" in bsession.last_text()
+              and crypto.decrypt((await repo.get_reseller(r.id)).api_key_enc) == api.key)
+        await bdp.feed_update(bbot, msg(OWNER + 3, "123456789:" + "F" * 35))
+        check("a token pasted outside the steps starts the flow and is deleted",
+              any(type(x).__name__ == "DeleteMessage" for x in bsession.requests[-6:]))
+    finally:
+        runtime.make_bot, runtime.restart, builder.NumberHub = orig_make, orig_restart, orig_nh
+        builder._key_fails.clear()
+        builder._all_fails.clear()
+
+
+async def test_review_runtime():
+    print("review: a shop survives a failed start")
+    api = FakeNumberHub()
+    r = await make_reseller(api, bot_id=804)
+    session = FakeSession()
+    bot = fake_bot(session)
+    dp = Dispatcher(storage=MemoryStorage())
+    attempts = []
+
+    async def flaky_polling(*a, **k):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise RuntimeError("getMe timed out at boot")
+    dp.start_polling = flaky_polling
+    real_sleep = asyncio.sleep
+
+    async def no_wait(_s, *a, **k):
+        await real_sleep(0)
+    asyncio.sleep = no_wait
+    try:
+        await asyncio.wait_for(runtime._run(r.id, bot, dp), timeout=5)
+    finally:
+        asyncio.sleep = real_sleep
+    check("polling that fails once is retried, not left dead", len(attempts) == 2)
+    check("…and an old webhook is removed before polling",
+          any(type(x).__name__ == "DeleteWebhook" for x in session.requests))
+    check("orders of a shop are synced even when its bot isn't polling", r.id in runtime.known())
+
+
 async def test_cards_render():
     print("order card in every status and language")
     from app.texts import order_card
@@ -611,7 +914,8 @@ async def main():
     test_prices()
     test_i18n()
     for fn in (test_buy_and_code, test_no_code_refund, test_failures, test_lost_reply, test_cancel,
-               test_races_and_limits, test_bot_flow, test_builder, test_paused_shop, test_cards_render):
+               test_races_and_limits, test_bot_flow, test_builder, test_paused_shop, test_review_money,
+               test_review_sync, test_review_bots, test_review_runtime, test_cards_render):
         try:
             await fn()
         except Exception as exc:  # noqa: BLE001

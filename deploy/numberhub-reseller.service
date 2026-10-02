@@ -24,7 +24,8 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
-ReadWritePaths=/opt/numberhub-reseller
+# The code stays read-only for the service; only its data directory is writable.
+ReadWritePaths=/var/lib/numberhub-reseller
 
 [Install]
 WantedBy=multi-user.target

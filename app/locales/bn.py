@@ -41,6 +41,7 @@ T = {
     "st_expired": "⌛ কোনো কোড আসেনি — {price} ব্যালেন্সে ফেরত",
     "st_failed": "❌ নম্বর পাওয়া যায়নি — {price} ব্যালেন্সে ফেরত",
     "card_code": "🔑 কোড: <code>{code}</code>",
+    "code_flash": "📞 কোডটি এই নম্বর থেকে কল হিসেবে এসেছে: এর শেষ অঙ্কগুলো দিন, <code>{last6}</code> (অ্যাপ ৪টি চাইলে <code>{last4}</code>)।",
     "card_more_codes": "🔑 আগের কোড: {codes}",
     "card_held": "💵 {price} সংরক্ষিত — কোড এলে তবেই কাটা হবে",
     "card_paid": "💵 পরিশোধিত: {price}",

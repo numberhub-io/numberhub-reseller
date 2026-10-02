@@ -41,6 +41,7 @@ T = {
     "st_expired": "⌛ Kode tidak masuk — {price} dikembalikan ke saldo",
     "st_failed": "❌ Gagal mendapat nomor — {price} dikembalikan ke saldo",
     "card_code": "🔑 Kode: <code>{code}</code>",
+    "code_flash": "📞 Kode datang sebagai panggilan dari nomor ini: masukkan digit terakhirnya, <code>{last6}</code> (atau <code>{last4}</code> jika aplikasi meminta 4).",
     "card_more_codes": "🔑 Kode sebelumnya: {codes}",
     "card_held": "💵 {price} ditahan — hanya ditagih jika kode masuk",
     "card_paid": "💵 Dibayar: {price}",

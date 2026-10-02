@@ -7,7 +7,7 @@ import datetime as dt
 import json
 from decimal import Decimal
 
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.db import session_factory
@@ -99,18 +99,29 @@ async def get_member(member_id: int) -> Member | None:
         return await s.get(Member, member_id)
 
 
+class AmbiguousMember(Exception):
+    """More than one customer of this shop has used that @username."""
+
+
 async def find_member(reseller_id: int, ref: str) -> Member | None:
-    """By the ID the bot shows a member (their Telegram id) or by @username."""
+    """By the ID the bot shows a member (their Telegram id) or by @username.
+    Usernames can be changed and reused, so a name two customers have carried
+    raises AmbiguousMember instead of picking one of them."""
     ref = (ref or "").strip()
     async with session_factory() as s:
         if ref.lstrip("-").isdigit():
-            q = select(Member).where(Member.reseller_id == reseller_id, Member.telegram_id == int(ref))
-        else:
-            name = ref.lstrip("@").lower()
-            if not name:
+            if len(ref) > 19:
                 return None
-            q = select(Member).where(Member.reseller_id == reseller_id, func.lower(Member.username) == name)
-        return (await s.execute(q)).scalars().first()
+            q = select(Member).where(Member.reseller_id == reseller_id, Member.telegram_id == int(ref))
+            return (await s.execute(q)).scalars().first()
+        name = ref.lstrip("@").lower()
+        if not name:
+            return None
+        q = select(Member).where(Member.reseller_id == reseller_id, func.lower(Member.username) == name).limit(2)
+        rows = list((await s.execute(q)).scalars())
+        if len(rows) > 1:
+            raise AmbiguousMember(name)
+        return rows[0] if rows else None
 
 
 async def list_members(reseller_id: int, limit: int = 20) -> list[Member]:
@@ -153,7 +164,7 @@ async def member_adjust(reseller_id: int, member_id: int, amount: Decimal) -> bo
     async with session_factory() as s:
         cond = [Member.id == member_id, Member.reseller_id == reseller_id]
         if amount < 0:
-            cond.append((Member.balance - Member.held) >= -amount)
+            cond.append(money2(Member.balance - Member.held) >= -amount)
         res = await s.execute(update(Member).where(*cond).values(balance=money2(Member.balance + amount)))
         if res.rowcount != 1:
             await s.rollback()
@@ -164,13 +175,19 @@ async def member_adjust(reseller_id: int, member_id: int, amount: Decimal) -> bo
         return True
 
 
+def _hold_stmt(member_id: int, amount: Decimal):
+    # Rounded on both sides: SQLite keeps balances as REAL, and 0.30 - 0.10 is
+    # 0.19999999999999998 there, which refused a member with exactly the price.
+    return update(Member).where(
+        Member.id == member_id, Member.is_blocked.is_(False), money2(Member.balance - Member.held) >= amount,
+    ).values(held=money2(Member.held + amount))
+
+
 async def member_try_hold(member_id: int, amount: Decimal) -> bool:
     if not amount.is_finite() or amount <= 0:
         raise ValueError("hold must be positive")
     async with session_factory() as s:
-        res = await s.execute(update(Member).where(
-            Member.id == member_id, Member.is_blocked.is_(False), (Member.balance - Member.held) >= amount,
-        ).values(held=money2(Member.held + amount)))
+        res = await s.execute(_hold_stmt(member_id, amount))
         await s.commit()
         return res.rowcount == 1
 
@@ -178,6 +195,25 @@ async def member_try_hold(member_id: int, amount: Decimal) -> bool:
 # ─── orders ──────────────────────────────────────────────────────────────────
 async def create_order(**values) -> Order:
     async with session_factory() as s:
+        row = Order(status=Order.BUYING, settled=Order.UNSETTLED, **values)
+        s.add(row)
+        await s.commit()
+        await s.refresh(row)
+        return row
+
+
+async def create_order_with_hold(**values) -> Order | None:
+    """Hold the member's price and create the BUYING order in ONE transaction, so
+    a crash or an error in between can never strand a hold without an order.
+    None = not enough credit (nothing changed)."""
+    price = Decimal(values["member_price"])
+    if not price.is_finite() or price <= 0:
+        raise ValueError("hold must be positive")
+    async with session_factory() as s:
+        res = await s.execute(_hold_stmt(values["member_id"], price))
+        if res.rowcount != 1:
+            await s.rollback()
+            return None
         row = Order(status=Order.BUYING, settled=Order.UNSETTLED, **values)
         s.add(row)
         await s.commit()
@@ -205,33 +241,88 @@ def _nh_values(nh: dict) -> dict:
     }
 
 
-async def link_order(order_id: int, nh: dict) -> None:
-    """The NumberHub order now exists: record it on our BUYING row."""
+def _link_values(nh: dict) -> dict:
+    # Our own tidy service and country names stay; NumberHub's raw catalog name
+    # ("Instagram+Threads") would replace them on every card and message.
     vals = _nh_values(nh)
-    for k in ("service_name", "country_name"):
-        if not vals[k]:
-            vals.pop(k)
+    vals.pop("service_name")
+    vals.pop("country_name")
+    return vals
+
+
+async def link_order(order_id: int, nh: dict) -> bool:
+    """The NumberHub order now exists: record it on our row, but ONLY while the
+    row is still BUYING with its hold in place. A FAILED row has already given
+    the hold back; linking it would let a code through that is never charged.
+    False = not linked (the caller must revive it or give the number back)."""
     async with session_factory() as s:
-        await s.execute(update(Order).where(Order.id == order_id).values(**vals))
+        res = await s.execute(update(Order).where(
+            Order.id == order_id, Order.status == Order.BUYING, Order.settled == Order.UNSETTLED,
+        ).values(**_link_values(nh)))
         await s.commit()
+        return res.rowcount == 1
+
+
+async def revive_failed(order_id: int, nh: dict) -> bool:
+    """A purchase we had given up on turned out to exist. Take the member's hold
+    again and reopen the order, in one transaction; False when the member no
+    longer has the credit (then the number must be given back at NumberHub)."""
+    async with session_factory() as s:
+        o = await s.get(Order, order_id)
+        if o is None or o.status != Order.FAILED or o.settled != Order.RELEASED:
+            return False
+        hold = await s.execute(_hold_stmt(o.member_id, o.member_price))
+        if hold.rowcount != 1:
+            await s.rollback()
+            return False
+        res = await s.execute(update(Order).where(
+            Order.id == order_id, Order.status == Order.FAILED, Order.settled == Order.RELEASED,
+        ).values(settled=Order.UNSETTLED, **_link_values(nh)))
+        if res.rowcount != 1:
+            await s.rollback()
+            return False
+        await s.commit()
+        return True
+
+
+_RANK = {"buying": 0, "pending": 1, "waiting": 2}
+
+
+def _rank(status: str) -> int:
+    if status in Order.TERMINAL:
+        return 4
+    return _RANK.get(status, 3)            # received and NumberHub's transient ones
 
 
 async def apply_nh_state(order_id: int, nh: dict) -> tuple[bool, int]:
-    """Mirror NumberHub's view of the order. Returns (status_changed, codes_now)."""
+    """Mirror NumberHub's view of the order. Returns (status_changed, codes_now).
+
+    Forward only: a list fetched before a cancel can't reopen the cancelled order
+    (the member got a wrong "no code" message), an ended order never changes
+    status again, and the stored codes never shrink."""
     vals = _nh_values(nh)
     vals.pop("nh_id")
     for k in ("service_name", "country_name"):
         vals.pop(k)
     async with session_factory() as s:
         cur = await s.get(Order, order_id)
-        if cur is None:
+        if cur is None or cur.status in (Order.BUYING, Order.FAILED):
             return False, 0
-        changed = cur.status != vals["status"]
-        res = await s.execute(update(Order).where(Order.id == order_id, Order.status.not_in((Order.FAILED,)))
+        have = [str(c) for c in json.loads(cur.codes or "[]") if c]
+        got = json.loads(vals["codes"])
+        if len(got) < len(have):
+            vals["codes"] = json.dumps(have, ensure_ascii=False)
+        new = vals["status"]
+        if cur.status in Order.TERMINAL or _rank(new) < _rank(cur.status):
+            vals["status"] = cur.status
+        changed = vals["status"] != cur.status
+        # Only over the state we read: a cancel that landed meanwhile wins.
+        res = await s.execute(update(Order).where(Order.id == order_id, Order.status == cur.status)
                               .values(**vals))
         await s.commit()
-        n = len(json.loads(vals["codes"]))
-        return changed and res.rowcount == 1, n
+        if res.rowcount != 1:
+            return False, len(have)
+        return changed, len(json.loads(vals["codes"]))
 
 
 async def set_codes_announced(order_id: int, n: int) -> None:
@@ -242,7 +333,12 @@ async def set_codes_announced(order_id: int, n: int) -> None:
 
 
 async def set_card(order_id: int, chat_id: int, message_id: int) -> None:
+    """This message now shows this order. Any other order that was drawn on the
+    same message (📱 New number on a delivered card, a double tap) lets go of
+    it, or the sync would keep redrawing the old order over the new one."""
     async with session_factory() as s:
+        await s.execute(update(Order).where(Order.chat_id == chat_id, Order.message_id == message_id,
+                                            Order.id != order_id).values(chat_id=None, message_id=None))
         await s.execute(update(Order).where(Order.id == order_id).values(chat_id=chat_id, message_id=message_id))
         await s.commit()
 
@@ -304,11 +400,18 @@ async def open_orders(reseller_id: int) -> list[Order]:
 
 
 async def recently_received(reseller_id: int, minutes: int = 25) -> list[Order]:
-    """Delivered orders still inside their window: more codes can arrive."""
+    """Delivered orders still inside their window (more codes can arrive), and
+    any status NumberHub may report that we don't know as final (requesting,
+    reactivating): those are polled rather than frozen. The window is the order's
+    own expiry plus 5 minutes (updated_at moves on every poll, so it can't be the
+    clock)."""
     async with session_factory() as s:
-        cutoff = _now() - dt.timedelta(minutes=minutes)
-        q = select(Order).where(Order.reseller_id == reseller_id, Order.status == "received",
-                                Order.updated_at >= cutoff, Order.nh_id.is_not(None))
+        now = _now()
+        live = or_(Order.expires_at >= now - dt.timedelta(minutes=5),
+                   and_(Order.expires_at.is_(None), Order.created_at >= now - dt.timedelta(minutes=minutes)))
+        q = select(Order).where(Order.reseller_id == reseller_id,
+                                Order.status.not_in(Order.OPEN + Order.TERMINAL),
+                                live, Order.nh_id.is_not(None))
         return list((await s.execute(q)).scalars())
 
 

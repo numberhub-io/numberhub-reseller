@@ -41,6 +41,7 @@ T = {
     "st_expired": "⌛ Không có mã — {price} đã hoàn về số dư",
     "st_failed": "❌ Không lấy được số — {price} đã hoàn về số dư",
     "card_code": "🔑 Mã: <code>{code}</code>",
+    "code_flash": "📞 Mã đến dưới dạng cuộc gọi từ số này: nhập các chữ số cuối, <code>{last6}</code> (hoặc <code>{last4}</code> nếu ứng dụng yêu cầu 4 số).",
     "card_more_codes": "🔑 Mã trước đó: {codes}",
     "card_held": "💵 Đã giữ {price} — chỉ trừ khi mã về",
     "card_paid": "💵 Đã trả: {price}",
