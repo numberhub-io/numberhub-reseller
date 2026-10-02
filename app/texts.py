@@ -141,8 +141,8 @@ OWNER_ALERTS = {
     "low_balance": ("⚠️ <b>A customer could not buy: your NumberHub balance is too low.</b>\n"
                     "Top up at numberhub.io or in @TheNumberHubBot to keep selling."),
     "daily_limit": ("⚠️ <b>Sales stopped: your NumberHub API key reached its daily spend limit.</b>\n"
-                    "The limit counts every number ordered, including ones that got no code and were "
-                    "refunded. Raise or remove it at numberhub.io → Account → API keys."),
+                    "It counts what your numbers really cost; numbers that got no code don't count. "
+                    "Raise or remove it at numberhub.io → Account → API keys."),
     "bad_key": "⚠️ <b>NumberHub rejected your API key</b> (revoked or rotated), so sales are paused.\n" + _NEW_KEY,
     "key_scope": ("⚠️ <b>Your NumberHub API key is missing a permission</b>, so sales are paused.\n"
                   "The key needs catalog, orders (read and write) and wallet access. " + _NEW_KEY),

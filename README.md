@@ -74,7 +74,7 @@ Under 💰 Balance customers see their ID. That is what they send to the reselle
 ### What you need
 
 1. A Telegram bot token. In Telegram open @BotFather, send `/newbot`, choose a name and a username, and copy the token (it looks like `123456789:AAH...`).
-2. A NumberHub API key with money in the wallet. Sign in at numberhub.io, open Account, then API keys, then Create key, and leave every permission ticked (the shop needs catalog, orders read and write, and wallet). The key starts with `nh_`. One key per bot is a good habit. A daily spend limit on the key counts every number ordered, including the ones that got no code and were refunded, so set it well above what you expect to sell.
+2. A NumberHub API key with money in the wallet. Sign in at numberhub.io, open Account, then API keys, then Create key, and leave every permission ticked (the shop needs catalog, orders read and write, and wallet). The key starts with `nh_`. One key per bot is a good habit. A daily spend limit on the key is a good safety net: it counts what your numbers really cost, and numbers that got no code don't use it up.
 
 ### Create your bot
 
