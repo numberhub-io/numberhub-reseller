@@ -146,7 +146,7 @@ Other rules:
 You need Python 3.11 or 3.12 and git.
 
 ```bash
-git clone git@github.com:numberhub-io/numberhub-reseller.git
+git clone https://github.com/numberhub-io/numberhub-reseller.git
 cd numberhub-reseller
 python -m venv .venv
 . .venv/bin/activate            # Windows: .venv\Scripts\activate
@@ -181,13 +181,11 @@ Every setting is an environment variable, or a line in `.env`.
 
 The steps below assume Ubuntu or Debian with systemd. The code lives in `/opt/numberhub-reseller` and belongs to your admin account; the service runs as a separate user called `reseller` that can read the code but write only its data directory, `/var/lib/numberhub-reseller`. The unit file and backup script are in `deploy/`.
 
-The repository is private, so clone it with an account that can read it (your own SSH key, or a read-only deploy key on the server):
-
 ```bash
 sudo apt install -y python3-venv sqlite3 git
 sudo adduser --system --group --home /var/lib/numberhub-reseller reseller
 sudo mkdir /opt/numberhub-reseller && sudo chown "$USER": /opt/numberhub-reseller
-git clone git@github.com:numberhub-io/numberhub-reseller.git /opt/numberhub-reseller
+git clone https://github.com/numberhub-io/numberhub-reseller.git /opt/numberhub-reseller
 cd /opt/numberhub-reseller
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
