@@ -36,7 +36,7 @@ from app.i18n import LANGS, _table, t  # noqa: E402
 from app.models import Order, Reseller  # noqa: E402
 from app.selling import SellError, member_price, original_ceiling  # noqa: E402
 from fakes import FakeNumberHub, FakeSession, fake_bot  # noqa: E402
-from app.bots.callbacks import Adm  # noqa: E402
+from app.bots.callbacks import Adm, Ord  # noqa: E402
 
 P = F = 0
 D = Decimal
@@ -536,8 +536,52 @@ async def test_builder():
               and button(session, "Pause") and button(session, "New API key"))
         await dp.feed_update(bot, tap(9002, f"bd:pause:{rows[0].id}:"))
         check("someone else can't pause it", (await repo.get_reseller(rows[0].id)).status == Reseller.ACTIVE)
+        stopped = []
+        orig_stop = rt.stop
+
+        async def fake_stop(rid):
+            stopped.append(rid)
+        rt.stop = fake_stop
+        try:
+            await dp.feed_update(bot, tap(9001, f"bd:pause:{rows[0].id}:"))
+        finally:
+            rt.stop = orig_stop
+        check("pause marks it paused but keeps the bot running (open orders finish)",
+              (await repo.get_reseller(rows[0].id)).status == Reseller.DISABLED and not stopped)
     finally:
         rt.make_bot, rt.start, builder.NumberHub = orig_make, orig_start, orig_nh
+
+
+async def test_paused_shop():
+    print("a paused shop")
+    from app.bots.reseller import build_router
+    api = FakeNumberHub()
+    r = await make_reseller(api, bot_id=795)
+    m = await member(r, ALICE + 300, "3")
+    order = await selling.buy(r, m, "wa", "187", None)
+    await repo.set_card(order.id, ALICE + 300, 77)
+    await repo.update_reseller(r.id, status=Reseller.DISABLED)
+    r = await repo.get_reseller(r.id)
+    session = FakeSession()
+    bot = fake_bot(session)
+    runtime._bots[r.id] = bot
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(build_router(r.id))
+    await dp.feed_update(bot, msg(ALICE + 300, "/start"))
+    check("customers are told the shop is paused", "paused" in session.last_text())
+    try:
+        await selling.buy(r, await repo.get_member(m.id), "wa", "187", None)
+        check("no new sales while paused", False)
+    except SellError as e:
+        check("no new sales while paused", e.reason == "paused")
+    await dp.feed_update(bot, tap(ALICE + 300, Ord(a="view", id=order.id).pack()))
+    check("…but a customer can still open the order they have", "+1555000" in session.last_text())
+    api.set_status(order.nh_id, "received", "778899")
+    await selling.sync_reseller(r)
+    mm = await repo.get_member(m.id)
+    check("…and its code is still delivered and charged once",
+          any("778899" in x for x in session.texts()) and mm.held == 0 and mm.balance == D("3") - D("0.39"))
+    runtime._bots.pop(r.id, None)
 
 
 async def test_cards_render():
@@ -567,7 +611,7 @@ async def main():
     test_prices()
     test_i18n()
     for fn in (test_buy_and_code, test_no_code_refund, test_failures, test_lost_reply, test_cancel,
-               test_races_and_limits, test_bot_flow, test_builder, test_cards_render):
+               test_races_and_limits, test_bot_flow, test_builder, test_paused_shop, test_cards_render):
         try:
             await fn()
         except Exception as exc:  # noqa: BLE001

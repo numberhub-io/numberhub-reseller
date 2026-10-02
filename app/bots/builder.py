@@ -126,15 +126,17 @@ async def nav(c: CallbackQuery, callback_data: Bld, state: FSMContext):
             await c.answer("Not your bot.", show_alert=True)
             return
         if a == "pause":
-            await runtime.stop(reseller.id)
+            # The bot keeps running: customers see "paused", open orders finish.
             await repo.update_reseller(reseller.id, status=Reseller.DISABLED)
-            await c.answer("Paused. Your customers see a short 'paused' message.")
+            await c.answer("Paused. Your customers see a short 'paused' message; open orders still finish.")
             await show_mine(c)
+            return
         elif a == "resume":
             await repo.update_reseller(reseller.id, status=Reseller.ACTIVE)
             await runtime.start(await repo.get_reseller(reseller.id))
             await c.answer("Your bot is selling again.")
             await show_mine(c)
+            return
         else:
             await state.set_state(Create.newkey)
             await state.update_data(rid=reseller.id)
@@ -343,9 +345,9 @@ async def toggle(m: Message):
         await m.answer("No such bot.")
         return
     if parts[0].startswith("/disable"):
-        await runtime.stop(reseller.id)
+        # No new sales; the bot keeps answering "paused" and finishes open orders.
         await repo.update_reseller(reseller.id, status=Reseller.DISABLED)
-        await m.answer(f"⏸ #{reseller.id} @{esc(reseller.bot_username)} disabled.")
+        await m.answer(f"⏸ #{reseller.id} @{esc(reseller.bot_username)} disabled (open orders still finish).")
     else:
         await repo.update_reseller(reseller.id, status=Reseller.ACTIVE)
         await runtime.start(await repo.get_reseller(reseller.id))

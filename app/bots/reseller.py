@@ -56,7 +56,10 @@ class Context(BaseMiddleware):
         member = await repo.get_or_create_member(reseller.id, user.id, user.username, user.full_name,
                                                  resolve(user.language_code))
         lang = member.language or "en"
-        if reseller.status != Reseller.ACTIVE and not is_owner:
+        # A paused shop still lets customers open and cancel the orders they
+        # already have (their order card buttons); everything else says paused.
+        own_order = isinstance(event, CallbackQuery) and (event.data or "").startswith("o:")
+        if reseller.status != Reseller.ACTIVE and not is_owner and not own_order:
             await _reply(event, t(lang, "bot_paused"))
             return None
         if member.is_blocked and not is_owner:

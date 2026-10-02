@@ -41,7 +41,10 @@ def running() -> list[int]:
 
 
 async def start(reseller: Reseller) -> None:
-    if reseller.status != Reseller.ACTIVE or reseller.id in running():
+    """Paused shops run too: their customers are told the shop is paused, and
+    orders bought before the pause still get their codes and settle (a stopped
+    bot left those holds, and codes NumberHub had already billed, stranded)."""
+    if reseller.id in running():
         return
     from app.bots.reseller import build_router
     token, key = crypto.decrypt(reseller.bot_token_enc), crypto.decrypt(reseller.api_key_enc)
@@ -99,7 +102,7 @@ async def restart(reseller_id: int) -> None:
 
 
 async def start_all() -> None:
-    for reseller in await repo.list_resellers(Reseller.ACTIVE):
+    for reseller in await repo.list_resellers():
         try:
             await start(reseller)
         except Exception:  # noqa: BLE001 — one bad bot must not stop the others

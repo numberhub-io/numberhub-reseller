@@ -84,7 +84,7 @@ Open the builder bot and tap ➕ Create my bot. It asks for three things:
 2. The API key. It is deleted from the chat too, checked live against NumberHub, and your wallet balance is shown.
 3. Your commission: tap 20%, 30%, 50% or 100%, or type any number from 0 to 300.
 
-Your bot starts selling immediately. 🤖 My bots in the builder lists your bots (up to 3 per person) with sales, profit and status, and lets you pause or resume a bot or replace its API key.
+Your bot starts selling immediately. 🤖 My bots in the builder lists your bots (up to 3 per person) with sales, profit and status, and lets you pause or resume a bot or replace its API key. A paused bot stops selling but keeps running: customers are told it is paused, and orders bought before the pause still get their codes and can still be cancelled.
 
 ### Your admin panel
 
@@ -213,8 +213,8 @@ Operators listed in `ADMIN_IDS` have three commands in the builder bot:
 | Command | What it does |
 |---|---|
 | `/platform` | Every shop with its number, owner, status, customers and 7 day sales |
-| `/disable 12` | Stops shop number 12 and marks it disabled |
-| `/enable 12` | Starts it again |
+| `/disable 12` | Stops new sales in shop number 12. Its customers are told it is paused; open orders still finish |
+| `/enable 12` | Lets it sell again |
 
 Useful log lines: `reseller N created by ...` (a new shop), `bought order ...` (a sale), `order N settled: member X charged|refunded`, `recovered purchase` (a lost reply that the sweep finished), and `sync failed for reseller N` (look at the traceback below it).
 
