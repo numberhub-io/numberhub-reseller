@@ -7,11 +7,11 @@ import datetime as dt
 import json
 from decimal import Decimal
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.db import session_factory
-from app.models import Member, MemberTx, Order, Reseller
+from app.models import Member, MemberTx, Order, PriceRule, Reseller
 
 
 def _now() -> dt.datetime:
@@ -64,7 +64,7 @@ async def list_resellers(status: str | None = None, owner_id: int | None = None)
 
 async def update_reseller(reseller_id: int, **values) -> None:
     allowed = {"markup_pct", "welcome_text", "support_contact", "status", "bot_username", "bot_title",
-               "bot_token_enc", "api_key_enc", "api_key_hint"}
+               "bot_token_enc", "api_key_enc", "api_key_hint", "max_profit"}
     values = {k: v for k, v in values.items() if k in allowed}
     if values:
         async with session_factory() as s:
@@ -459,3 +459,39 @@ async def stats(reseller_id: int, days: int) -> dict:
                                    .where(Member.reseller_id == reseller_id))).scalar_one()
         return {"orders": int(n), "sales": Decimal(str(sales or 0)).quantize(Decimal("0.01")),
                 "cost": Decimal(str(cost or 0)).quantize(Decimal("0.01")), "members": int(members)}
+
+
+# ─── custom prices ───────────────────────────────────────────────────────────
+async def price_rules(reseller_id: int) -> list[PriceRule]:
+    async with session_factory() as s:
+        q = select(PriceRule).where(PriceRule.reseller_id == reseller_id).order_by(PriceRule.service, PriceRule.country)
+        return list((await s.execute(q)).scalars())
+
+
+async def set_price_rule(reseller_id: int, service: str, country: str, mode: str, value: Decimal,
+                         service_name: str | None = None, country_name: str | None = None) -> None:
+    """Create or replace the rule for this app (+ country)."""
+    async with session_factory() as s:
+        row = (await s.execute(select(PriceRule).where(
+            PriceRule.reseller_id == reseller_id, PriceRule.service == service,
+            PriceRule.country == country))).scalar_one_or_none()
+        if row is None:
+            s.add(PriceRule(reseller_id=reseller_id, service=service, country=country, mode=mode, value=value,
+                            service_name=service_name, country_name=country_name))
+        else:
+            row.mode, row.value = mode, value
+            row.service_name, row.country_name = service_name or row.service_name, country_name or row.country_name
+        await s.commit()
+
+
+async def delete_price_rule(reseller_id: int, rule_id: int) -> bool:
+    async with session_factory() as s:
+        res = await s.execute(delete(PriceRule).where(PriceRule.id == rule_id, PriceRule.reseller_id == reseller_id))
+        await s.commit()
+        return res.rowcount == 1
+
+
+async def count_price_rules(reseller_id: int) -> int:
+    async with session_factory() as s:
+        return int(await s.scalar(select(func.count(PriceRule.id)).where(PriceRule.reseller_id == reseller_id)) or 0)
+

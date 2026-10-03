@@ -655,6 +655,167 @@ async def test_provision():
         rt.make_bot, rt.start, rt.restart, provision.NumberHub, settings.provision_secret = orig
 
 
+async def test_custom_prices():
+    """Owner feedback 2026-10-03: one percent for every number made expensive
+    numbers too dear. Own price per app or app + country, and a profit cap."""
+    print("custom prices")
+    from types import SimpleNamespace as NS
+    from app.bots.reseller import build_router
+    from app.models import PriceRule
+    sp = selling.shop_price
+    shop = NS(markup_pct=D("30"), max_profit=None)
+    rule = lambda svc, cty, mode, v: {(svc, cty): NS(mode=mode, value=D(v))}  # noqa: E731
+    check("no rule: NumberHub's price + the shop's commission", sp(shop, {}, "wa", "187", D("1.00")) == D("1.30"))
+    check("a profit cap holds the commission down on expensive numbers",
+          sp(NS(markup_pct=D("30"), max_profit=D("0.10")), {}, "wa", "187", D("2.00")) == D("2.10")
+          and sp(NS(markup_pct=D("30"), max_profit=D("0.10")), {}, "wa", "187", D("0.20")) == D("0.26"))
+    check("an app's own commission", sp(shop, rule("wa", "", "pct", "10"), "wa", "187", D("1.00")) == D("1.10"))
+    check("…for that app only", sp(shop, rule("wa", "", "pct", "10"), "tg", "187", D("1.00")) == D("1.30"))
+    check("a fixed price for the app in one country",
+          sp(shop, rule("wa", "187", "fixed", "1.05"), "wa", "187", D("1.00")) == D("1.05"))
+    both = {**rule("wa", "", "pct", "50"), **rule("wa", "187", "fixed", "1.05")}
+    check("the most specific rule wins (country over app)",
+          sp(shop, both, "wa", "187", D("1.00")) == D("1.05") and sp(shop, both, "wa", "6", D("1.00")) == D("1.50"))
+    check("a fixed price never sells below NumberHub's price (the owner never pays)",
+          sp(shop, rule("wa", "187", "fixed", "0.80"), "wa", "187", D("1.00")) == D("1.00"))
+    check("the cap does not cut an owner's own fixed price",
+          sp(NS(markup_pct=D("30"), max_profit=D("0.05")), rule("wa", "", "fixed", "3"), "wa", "1", D("1")) == D("3.00"))
+
+    api = FakeNumberHub()
+    r = await make_reseller(api, bot_id=7951)
+    selling.forget_prices(r.id)
+    await repo.set_price_rule(r.id, "wa", "187", PriceRule.FIXED, D("0.33"), "WhatsApp", "USA")
+    await repo.set_price_rule(r.id, "wa", "", PriceRule.PCT, D("10"), "WhatsApp")
+    rows = {x["country"]: x for x in await selling.countries(r, "wa", fresh=True)}
+    check("the country list shows the custom prices",
+          rows["187"]["member_price"] == D("0.33") and rows["6"]["member_price"] == D("0.28")
+          and rows["0"]["member_price"] == D("0.55"), str({k: v["member_price"] for k, v in rows.items()}))
+    tg = await selling.countries(r, "tg", fresh=True)
+    check("other apps keep the shop's commission", tg[0]["member_price"] == D("1.43"))
+
+    m = await member(r, 9301, "5")
+    order = await selling.buy(r, m, "wa", "187", shown_price=D("0.33"))
+    fresh_m = await repo.get_member(m.id)
+    check("a purchase holds the custom price and keeps the ceiling it sent",
+          order.member_price == D("0.33") and order.ceiling_at_buy == D("0.30") and fresh_m.held == D("0.33"))
+
+    # A lost reply: recovery must replay the SAME body (max_price = the stored
+    # ceiling); rebuilding it from a custom price would send another body and
+    # NumberHub would refuse it as an idempotency conflict.
+    await repo.set_price_rule(r.id, "wa", "6", PriceRule.FIXED, D("0.40"), "WhatsApp", "Indonesia")
+    selling.forget_prices(r.id)
+    api.lose_replies = 50          # every retry of the request loses its reply too
+    try:
+        await selling.buy(r, m, "wa", "6", shown_price=D("0.40"))
+        check("lost reply raises processing", False)
+    except SellError as exc:
+        check("lost reply: processing, the order waits for recovery", exc.reason == "processing")
+    api.lose_replies = 0
+    import datetime as _dt
+    from sqlalchemy import update as _update
+    from app.db import session_factory
+    async with session_factory() as s:
+        await s.execute(_update(Order).where(Order.member_id == m.id, Order.status == Order.BUYING)
+                        .values(created_at=_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(minutes=5)))
+        await s.commit()
+    await selling.recover_buying()
+    async with session_factory() as s:
+        from sqlalchemy import select as _select
+        mine = list((await s.execute(_select(Order).where(Order.member_id == m.id, Order.country == "6"))).scalars())
+    check("…recovery replays the stored ceiling and finds the number (no conflict)",
+          mine and mine[0].nh_id is not None and mine[0].status != Order.BUYING and mine[0].member_price == D("0.40"),
+          str([(o.status, o.nh_id) for o in mine]))
+
+    # NumberHub's real price is higher than the list: the member sees THIS
+    # route's custom price at the real price, not the plain commission.
+    api.true_reserve[("wa", "0")] = "0.70"
+    await repo.set_price_rule(r.id, "wa", "0", PriceRule.PCT, D("5"), "WhatsApp", "Russia")
+    selling.forget_prices(r.id)
+    api.countries["wa"][2]["in_stock"] = True
+    try:
+        await selling.buy(r, m, "wa", "0", shown_price=D("0.53"))
+        check("price changed", False)
+    except SellError as exc:
+        check("price went up: the new price is the route's own rule (0.70 + 5%)",
+              exc.reason == "price_changed" and exc.price == D("0.74"), str((exc.reason, exc.price)))
+
+    print("custom prices: the admin panel")
+    session = FakeSession()
+    bot = fake_bot(session)
+    runtime._bots[r.id] = bot
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(build_router(r.id))
+    for rid_ in [x.id for x in await repo.price_rules(r.id)]:
+        await repo.delete_price_rule(r.id, rid_)
+    selling.forget_prices(r.id)
+    await dp.feed_update(bot, msg(OWNER, "/admin"))
+    check("the admin panel has 🏷 Custom prices", button(session, "Custom prices") is not None)
+    await dp.feed_update(bot, tap(OWNER, button(session, "Custom prices")))
+    check("…which explains the rules and that a fixed price never sells at a loss",
+          "Custom prices" in session.last_text() and "never sells below NumberHub's price" in session.last_text()
+          and "No custom prices yet" in session.last_text())
+    await dp.feed_update(bot, tap(OWNER, button(session, "Add a custom price")))
+    check("pick an app: popular apps as buttons", button(session, "WhatsApp") is not None)
+    await dp.feed_update(bot, msg(OWNER, "tele"))
+    check("…or type its name", "Apps matching" in session.last_text() and button(session, "Telegram") is not None)
+    await dp.feed_update(bot, tap(OWNER, button(session, "Telegram")))
+    check("pick a country: all, or one with NumberHub's price",
+          button(session, "All countries") is not None and button(session, "USA · NumberHub $1.10") is not None)
+    await dp.feed_update(bot, tap(OWNER, button(session, "USA")))
+    check("the value step shows NumberHub's price and today's price",
+          "NumberHub's price now: <b>$1.10</b>" in session.last_text() and "$1.43" in session.last_text())
+    await dp.feed_update(bot, msg(OWNER, "abc"))
+    check("a bad price is refused", "Send a price like" in session.last_text())
+    await dp.feed_update(bot, msg(OWNER, "$1.20"))
+    check("a fixed price is saved and the result is shown",
+          "now sells for <b>$1.20</b>" in session.last_text() and "you earn $0.10" in session.last_text()
+          and "Telegram · USA: <b>$1.20 fixed</b>" in session.last_text())
+    tg = await selling.countries(r, "tg", fresh=True)
+    check("…and customers see it at once", tg[0]["member_price"] == D("1.20"))
+    await dp.feed_update(bot, tap(OWNER, button(session, "Add a custom price")))
+    await dp.feed_update(bot, tap(OWNER, button(session, "WhatsApp")))
+    await dp.feed_update(bot, tap(OWNER, button(session, "All countries")))
+    check("all countries: NumberHub's range is shown",
+          "NumberHub's prices for WhatsApp: <b>$0.25</b> to <b>$0.70</b>" in session.last_text(), session.last_text()[:200])
+    await dp.feed_update(bot, msg(OWNER, "5%"))
+    check("a commission for one app", "WhatsApp · all countries: <b>5% commission</b>" in session.last_text())
+    await dp.feed_update(bot, tap(OWNER, button(session, "Add a custom price")))
+    await dp.feed_update(bot, tap(OWNER, button(session, "WhatsApp")))
+    await dp.feed_update(bot, tap(OWNER, button(session, "USA")))
+    await dp.feed_update(bot, msg(OWNER, "0.10"))
+    check("below NumberHub's price: saved, with a plain warning that it sells at NumberHub's price",
+          "below NumberHub's price" in session.last_text() and "now sells for <b>$0.30</b>" in session.last_text())
+    await dp.feed_update(bot, tap(OWNER, button(session, "Profit cap")))
+    await dp.feed_update(bot, msg(OWNER, "0.05"))
+    fresh_r = await repo.get_reseller(r.id)
+    check("a profit cap", fresh_r.max_profit == D("0.05") and "at most <b>$0.05</b>" in session.last_text())
+    await dp.feed_update(bot, tap(OWNER, button(session, "Profit cap")))
+    await dp.feed_update(bot, msg(OWNER, "-"))
+    check("…and removing it", (await repo.get_reseller(r.id)).max_profit is None)
+    n_before = len(await repo.price_rules(r.id))
+    await dp.feed_update(bot, tap(OWNER, button(session, "🗑 1")))
+    check("🗑 removes a custom price", len(await repo.price_rules(r.id)) == n_before - 1
+          and "removed" in session.last_text())
+    await dp.feed_update(bot, tap(ALICE + 500, "a:prices:"))
+    check("a customer can't open the price screen", "Custom prices" not in (session.last_text() or "")
+          or session.requests[-1].__class__.__name__ == "AnswerCallbackQuery")
+    await dp.feed_update(bot, tap(OWNER, "a:pr_del:999999"))
+    check("removing a rule that isn't there is harmless", "Custom prices" in session.last_text())
+
+    print("custom prices: an older database")
+    from sqlalchemy import text as _text
+    from app.db import engine, init_db as _init
+    async with engine.begin() as conn:
+        await conn.execute(_text("ALTER TABLE orders DROP COLUMN ceiling_at_buy"))
+        await conn.execute(_text("ALTER TABLE resellers DROP COLUMN max_profit"))
+    await _init()
+    async with engine.begin() as conn:
+        cols = {row[1] for row in (await conn.execute(_text("PRAGMA table_info(orders)"))).all()}
+        rcols = {row[1] for row in (await conn.execute(_text("PRAGMA table_info(resellers)"))).all()}
+    check("start-up adds the new columns to a database from before",
+          "ceiling_at_buy" in cols and "max_profit" in rcols)
+
+
 async def test_paused_shop():
     print("a paused shop")
     from app.bots.reseller import build_router
@@ -1010,7 +1171,7 @@ async def main():
     test_prices()
     test_i18n()
     for fn in (test_buy_and_code, test_no_code_refund, test_failures, test_lost_reply, test_cancel,
-               test_races_and_limits, test_bot_flow, test_builder, test_provision, test_paused_shop, test_review_money,
+               test_races_and_limits, test_bot_flow, test_builder, test_provision, test_custom_prices, test_paused_shop, test_review_money,
                test_review_sync, test_review_bots, test_review_runtime, test_cards_render):
         try:
             await fn()

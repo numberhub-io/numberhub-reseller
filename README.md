@@ -107,6 +107,7 @@ Open your own shop bot and send `/admin`, or tap ⚙️ Admin panel in the menu 
 | 👥 Customers | The latest 25 customers with their IDs and balances |
 | 📣 Broadcast | Sends your message to every customer of this bot |
 | 💲 Commission | Changes your commission. It applies to new purchases only |
+| 🏷 Custom prices | Your own price for one app, or for one app in one country: a fixed price (`0.35`) or its own commission (`10%`). Also a profit cap: the most you earn on one number |
 | 📝 Welcome text | Replaces the greeting on the menu |
 | 🆘 Support contact | A `@username` or an `https://` link. Customers see it on their balance screen |
 | 🚫 Block / unblock | A blocked customer cannot use the bot |
@@ -114,6 +115,15 @@ Open your own shop bot and send `/admin`, or tap ⚙️ Admin panel in the menu 
 ### How the commission works
 
 Your commission is a percentage added on top of NumberHub's price for each country. With a 30% commission, a number NumberHub prices at $0.25 costs your customer $0.33 (rounded up to the cent) and you keep $0.08. The bot uses NumberHub's highest price for that route (`price_max`) as the base, so NumberHub can never charge you more for a sale than the customer paid.
+
+### Custom prices
+
+One commission for everything can make expensive numbers too dear for your customers. Under ⚙️ Admin panel → 🏷 Custom prices you can:
+
+- give any app its own price for all countries, or for one country: a fixed price like `0.35`, or its own commission like `10%`;
+- set a profit cap: the most you earn on one number (for example `0.20`), so a $2.00 number sells for $2.20 instead of $2.60 at 30%.
+
+The most specific setting wins: the app in that country, then the app, then your commission (held to the cap). A fixed price never sells below NumberHub's price: if NumberHub's price goes above it, that number sells at NumberHub's price and you earn nothing on it, but you never pay for a customer's number. The screen shows NumberHub's current price for the app and country while you set it, and warns you when your price is below it.
 
 ### Alerts you may get
 

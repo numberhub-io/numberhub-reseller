@@ -41,6 +41,9 @@ class Reseller(Base):
     api_key_enc: Mapped[str] = mapped_column(Text)
     api_key_hint: Mapped[str | None] = mapped_column(String(16), nullable=True)
     markup_pct: Mapped[Decimal] = mapped_column(Numeric(6, 2), default=Decimal("30"))
+    # Most the shop earns on one number, in dollars (None = no cap): with a percent
+    # commission an expensive number would otherwise cost the member a lot more.
+    max_profit: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     welcome_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     support_contact: Mapped[str | None] = mapped_column(String(128), nullable=True)
     status: Mapped[str] = mapped_column(String(16), default=ACTIVE, index=True)
@@ -118,6 +121,10 @@ class Order(Base):
     # The markup in force when bought: the purchase request (and its replay after a
     # lost reply) is rebuilt from it, not from today's setting.
     markup_pct_at_buy: Mapped[Decimal] = mapped_column(Numeric(6, 2), default=Decimal("0"))
+    # The NumberHub price ceiling sent with the purchase. A custom price breaks the
+    # "member price = ceiling + commission" relation, so the recovery replay (which
+    # must send the SAME body) reads it from here. None on orders from before.
+    ceiling_at_buy: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     nh_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     status: Mapped[str] = mapped_column(String(16), default=BUYING, index=True)
     codes: Mapped[str] = mapped_column(Text, default="[]")
@@ -129,3 +136,25 @@ class Order(Base):
     message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class PriceRule(Base):
+    """The shop's own price for one app (country "") or one app in one country:
+    a fixed price, or its own commission percent. The most specific rule wins:
+    app + country, then the app, then the shop's commission. A fixed price never
+    goes below NumberHub's price for the number (selling.shop_price)."""
+    __tablename__ = "price_rules"
+    __table_args__ = (UniqueConstraint("reseller_id", "service", "country", name="uq_price_rule"),)
+    FIXED = "fixed"
+    PCT = "pct"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    reseller_id: Mapped[int] = mapped_column(ForeignKey("resellers.id", ondelete="CASCADE"), index=True)
+    service: Mapped[str] = mapped_column(String(16))
+    service_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    country: Mapped[str] = mapped_column(String(16), default="")
+    country_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    mode: Mapped[str] = mapped_column(String(8))
+    value: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
+

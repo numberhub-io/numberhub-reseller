@@ -23,7 +23,7 @@ from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 
 from app import repo
 from app.config import settings
-from app.models import Member, Order, Reseller
+from app.models import Member, Order, PriceRule, Reseller
 from app.numberhub import NumberHub, NumberHubError, TransportError, authoritative, dec, flag
 
 log = logging.getLogger(__name__)
@@ -57,6 +57,29 @@ def drop_client(reseller_id: int) -> NumberHub | None:
 # ─── prices / catalog ────────────────────────────────────────────────────────
 def member_price(ceiling: Decimal, markup_pct: Decimal) -> Decimal:
     return (Decimal(ceiling) * (1 + Decimal(markup_pct) / 100)).quantize(CENT, rounding=ROUND_CEILING)
+
+
+async def price_rules(reseller_id: int) -> dict[tuple[str, str], PriceRule]:
+    return {(r.service, r.country): r for r in await repo.price_rules(reseller_id)}
+
+
+def shop_price(reseller: Reseller, rules: dict, service: str, country: str, ceiling) -> Decimal:
+    """What a member pays for one number of this app in this country.
+
+    The owner's most specific rule wins (this app in this country, then this app
+    everywhere), else the shop's commission; a percent price is then held to the
+    profit cap. A fixed price never goes below NumberHub's price for the number:
+    when NumberHub's price rises above it the number sells at NumberHub's price,
+    so the owner earns nothing on it but never pays for a customer's number."""
+    ceiling = Decimal(ceiling)
+    rule = rules.get((service, str(country))) or rules.get((service, ""))
+    if rule is not None and rule.mode == PriceRule.FIXED:
+        return max(Decimal(rule.value), ceiling).quantize(CENT, rounding=ROUND_CEILING)
+    price = member_price(ceiling, Decimal(rule.value) if rule is not None else reseller.markup_pct)
+    cap = getattr(reseller, "max_profit", None)
+    if cap is not None:
+        price = min(price, (ceiling + Decimal(cap)).quantize(CENT, rounding=ROUND_CEILING))
+    return price
 
 
 _svc_cache: tuple[float, list[dict]] = (0.0, [])
@@ -119,13 +142,15 @@ async def countries(reseller: Reseller, service: str, fresh: bool = False) -> li
         rows = await cli.countries(service)
     except NumberHubError as exc:
         raise _map_error(exc, reseller) from exc
+    rules = await price_rules(reseller.id)
     out = []
     for r in rows:
         ceiling = dec(r.get("price_max") or r.get("price"))
         if ceiling <= 0:
             continue
         ceiling = max(ceiling, learned_ceiling(reseller.id, service, str(r.get("country"))))
-        out.append({**r, "ceiling": ceiling, "member_price": member_price(ceiling, reseller.markup_pct),
+        out.append({**r, "ceiling": ceiling,
+                    "member_price": shop_price(reseller, rules, service, str(r.get("country")), ceiling),
                     "emoji": flag(r.get("flag"))})
     out.sort(key=_quality_key)
     _country_cache[key] = (time.monotonic(), out)
@@ -145,6 +170,20 @@ FROM_PRICE_TTL = 900
 def from_price(reseller_id: int, service: str) -> Decimal | None:
     hit = _from_price.get((reseller_id, service))
     return hit[1] if hit and time.monotonic() - hit[0] < FROM_PRICE_TTL else None
+
+
+def price_example(reseller_id: int, service: str) -> tuple[Decimal, Decimal] | None:
+    """(NumberHub's price, the member's price) of this app's cheapest in-stock
+    country, from the cached list: the admin panel's worked example, true with
+    custom prices and the cap (the commission alone can't rebuild it)."""
+    hit = _country_cache.get((reseller_id, service))
+    if not hit:
+        return None
+    rows = [r for r in hit[1] if r.get("in_stock") and not r.get("rate_dead")] or hit[1]
+    if not rows:
+        return None
+    best = min(rows, key=lambda r: r["member_price"])
+    return best["ceiling"], best["member_price"]
 
 
 async def warm_popular(reseller: Reseller) -> None:
@@ -315,7 +354,7 @@ async def _buy(reseller: Reseller, member: Member, service: str, country: str,
     order = await repo.create_order_with_hold(
         reseller_id=reseller.id, member_id=member.id, service=service, service_name=svc_name,
         country=country, country_name=row.get("name"), country_iso=(row.get("flag") or None),
-        member_price=price, markup_pct_at_buy=reseller.markup_pct)
+        member_price=price, markup_pct_at_buy=reseller.markup_pct, ceiling_at_buy=row["ceiling"])
     if order is None:
         raise SellError("no_credit", price)
     _inflight.add(order.id)
@@ -332,6 +371,11 @@ async def _buy(reseller: Reseller, member: Member, service: str, country: str,
             await repo.fail_order(order.id)
             if exc.code == "price_exceeded":
                 learn_ceiling(reseller.id, service, country, exc.data.get("price"))
+                # The member is shown THIS route's price at NumberHub's real price
+                # (the owner's rule or cap included), not the plain commission.
+                new = shop_price(reseller, await price_rules(reseller.id), service, country,
+                                 dec(exc.data.get("price")))
+                raise SellError("price_changed", new) from exc
             raise _map_error(exc, reseller) from exc
         except Exception:
             # e.g. the HTTP client was closed under us. The request may have gone
@@ -435,9 +479,11 @@ async def recover_buying() -> None:
         cli = client_for(order.reseller_id)
         if reseller is None or cli is None:
             continue
-        # The replay needs the SAME request body. The original ceiling comes back
-        # exactly from the member price: ceil(c*k)/k floored to cents == c.
-        ceiling = original_ceiling(order.member_price, order.markup_pct_at_buy)
+        # The replay needs the SAME request body: the ceiling stored at purchase.
+        # Orders from before it was stored get it back from the member price
+        # (ceil(c*k)/k floored to cents == c), true while prices were commission-only.
+        ceiling = (Decimal(order.ceiling_at_buy) if order.ceiling_at_buy is not None
+                   else original_ceiling(order.member_price, order.markup_pct_at_buy))
         _inflight.add(order.id)
         try:
             nh = await cli.buy(order.service, order.country, ceiling, idempotency_key(order))

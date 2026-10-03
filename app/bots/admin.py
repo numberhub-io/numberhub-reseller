@@ -46,15 +46,22 @@ async def dashboard(reseller: Reseller):
         return f"📊 {label}: <b>{s['orders']}</b> sold · {money(s['sales'])} · profit ≈ <b>{money(profit)}</b>"
 
     commission = pct(reseller.markup_pct)
-    # A worked example from a real route when its price is known, else $1.00.
-    cust = selling.from_price(reseller.id, "wa")
-    if cust is not None:
-        nh = selling.original_ceiling(cust, reseller.markup_pct)
+    # A worked example from a real route when its price is known (custom prices and
+    # the cap included), else a $1.00 number at the shop's commission.
+    ex = selling.price_example(reseller.id, "wa")
+    if ex is not None:
+        nh, cust = ex
         example = (f"<i>e.g. 💬 WhatsApp: NumberHub {money(nh)} → your customers {money(cust)} "
                    f"→ you earn {money(cust - nh)}</i>")
     else:
-        cust = selling.member_price(Decimal("1.00"), reseller.markup_pct)
+        cust = selling.shop_price(reseller, {}, "", "", Decimal("1.00"))
         example = f"<i>e.g. a $1.00 number sells for {money(cust)} → you earn {money(cust - Decimal('1.00'))}</i>"
+    n_rules = await repo.count_price_rules(reseller.id)
+    extras = []
+    if getattr(reseller, "max_profit", None) is not None:
+        extras.append(f"💰 Most you earn on one number: <b>{money(reseller.max_profit)}</b>")
+    if n_rules:
+        extras.append(f"🏷 Custom prices: <b>{n_rules}</b>")
 
     text = "\n".join([
         f"⚙️ <b>Admin panel</b> · @{esc(reseller.bot_username)}",
@@ -64,6 +71,7 @@ async def dashboard(reseller: Reseller):
         "",
         f"💲 Your commission: <b>{commission}%</b> on top of NumberHub's price",
         f"     {example}",
+        *extras,
         f"🏦 NumberHub wallet: {wallet}",
         f"🔗 Share your bot: <code>t.me/{esc(reseller.bot_username)}</code>",
         "",
@@ -76,13 +84,152 @@ async def dashboard(reseller: Reseller):
     kb.button(text="👥 Customers", callback_data=Adm(a="members"))
     kb.button(text="📣 Broadcast", callback_data=Adm(a="broadcast"))
     kb.button(text="💲 Commission", callback_data=Adm(a="markup"))
+    kb.button(text="🏷 Custom prices", callback_data=Adm(a="prices"))
     kb.button(text="📝 Welcome text", callback_data=Adm(a="welcome"))
     kb.button(text="🆘 Support contact", callback_data=Adm(a="support"))
     kb.button(text="🚫 Block / unblock", callback_data=Adm(a="block"))
     kb.button(text="🔄 Refresh", callback_data=Adm(a="home"))
     kb.button(text="🏠 Menu", callback_data=Nav(to="menu"))
-    kb.adjust(2, 2, 2, 2, 2)
+    kb.adjust(2, 2, 2, 2, 2, 1)
     return text, kb.as_markup()
+
+
+MAX_RULES = 200
+MAX_FIXED = Decimal("1000")
+
+
+def rule_text(r) -> str:
+    where = esc(r.country_name or r.country) if r.country else "all countries"
+    what = f"{money(r.value)} fixed" if r.mode == "fixed" else f"{pct(r.value)}% commission"
+    return f"{esc(r.service_name or r.service)} · {where}: <b>{what}</b>"
+
+
+async def prices_screen(reseller: Reseller, note: str = ""):
+    rules = await repo.price_rules(reseller.id)
+    cap = getattr(reseller, "max_profit", None)
+    lines = ([note, ""] if note else []) + [
+        "🏷 <b>Custom prices</b>",
+        "",
+        f"Every number sells at NumberHub's price + your commission (<b>{pct(reseller.markup_pct)}%</b>)"
+        + (f", and you earn at most <b>{money(cap)}</b> on one number." if cap is not None else "."),
+        "Give any app, or an app in one country, its own price: a fixed price or its own commission.",
+        "<i>A fixed price never sells below NumberHub's price: if NumberHub's price goes above it, "
+        "that number sells at NumberHub's price and you earn nothing on it, but you never pay for it.</i>",
+        "",
+    ]
+    kb = InlineKeyboardBuilder()
+    if rules:
+        for i, r in enumerate(rules, 1):
+            lines.append(f"{i}. {rule_text(r)}")
+            kb.button(text=f"🗑 {i}", callback_data=Adm(a="pr_del", arg=str(r.id)))
+    else:
+        lines.append("No custom prices yet.")
+    n = len(rules)
+    kb.button(text="➕ Add a custom price", callback_data=Adm(a="pr_add"))
+    kb.button(text="💰 Profit cap", callback_data=Adm(a="cap"))
+    kb.button(text="⬅️ Admin panel", callback_data=Adm(a="home"))
+    kb.adjust(*([5] * (n // 5) + ([n % 5] if n % 5 else [])), 1, 1, 1)
+    return "\n".join(lines), kb.as_markup()
+
+
+def _back_to_prices():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✖️ Cancel", callback_data=Adm(a="prices"))
+    return kb
+
+
+async def app_picker(reseller: Reseller, query: str = ""):
+    """Popular apps as buttons, or the apps whose name matches what was typed."""
+    from app.catalog_ui import POPULAR, icon, nice_name
+    kb = InlineKeyboardBuilder()
+    if query:
+        q = query.strip().lower()
+        items = await selling.services(reseller)
+        hits = [s for s in items if q == s["code"].lower() or q in nice_name(s["code"], s["name"]).lower()]
+        hits.sort(key=lambda s: (not nice_name(s["code"], s["name"]).lower().startswith(q),
+                                 len(s["name"])))
+        for s in hits[:12]:
+            kb.button(text=f"{icon(s['code'])} {nice_name(s['code'], s['name'])}"[:60],
+                      callback_data=Adm(a="pr_app", arg=s["code"]))
+        text = (f"🏷 Apps matching <b>{esc(query)}</b>:" if hits
+                else f"❌ No app matches <b>{esc(query)}</b>. Send another name.")
+    else:
+        for code, emoji, name in POPULAR[:12]:
+            kb.button(text=f"{emoji} {name}", callback_data=Adm(a="pr_app", arg=code))
+        text = "🏷 <b>Which app?</b>\n\nTap one, or send the app's name (for example <code>tiktok</code>)."
+    kb.button(text="✖️ Cancel", callback_data=Adm(a="prices"))
+    kb.adjust(2)
+    return text, kb.as_markup()
+
+
+async def country_picker(reseller: Reseller, service: str, query: str = ""):
+    """All countries, or one: the cheapest in-stock countries with NumberHub's price."""
+    from app.catalog_ui import nice_name
+    name = nice_name(service, selling.service_name(await selling.services(reseller), service))
+    kb = InlineKeyboardBuilder()
+    try:
+        rows = await selling.countries(reseller, service)
+    except selling.SellError:
+        rows = []
+    if query:
+        q = query.strip().lower()
+        rows = [r for r in rows if q in str(r.get("name") or "").lower()]
+    else:
+        kb.button(text="🌍 All countries", callback_data=Adm(a="pr_cty", arg=f"{service}|*"))
+        rows = [r for r in rows if r.get("in_stock")] or rows
+    for r in rows[:16]:
+        kb.button(text=f"{r.get('emoji', '')} {r.get('name')} · NumberHub {money(r['ceiling'])}"[:60],
+                  callback_data=Adm(a="pr_cty", arg=f"{service}|{r['country']}"))
+    kb.button(text="✖️ Cancel", callback_data=Adm(a="prices"))
+    kb.adjust(1)
+    if query and not rows:
+        text = f"❌ No country matches <b>{esc(query)}</b> for {esc(name)}. Send another name."
+    else:
+        text = (f"🏷 <b>{esc(name)}</b>: one price for all countries, or for one country?\n\n"
+                "Tap one, or send a country name.")
+    return text, kb.as_markup()
+
+
+async def value_prompt(reseller: Reseller, service: str, country: str):
+    from app.catalog_ui import nice_name
+    name = nice_name(service, selling.service_name(await selling.services(reseller), service))
+    try:
+        rows = await selling.countries(reseller, service)
+    except selling.SellError:
+        rows = []
+    if country:
+        row = next((r for r in rows if str(r["country"]) == country), None)
+        where = f"{row.get('emoji', '')} {esc(row.get('name'))}" if row else esc(country)
+        now = (f"NumberHub's price now: <b>{money(row['ceiling'])}</b> · your customers pay now: "
+               f"<b>{money(row['member_price'])}</b>") if row else "This country has no number right now."
+    else:
+        where = "all countries"
+        if rows:
+            low, high = min(r["ceiling"] for r in rows), max(r["ceiling"] for r in rows)
+            now = f"NumberHub's prices for {esc(name)}: <b>{money(low)}</b> to <b>{money(high)}</b> by country."
+        else:
+            now = "No country has a number right now."
+    text = (f"🏷 <b>{esc(name)}</b> · {where}\n{now}\n\n"
+            "Send your price:\n• a fixed price, for example <code>0.35</code>\n"
+            f"• or a commission, for example <code>10%</code> (0–{pct(settings.max_markup_pct)}%)")
+    return text, _back_to_prices().as_markup()
+
+
+def parse_price(raw: str) -> tuple[str, Decimal] | None:
+    """'0.35' / '$0.35' -> fixed; '10%' -> commission. None when it isn't one."""
+    text = (raw or "").strip().replace(",", ".").replace("$", "").replace(" ", "")
+    mode = "pct" if text.endswith("%") else "fixed"
+    try:
+        v = Decimal(text.rstrip("%"))
+    except (InvalidOperation, ValueError):
+        return None
+    if not v.is_finite():
+        return None
+    if mode == "pct" and not Decimal("0") <= v <= settings.max_markup_pct:
+        return None
+    if mode == "fixed" and not Decimal("0.01") <= v <= MAX_FIXED:
+        return None
+    return mode, v.quantize(Decimal("0.01"))
 
 
 AMBIGUOUS = ("❌ More than one of your customers has used that username. Send their ID instead "
@@ -122,6 +269,11 @@ def register(r: Router) -> None:
         wrapped.__name__ = handler.__name__
         return wrapped
 
+    async def reply(m: Message, screen) -> None:
+        """Send a (text, keyboard) screen as a new message."""
+        text, kb = screen
+        await m.answer(text, reply_markup=kb, disable_web_page_preview=True)
+
     async def show(target, text, kb=None):
         from app.bots.reseller import _show
         await _show(target, text, kb)
@@ -156,6 +308,34 @@ def register(r: Router) -> None:
         elif a == "broadcast" and reseller.status == Reseller.SUSPENDED:
             await c.answer("This bot was disabled by the platform: broadcasts are off.", show_alert=True)
             return
+        elif a == "prices":
+            await show(c, *await prices_screen(reseller))
+        elif a == "pr_del":
+            ok = callback_data.arg.isdigit() and await repo.delete_price_rule(reseller.id, int(callback_data.arg))
+            selling.forget_prices(reseller.id)
+            await show(c, *await prices_screen(reseller, "🗑 Custom price removed." if ok else ""))
+        elif a == "pr_add":
+            if await repo.count_price_rules(reseller.id) >= MAX_RULES:
+                await c.answer(f"You have {MAX_RULES} custom prices, the most a bot can have. Remove one first.",
+                               show_alert=True)
+                return
+            await state.set_state(AdminForm.price_app)
+            await show(c, *await app_picker(reseller))
+        elif a == "pr_app":
+            await state.set_state(AdminForm.price_country)
+            await state.update_data(service=callback_data.arg)
+            await show(c, *await country_picker(reseller, callback_data.arg))
+        elif a == "pr_cty":
+            service, _, country = callback_data.arg.partition("|")
+            await state.set_state(AdminForm.price_value)
+            await state.update_data(service=service, country=country if country != "*" else "")
+            await show(c, *await value_prompt(reseller, service, country if country != "*" else ""))
+        elif a == "cap":
+            await state.set_state(AdminForm.profit_cap)
+            now = money(reseller.max_profit) if getattr(reseller, "max_profit", None) is not None else "no cap"
+            await show(c, "💰 <b>Profit cap</b>\n\nSend the most you want to earn on one number, for example "
+                          "<code>0.20</code>. Expensive numbers then sell at NumberHub's price + at most that.\n"
+                          f"Send <code>-</code> to remove the cap. Now: <b>{now}</b>.", _cancel_kb())
         elif a in PROMPTS:
             n = len(await repo.member_chat_ids(reseller.id)) if a == "broadcast" else 0
             text = PROMPTS[a].format(max=pct(settings.max_markup_pct), now=pct(reseller.markup_pct), n=n)
@@ -230,6 +410,79 @@ def register(r: Router) -> None:
         await repo.update_reseller(reseller.id, markup_pct=v)
         selling.forget_prices(reseller.id)
         await done(m, reseller, state, f"✅ Commission set to <b>{pct(v)}%</b>. Prices update right away.")
+
+    @r.message(StateFilter(AdminForm.price_app), F.text)
+    @owner_only
+    async def f_price_app(m: Message, reseller: Reseller, state: FSMContext, is_owner: bool = False):
+        await reply(m, await app_picker(reseller, m.text[:40]))
+
+    @r.message(StateFilter(AdminForm.price_country), F.text)
+    @owner_only
+    async def f_price_country(m: Message, reseller: Reseller, state: FSMContext, is_owner: bool = False):
+        service = (await state.get_data()).get("service") or ""
+        text, kb = await country_picker(reseller, service, m.text[:40])
+        await m.answer(text, reply_markup=kb)
+
+    @r.message(StateFilter(AdminForm.price_value), F.text)
+    @owner_only
+    async def f_price_value(m: Message, reseller: Reseller, state: FSMContext, is_owner: bool = False):
+        from app.catalog_ui import nice_name
+        data = await state.get_data()
+        service, country = data.get("service") or "", data.get("country") or ""
+        parsed = parse_price(m.text)
+        if not service or parsed is None:
+            await m.answer("❌ Send a price like <code>0.35</code> (fixed) or <code>10%</code> (commission, "
+                           f"0–{pct(settings.max_markup_pct)}%).", reply_markup=_back_to_prices().as_markup())
+            return
+        mode, value = parsed
+        if not await selling.known_service(reseller, service):
+            await state.clear()
+            await reply(m, await prices_screen(reseller, "❌ That app is not in the catalog any more."))
+            return
+        try:
+            rows = await selling.countries(reseller, service)
+        except selling.SellError:
+            rows = []
+        row = next((r for r in rows if str(r["country"]) == country), None) if country else None
+        svc_name = nice_name(service, selling.service_name(await selling.services(reseller), service))
+        await repo.set_price_rule(reseller.id, service, country, mode, value, service_name=svc_name,
+                                  country_name=(row.get("name") if row else None))
+        await state.clear()
+        selling.forget_prices(reseller.id)
+        fresh = await repo.get_reseller(reseller.id)
+        note = "✅ Custom price saved."
+        if row is not None:
+            price = selling.shop_price(fresh, await selling.price_rules(reseller.id), service, country, row["ceiling"])
+            note += (f" {esc(svc_name)} in {esc(row.get('name'))} now sells for <b>{money(price)}</b> "
+                     f"(NumberHub {money(row['ceiling'])}, you earn {money(price - row['ceiling'])}).")
+            if mode == "fixed" and value < row["ceiling"]:
+                note += (f"\n⚠️ That is below NumberHub's price, so it sells at {money(row['ceiling'])} for now "
+                         "and you earn nothing on it until NumberHub's price drops.")
+        await reply(m, await prices_screen(fresh, note))
+
+    @r.message(StateFilter(AdminForm.profit_cap), F.text)
+    @owner_only
+    async def f_profit_cap(m: Message, reseller: Reseller, state: FSMContext, is_owner: bool = False):
+        raw = m.text.strip().replace("$", "").replace(",", ".")
+        if raw == "-":
+            cap = None
+        else:
+            try:
+                cap = Decimal(raw)
+            except (InvalidOperation, ValueError):
+                cap = Decimal("-1")
+            if not cap.is_finite() or cap < 0 or cap > MAX_FIXED:
+                await m.answer("❌ Send an amount like <code>0.20</code>, or <code>-</code> to remove the cap.",
+                               reply_markup=_cancel_kb())
+                return
+            cap = cap.quantize(Decimal("0.01"))
+        await repo.update_reseller(reseller.id, max_profit=cap)
+        selling.forget_prices(reseller.id)
+        await state.clear()
+        fresh = await repo.get_reseller(reseller.id)
+        note = (f"✅ You now earn at most <b>{money(cap)}</b> on one number." if cap is not None
+                else "✅ Profit cap removed.")
+        await reply(m, await prices_screen(fresh, note))
 
     @r.message(StateFilter(AdminForm.welcome), F.text)
     @owner_only

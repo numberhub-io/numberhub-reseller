@@ -38,6 +38,10 @@ class AdminForm(StatesGroup):
     support = State()
     broadcast = State()
     block = State()
+    price_app = State()        # custom price: which app (typed name)
+    price_country = State()    # ...which country (typed name), app in state data
+    price_value = State()      # ...the price, app + country in state data
+    profit_cap = State()
 
 
 class Context(BaseMiddleware):

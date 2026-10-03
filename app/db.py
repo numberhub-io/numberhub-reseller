@@ -25,6 +25,20 @@ if _is_sqlite:
         cur.close()
 
 
+# Columns added after a table first shipped: create_all() makes new tables but
+# never alters an existing one, so an older database gets them here.
+_ADDED_COLUMNS = (
+    ("resellers", "max_profit", "NUMERIC(12, 2)"),
+    ("orders", "ceiling_at_buy", "NUMERIC(12, 2)"),
+)
+
+
 async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        if _is_sqlite:
+            from sqlalchemy import text
+            for table, column, kind in _ADDED_COLUMNS:
+                have = {row[1] for row in (await conn.execute(text(f"PRAGMA table_info({table})"))).all()}
+                if column not in have:
+                    await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {kind}"))
