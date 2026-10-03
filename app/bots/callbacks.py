@@ -47,3 +47,8 @@ class Adm(CallbackData, prefix="a"):
 
 class Noop(CallbackData, prefix="x"):
     k: str = ""
+
+
+class Dep(CallbackData, prefix="d"):
+    a: str                     # ok | no | amt (owner: approve / reject / approve another amount)
+    id: int

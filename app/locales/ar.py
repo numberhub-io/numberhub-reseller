@@ -78,4 +78,16 @@ T = {
     "lang_set": "✅ تم تغيير اللغة.",
     "blocked": "⛔ حسابك محظور.",
     "bot_paused": "⏸ هذا البوت متوقف مؤقتاً. حاول لاحقاً.",
+    # deposits (customers ask the owner to add balance; the owner approves)
+    'dep_how': '💳 <b>إضافة رصيد</b>\n\n{info}\n\nبعد الدفع، أرسل المبلغ الذي دفعته، مثلًا <code>5</code>.',
+    'dep_min': 'الحد الأدنى: <b>{min}</b>',
+    'dep_bad_amount': '❌ أرسل المبلغ كرقم، مثلًا <code>5</code> أو <code>2.50</code>.',
+    'dep_below_min': '❌ الحد الأدنى هو <b>{min}</b>.',
+    'dep_proof': 'الآن أرسل رقم العملية (Transaction ID) أو لقطة شاشة للدفع.',
+    'dep_bad_proof': '❌ أرسل رقم العملية كنص، أو لقطة شاشة.',
+    'dep_sent': '📨 <b>الإيداع #{n}</b> أُرسل: {amount}\nستصلك رسالة فور موافقة البائع عليه.',
+    'dep_pending': '⏳ إيداعك #{n} ({amount}) ما زال بانتظار البائع.',
+    'dep_approved': '✅ <b>تمت الموافقة على الإيداع #{n}:</b> +{amount}\nرصيدك: <b>{balance}</b>',
+    'dep_rejected': '❌ لم تتم الموافقة على الإيداع #{n} ({amount}). أسئلة؟ {support}',
+    'dep_too_many': '⏳ أرسلت عدة إيداعات اليوم. يرجى انتظار البائع.',
 }

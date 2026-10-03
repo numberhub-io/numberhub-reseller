@@ -14,7 +14,7 @@ from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app import repo, selling
-from app.bots.callbacks import Adm, Nav
+from app.bots.callbacks import Adm, Dep, Nav
 from app.config import settings
 from app.i18n import t
 from app.models import Member, Reseller
@@ -62,6 +62,9 @@ async def dashboard(reseller: Reseller):
         extras.append(f"💰 Most you earn on one number: <b>{money(reseller.max_profit)}</b>")
     if n_rules:
         extras.append(f"🏷 Custom prices: <b>{n_rules}</b>")
+    waiting = len(await repo.pending_deposits(reseller.id, limit=100))
+    if waiting:
+        extras.append(f"💳 Deposits waiting for you: <b>{waiting}</b>")
 
     text = "\n".join([
         f"⚙️ <b>Admin panel</b> · @{esc(reseller.bot_username)}",
@@ -85,12 +88,13 @@ async def dashboard(reseller: Reseller):
     kb.button(text="📣 Broadcast", callback_data=Adm(a="broadcast"))
     kb.button(text="💲 Commission", callback_data=Adm(a="markup"))
     kb.button(text="🏷 Custom prices", callback_data=Adm(a="prices"))
+    kb.button(text="💳 Deposits" + (f" ({waiting})" if waiting else ""), callback_data=Adm(a="deposits"))
     kb.button(text="📝 Welcome text", callback_data=Adm(a="welcome"))
     kb.button(text="🆘 Support contact", callback_data=Adm(a="support"))
     kb.button(text="🚫 Block / unblock", callback_data=Adm(a="block"))
     kb.button(text="🔄 Refresh", callback_data=Adm(a="home"))
     kb.button(text="🏠 Menu", callback_data=Nav(to="menu"))
-    kb.adjust(2, 2, 2, 2, 2, 1)
+    kb.adjust(2, 2, 2, 2, 2, 2)
     return text, kb.as_markup()
 
 
@@ -132,6 +136,94 @@ async def prices_screen(reseller: Reseller, note: str = ""):
     return "\n".join(lines), kb.as_markup()
 
 
+def deposit_card(dep, member: Member | None, status_line: str = "") -> str:
+    who = (f"<code>{member.telegram_id}</code> " + (f"@{esc(member.username)} " if member.username else "")
+           + esc(member.full_name or "")) if member else "?"
+    lines = [f"💳 <b>Deposit #{dep.number}</b> · <b>{money(dep.amount)}</b>", f"From: {who}"]
+    if member is not None:
+        lines.append(f"Their balance now: {money(member.available)}")
+    if dep.proof_text:
+        lines.append(f"Proof: <code>{esc(dep.proof_text)}</code>")
+    if dep.proof_photo:
+        lines.append("Proof: the screenshot above")
+    if status_line:
+        lines += ["", status_line]
+    return "\n".join(lines)
+
+
+def deposit_buttons(dep):
+    kb = InlineKeyboardBuilder()
+    kb.button(text=f"✅ Approve {money(dep.amount)}", callback_data=Dep(a="ok", id=dep.id))
+    kb.button(text="✏️ Other amount", callback_data=Dep(a="amt", id=dep.id))
+    kb.button(text="❌ Reject", callback_data=Dep(a="no", id=dep.id))
+    kb.adjust(1, 2)
+    return kb.as_markup()
+
+
+async def notify_owner_deposit(bot, reseller: Reseller, member: Member, dep) -> None:
+    """The owner gets the request in their own bot, with the screenshot if there is one."""
+    text = deposit_card(dep, member)
+    try:
+        if dep.proof_photo:
+            await bot.send_photo(reseller.owner_id, dep.proof_photo, caption=text, reply_markup=deposit_buttons(dep))
+        else:
+            await bot.send_message(reseller.owner_id, text, reply_markup=deposit_buttons(dep))
+    except Exception:  # noqa: BLE001 — the request is saved: it also waits in ⚙️ Admin → 💳 Deposits
+        log.warning("reseller %s: deposit #%s notice not delivered to the owner", reseller.id, dep.number)
+
+
+async def settle_deposit(bot, reseller: Reseller, deposit_id: int, approve: bool, amount: Decimal | None = None):
+    """Approve or reject, then tell the customer. None = it was already decided."""
+    dep = await repo.decide_deposit(reseller.id, deposit_id, approve, amount)
+    if dep is None:
+        return None
+    member = await repo.get_member(dep.member_id)
+    if member is not None:
+        lang = member.language or "en"
+        if approve:
+            msg = t(lang, "dep_approved", n=dep.number, amount=money(dep.credited), balance=money(member.available))
+        else:
+            from app.bots.reseller import support_label
+            msg = t(lang, "dep_rejected", n=dep.number, amount=money(dep.amount),
+                    support=support_label(reseller, lang))
+        await selling.send(bot, member.telegram_id, msg)
+    return dep, member
+
+
+async def deposits_screen(reseller: Reseller, note: str = ""):
+    rows = await repo.pending_deposits(reseller.id, limit=10)
+    on = bool(reseller.deposit_info)
+    lines = ([note, ""] if note else []) + [
+        "💳 <b>Deposits</b>",
+        "",
+        ("✅ On. Customers tap 💳 Add balance, pay you your way, then send the amount and a "
+         "transaction ID or screenshot. You approve here, and their balance goes up at once."
+         if on else "⏸ Off. Customers send their ID to your support contact and you add balance by hand. "
+                    "Turn deposits on by setting your payment details."),
+    ]
+    if on:
+        lines += ["", "<b>What customers see:</b>", esc(reseller.deposit_info)]
+        if reseller.deposit_min:
+            lines.append(f"Minimum: <b>{money(reseller.deposit_min)}</b>")
+    lines += ["", f"<b>Waiting for you:</b> {len(rows)}" if rows else "Nothing waiting."]
+    kb = InlineKeyboardBuilder()
+    sizes = []
+    for d in rows:
+        member = await repo.get_member(d.member_id)
+        tag = f"@{member.username}" if member and member.username else (str(member.telegram_id) if member else "?")
+        lines.append(f"#{d.number} · {money(d.amount)} · {esc(tag)}"
+                     + (f" · <code>{esc(d.proof_text[:40])}</code>" if d.proof_text else "")
+                     + (" · 🖼" if d.proof_photo else ""))
+        kb.button(text=f"✅ #{d.number} {money(d.amount)}", callback_data=Dep(a="ok", id=d.id))
+        kb.button(text=f"❌ #{d.number}", callback_data=Dep(a="no", id=d.id))
+        sizes.append(2)
+    kb.button(text="✏️ Payment details", callback_data=Adm(a="dep_info"))
+    kb.button(text="📉 Minimum", callback_data=Adm(a="dep_min"))
+    kb.button(text="⬅️ Admin panel", callback_data=Adm(a="home"))
+    kb.adjust(*sizes, 2, 1)
+    return "\n".join(lines), kb.as_markup()
+
+
 def _back_to_prices():
     kb = InlineKeyboardBuilder()
     kb.button(text="✖️ Cancel", callback_data=Adm(a="prices"))
@@ -162,8 +254,14 @@ async def app_picker(reseller: Reseller, query: str = ""):
     return text, kb.as_markup()
 
 
-async def country_picker(reseller: Reseller, service: str, query: str = ""):
-    """All countries, or one: the cheapest in-stock countries with NumberHub's price."""
+PICK_PAGE = 20
+
+
+async def country_picker(reseller: Reseller, service: str, query: str = "", page: int = 0):
+    """All countries, or one. Every country of the app, page by page (the ones
+    with numbers first, as customers see them), each with NumberHub's price; or
+    the ones whose name matches what was typed. Before 2026-10-03 only the first
+    16 in-stock ones were listed and the rest looked unavailable."""
     from app.catalog_ui import nice_name
     name = nice_name(service, selling.service_name(await selling.services(reseller), service))
     kb = InlineKeyboardBuilder()
@@ -173,20 +271,34 @@ async def country_picker(reseller: Reseller, service: str, query: str = ""):
         rows = []
     if query:
         q = query.strip().lower()
-        rows = [r for r in rows if q in str(r.get("name") or "").lower()]
+        rows = [r for r in rows if q in str(r.get("name") or "").lower()
+                or (len(q) == 2 and q == str(r.get("flag") or "").lower())]
+        shown, pages = rows[:PICK_PAGE], 1
     else:
         kb.button(text="🌍 All countries", callback_data=Adm(a="pr_cty", arg=f"{service}|*"))
-        rows = [r for r in rows if r.get("in_stock")] or rows
-    for r in rows[:16]:
-        kb.button(text=f"{r.get('emoji', '')} {r.get('name')} · NumberHub {money(r['ceiling'])}"[:60],
+        pages = max(1, -(-len(rows) // PICK_PAGE))
+        page = min(max(0, page), pages - 1)
+        shown = rows[page * PICK_PAGE:(page + 1) * PICK_PAGE]
+    for r in shown:
+        mark = "" if r.get("in_stock") else " ⏳"
+        kb.button(text=f"{r.get('emoji', '')} {r.get('name')} · NumberHub {money(r['ceiling'])}{mark}"[:60],
                   callback_data=Adm(a="pr_cty", arg=f"{service}|{r['country']}"))
+    sizes = [1] * ((0 if query else 1) + len(shown))
+    if pages > 1:
+        if page > 0:
+            kb.button(text="◀️", callback_data=Adm(a="pr_pg", arg=f"{service}|{page - 1}"))
+        kb.button(text=f"{page + 1}/{pages}", callback_data=Adm(a="pr_pg", arg=f"{service}|{page}"))
+        if page < pages - 1:
+            kb.button(text="▶️", callback_data=Adm(a="pr_pg", arg=f"{service}|{page + 1}"))
+        sizes.append(1 + (page > 0) + (page < pages - 1))
     kb.button(text="✖️ Cancel", callback_data=Adm(a="prices"))
-    kb.adjust(1)
+    sizes.append(1)
+    kb.adjust(*sizes)
     if query and not rows:
         text = f"❌ No country matches <b>{esc(query)}</b> for {esc(name)}. Send another name."
     else:
         text = (f"🏷 <b>{esc(name)}</b>: one price for all countries, or for one country?\n\n"
-                "Tap one, or send a country name.")
+                f"Tap one ({len(rows)} countries; ⏳ = no number right now), or send a country name.")
     return text, kb.as_markup()
 
 
@@ -308,6 +420,20 @@ def register(r: Router) -> None:
         elif a == "broadcast" and reseller.status == Reseller.SUSPENDED:
             await c.answer("This bot was disabled by the platform: broadcasts are off.", show_alert=True)
             return
+        elif a == "deposits":
+            await show(c, *await deposits_screen(reseller))
+        elif a == "dep_info":
+            await state.set_state(AdminForm.dep_info)
+            await show(c, "✏️ <b>Payment details</b>\n\nSend what your customers see when they add balance: how "
+                          "to pay you, for example:\n<code>bKash: 01XXXXXXXXX\nBinance Pay ID: 123456789\n"
+                          "USDT (TRC20): T...</code>\n\nUp to 1000 characters. Send <code>-</code> to turn "
+                          "deposits off.", _cancel_kb())
+        elif a == "dep_min":
+            await state.set_state(AdminForm.dep_min)
+            now = money(reseller.deposit_min) if reseller.deposit_min else "none"
+            await show(c, "📉 <b>Minimum deposit</b>\n\nSend the smallest amount a customer may send, for "
+                          f"example <code>1</code>. Send <code>-</code> for no minimum. Now: <b>{now}</b>.",
+                       _cancel_kb())
         elif a == "prices":
             await show(c, *await prices_screen(reseller))
         elif a == "pr_del":
@@ -325,6 +451,11 @@ def register(r: Router) -> None:
             await state.set_state(AdminForm.price_country)
             await state.update_data(service=callback_data.arg)
             await show(c, *await country_picker(reseller, callback_data.arg))
+        elif a == "pr_pg":
+            service, _, pg = callback_data.arg.partition("|")
+            await state.set_state(AdminForm.price_country)
+            await state.update_data(service=service)
+            await show(c, *await country_picker(reseller, service, page=int(pg) if pg.isdigit() else 0))
         elif a == "pr_cty":
             service, _, country = callback_data.arg.partition("|")
             await state.set_state(AdminForm.price_value)
@@ -410,6 +541,90 @@ def register(r: Router) -> None:
         await repo.update_reseller(reseller.id, markup_pct=v)
         selling.forget_prices(reseller.id)
         await done(m, reseller, state, f"✅ Commission set to <b>{pct(v)}%</b>. Prices update right away.")
+
+    async def _mark_card(c: CallbackQuery, dep, member, status_line: str) -> None:
+        """The owner's request message keeps its text and shows how it ended."""
+        text = deposit_card(dep, member, status_line)
+        try:
+            if c.message.photo:
+                await c.message.edit_caption(caption=text, reply_markup=None)
+            else:
+                await c.message.edit_text(text, reply_markup=None)
+        except Exception:  # noqa: BLE001 — old or already edited: the outcome is already saved
+            pass
+
+    @r.callback_query(Dep.filter())
+    @owner_only
+    async def dep_decide(c: CallbackQuery, callback_data: Dep, reseller: Reseller, state: FSMContext,
+                         is_owner: bool = False):
+        dep = await repo.get_deposit(reseller.id, callback_data.id)
+        if dep is None:
+            await c.answer("Not found.", show_alert=True)
+            return
+        if dep.status != dep.PENDING:
+            word = "approved" if dep.status == dep.APPROVED else "rejected"
+            await c.answer(f"Deposit #{dep.number} was already {word}.", show_alert=True)
+            return
+        if callback_data.a == "amt":
+            await state.set_state(AdminForm.dep_amount)
+            await state.update_data(dep_id=dep.id)
+            await c.message.answer(f"✏️ Send the amount to add for deposit #{dep.number} "
+                                   f"(they said {money(dep.amount)}), for example <code>4.50</code>.",
+                                   reply_markup=_cancel_kb())
+            await c.answer()
+            return
+        done_ = await settle_deposit(c.bot, reseller, dep.id, approve=callback_data.a == "ok")
+        if done_ is None:
+            await c.answer("Already handled.", show_alert=True)
+            return
+        dep, member = done_
+        line = (f"✅ Approved: +{money(dep.credited)} added." if dep.status == dep.APPROVED
+                else "❌ Rejected. The customer was told.")
+        await _mark_card(c, dep, member, line)
+        await c.answer(line)
+
+    @r.message(StateFilter(AdminForm.dep_amount), F.text)
+    @owner_only
+    async def f_dep_amount(m: Message, reseller: Reseller, state: FSMContext, is_owner: bool = False):
+        amount = parse_amount(m.text)
+        if amount is None:
+            await m.answer("❌ Send an amount like <code>4.50</code>.", reply_markup=_cancel_kb())
+            return
+        dep_id = (await state.get_data()).get("dep_id")
+        await state.clear()
+        done_ = await settle_deposit(m.bot, reseller, int(dep_id or 0), approve=True, amount=amount)
+        if done_ is None:
+            await reply(m, await deposits_screen(reseller, "That deposit was already handled."))
+            return
+        dep, _member = done_
+        await reply(m, await deposits_screen(reseller, f"✅ Deposit #{dep.number} approved: "
+                                                       f"+{money(dep.credited)} added."))
+
+    @r.message(StateFilter(AdminForm.dep_info), F.text)
+    @owner_only
+    async def f_dep_info(m: Message, reseller: Reseller, state: FSMContext, is_owner: bool = False):
+        text = m.text.strip()
+        if len(text) > 1000:
+            await m.answer(f"❌ That is {len(text)} characters: the limit is 1000.", reply_markup=_cancel_kb())
+            return
+        await repo.update_reseller(reseller.id, deposit_info=None if text == "-" else text)
+        await state.clear()
+        note = "⏸ Deposits are off." if text == "-" else "✅ Payment details saved: deposits are on."
+        await reply(m, await deposits_screen(await repo.get_reseller(reseller.id), note))
+
+    @r.message(StateFilter(AdminForm.dep_min), F.text)
+    @owner_only
+    async def f_dep_min(m: Message, reseller: Reseller, state: FSMContext, is_owner: bool = False):
+        raw = m.text.strip()
+        value = None if raw == "-" else parse_amount(raw)
+        if raw != "-" and value is None:
+            await m.answer("❌ Send an amount like <code>1</code>, or <code>-</code> for no minimum.",
+                           reply_markup=_cancel_kb())
+            return
+        await repo.update_reseller(reseller.id, deposit_min=value)
+        await state.clear()
+        note = f"✅ Minimum deposit: {money(value)}." if value else "✅ No minimum."
+        await reply(m, await deposits_screen(await repo.get_reseller(reseller.id), note))
 
     @r.message(StateFilter(AdminForm.price_app), F.text)
     @owner_only

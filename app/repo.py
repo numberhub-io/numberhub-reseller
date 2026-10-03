@@ -11,7 +11,7 @@ from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.db import session_factory
-from app.models import Member, MemberTx, Order, PriceRule, Reseller
+from app.models import Deposit, Member, MemberTx, Order, PriceRule, Reseller
 
 
 def _now() -> dt.datetime:
@@ -64,7 +64,7 @@ async def list_resellers(status: str | None = None, owner_id: int | None = None)
 
 async def update_reseller(reseller_id: int, **values) -> None:
     allowed = {"markup_pct", "welcome_text", "support_contact", "status", "bot_username", "bot_title",
-               "bot_token_enc", "api_key_enc", "api_key_hint", "max_profit"}
+               "bot_token_enc", "api_key_enc", "api_key_hint", "max_profit", "deposit_info", "deposit_min"}
     values = {k: v for k, v in values.items() if k in allowed}
     if values:
         async with session_factory() as s:
@@ -494,4 +494,87 @@ async def delete_price_rule(reseller_id: int, rule_id: int) -> bool:
 async def count_price_rules(reseller_id: int) -> int:
     async with session_factory() as s:
         return int(await s.scalar(select(func.count(PriceRule.id)).where(PriceRule.reseller_id == reseller_id)) or 0)
+
+
+# ─── deposits ────────────────────────────────────────────────────────────────
+DEPOSITS_PER_DAY = 5
+
+
+async def pending_deposit(member_id: int) -> Deposit | None:
+    async with session_factory() as s:
+        return (await s.execute(select(Deposit).where(Deposit.member_id == member_id,
+                                                      Deposit.status == Deposit.PENDING)
+                                .order_by(Deposit.id.desc()).limit(1))).scalar_one_or_none()
+
+
+async def deposits_today(member_id: int) -> int:
+    since = _now() - dt.timedelta(hours=24)
+    async with session_factory() as s:
+        return int(await s.scalar(select(func.count(Deposit.id)).where(
+            Deposit.member_id == member_id, Deposit.created_at >= since)) or 0)
+
+
+async def create_deposit(reseller_id: int, member_id: int, amount: Decimal, proof_text: str | None,
+                         proof_photo: str | None) -> Deposit | None:
+    """A new pending request, numbered #1, #2, ... per shop. None when the member
+    already has one waiting (one at a time)."""
+    for _ in range(5):                       # two shops' members racing for the same number
+        async with session_factory() as s:
+            if (await s.execute(select(Deposit.id).where(Deposit.member_id == member_id,
+                                                         Deposit.status == Deposit.PENDING))).first():
+                return None
+            n = int(await s.scalar(select(func.max(Deposit.number)).where(Deposit.reseller_id == reseller_id)) or 0)
+            row = Deposit(reseller_id=reseller_id, member_id=member_id, number=n + 1, amount=amount,
+                          proof_text=proof_text, proof_photo=proof_photo, status=Deposit.PENDING)
+            s.add(row)
+            try:
+                await s.commit()
+            except Exception:  # noqa: BLE001 — the number was taken meanwhile: take the next
+                await s.rollback()
+                continue
+            await s.refresh(row)
+            return row
+    return None
+
+
+async def get_deposit(reseller_id: int, deposit_id: int) -> Deposit | None:
+    async with session_factory() as s:
+        row = await s.get(Deposit, deposit_id)
+        return row if row is not None and row.reseller_id == reseller_id else None
+
+
+async def pending_deposits(reseller_id: int, limit: int = 20) -> list[Deposit]:
+    async with session_factory() as s:
+        q = (select(Deposit).where(Deposit.reseller_id == reseller_id, Deposit.status == Deposit.PENDING)
+             .order_by(Deposit.id).limit(limit))
+        return list((await s.execute(q)).scalars())
+
+
+async def decide_deposit(reseller_id: int, deposit_id: int, approve: bool,
+                         amount: Decimal | None = None) -> Deposit | None:
+    """Approve (credit) or reject a pending deposit. The status change and the
+    credit happen in ONE transaction and only from pending, so a double tap, two
+    devices or a retry credit the member exactly once. None = it was not pending."""
+    async with session_factory() as s:
+        row = await s.get(Deposit, deposit_id)
+        if row is None or row.reseller_id != reseller_id:
+            return None
+        credit = Decimal(amount if amount is not None else row.amount) if approve else None
+        if approve and (not credit.is_finite() or credit <= 0):
+            return None
+        res = await s.execute(update(Deposit).where(Deposit.id == deposit_id, Deposit.status == Deposit.PENDING)
+                              .values(status=Deposit.APPROVED if approve else Deposit.REJECTED,
+                                      credited=credit, decided_at=_now()))
+        if res.rowcount != 1:
+            await s.rollback()
+            return None
+        if approve:
+            res = await s.execute(update(Member).where(Member.id == row.member_id, Member.reseller_id == reseller_id)
+                                  .values(balance=money2(Member.balance + credit)))
+            if res.rowcount != 1:
+                await s.rollback()
+                return None
+            s.add(MemberTx(reseller_id=reseller_id, member_id=row.member_id, kind="deposit", amount=credit))
+        await s.commit()
+    return await get_deposit(reseller_id, deposit_id)
 

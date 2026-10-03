@@ -44,6 +44,10 @@ class Reseller(Base):
     # Most the shop earns on one number, in dollars (None = no cap): with a percent
     # commission an expensive number would otherwise cost the member a lot more.
     max_profit: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    # Deposits: what customers see when they add balance (how to pay the owner).
+    # None = deposits off (customers send their ID to the support contact instead).
+    deposit_info: Mapped[str | None] = mapped_column(Text, nullable=True)
+    deposit_min: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     welcome_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     support_contact: Mapped[str | None] = mapped_column(String(128), nullable=True)
     status: Mapped[str] = mapped_column(String(16), default=ACTIVE, index=True)
@@ -157,4 +161,27 @@ class PriceRule(Base):
     mode: Mapped[str] = mapped_column(String(8))
     value: Mapped[Decimal] = mapped_column(Numeric(12, 2))
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class Deposit(Base):
+    """A customer's request to add balance: they paid the owner the owner's way
+    and ask to be credited. Credited exactly once, when the owner approves
+    (repo.decide_deposit: the status change and the credit are one transaction)."""
+    __tablename__ = "deposits"
+    __table_args__ = (UniqueConstraint("reseller_id", "number", name="uq_deposit_number"),)
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    reseller_id: Mapped[int] = mapped_column(ForeignKey("resellers.id", ondelete="CASCADE"), index=True)
+    member_id: Mapped[int] = mapped_column(ForeignKey("members.id", ondelete="CASCADE"), index=True)
+    number: Mapped[int] = mapped_column()                      # #1, #2, ... per shop
+    amount: Mapped[Decimal] = mapped_column(Numeric(12, 2))    # what the customer says they paid
+    credited: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    proof_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    proof_photo: Mapped[str | None] = mapped_column(String(256), nullable=True)   # Telegram file_id
+    status: Mapped[str] = mapped_column(String(16), default=PENDING, index=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+    decided_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

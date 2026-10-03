@@ -78,4 +78,16 @@ T = {
     "lang_set": "✅ 语言已切换。",
     "blocked": "⛔ 您的账户已被封禁。",
     "bot_paused": "⏸ 该机器人暂停中。请稍后再试。",
+    # deposits (customers ask the owner to add balance; the owner approves)
+    'dep_how': '💳 <b>充值余额</b>\n\n{info}\n\n付款后，请发送你支付的金额，例如 <code>5</code>。',
+    'dep_min': '最低：<b>{min}</b>',
+    'dep_bad_amount': '❌ 请用数字发送金额，例如 <code>5</code> 或 <code>2.50</code>。',
+    'dep_below_min': '❌ 最低金额为 <b>{min}</b>。',
+    'dep_proof': '现在请发送付款的交易 ID 或截图。',
+    'dep_bad_proof': '❌ 请以文字发送交易 ID，或发送截图。',
+    'dep_sent': '📨 <b>充值 #{n}</b> 已提交：{amount}\n卖家确认后你会立即收到消息。',
+    'dep_pending': '⏳ 你的充值 #{n}（{amount}）仍在等待卖家确认。',
+    'dep_approved': '✅ <b>充值 #{n} 已确认：</b> +{amount}\n你的余额：<b>{balance}</b>',
+    'dep_rejected': '❌ 充值 #{n}（{amount}）未被确认。有疑问？{support}',
+    'dep_too_many': '⏳ 你今天已提交多笔充值，请等待卖家处理。',
 }

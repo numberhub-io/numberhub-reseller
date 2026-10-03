@@ -78,4 +78,16 @@ T = {
     "lang_set": "✅ Bahasa diubah.",
     "blocked": "⛔ Akun Anda diblokir.",
     "bot_paused": "⏸ Bot ini sedang dijeda. Coba lagi nanti.",
+    # deposits (customers ask the owner to add balance; the owner approves)
+    'dep_how': '💳 <b>Tambah saldo</b>\n\n{info}\n\nSetelah membayar, kirim jumlah yang Anda bayar, misalnya <code>5</code>.',
+    'dep_min': 'Minimum: <b>{min}</b>',
+    'dep_bad_amount': '❌ Kirim jumlahnya dalam angka, misalnya <code>5</code> atau <code>2.50</code>.',
+    'dep_below_min': '❌ Minimumnya <b>{min}</b>.',
+    'dep_proof': 'Sekarang kirim ID transaksi pembayaran, atau tangkapan layarnya.',
+    'dep_bad_proof': '❌ Kirim ID transaksi sebagai teks, atau tangkapan layar.',
+    'dep_sent': '📨 <b>Deposit #{n}</b> terkirim: {amount}\nAnda akan menerima pesan begitu penjual menyetujuinya.',
+    'dep_pending': '⏳ Deposit #{n} Anda ({amount}) masih menunggu penjual.',
+    'dep_approved': '✅ <b>Deposit #{n} disetujui:</b> +{amount}\nSaldo Anda: <b>{balance}</b>',
+    'dep_rejected': '❌ Deposit #{n} ({amount}) tidak disetujui. Ada pertanyaan? {support}',
+    'dep_too_many': '⏳ Anda sudah mengirim beberapa deposit hari ini. Mohon tunggu penjual.',
 }

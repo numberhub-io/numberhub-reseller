@@ -107,6 +107,7 @@ Open your own shop bot and send `/admin`, or tap ⚙️ Admin panel in the menu 
 | 👥 Customers | The latest 25 customers with their IDs and balances |
 | 📣 Broadcast | Sends your message to every customer of this bot |
 | 💲 Commission | Changes your commission. It applies to new purchases only |
+| 💳 Deposits | Lets customers ask for balance in the bot (see below). Set your payment details and a minimum here, and approve what waits |
 | 🏷 Custom prices | Your own price for one app, or for one app in one country: a fixed price (`0.35`) or its own commission (`10%`). Also a profit cap: the most you earn on one number |
 | 📝 Welcome text | Replaces the greeting on the menu |
 | 🆘 Support contact | A `@username` or an `https://` link. Customers see it on their balance screen |
@@ -115,6 +116,16 @@ Open your own shop bot and send `/admin`, or tap ⚙️ Admin panel in the menu 
 ### How the commission works
 
 Your commission is a percentage added on top of NumberHub's price for each country. With a 30% commission, a number NumberHub prices at $0.25 costs your customer $0.33 (rounded up to the cent) and you keep $0.08. The bot uses NumberHub's highest price for that route (`price_max`) as the base, so NumberHub can never charge you more for a sale than the customer paid.
+
+### Deposits
+
+Instead of customers sending you their ID, they can ask for balance in the bot. Turn it on in ⚙️ Admin panel → 💳 Deposits → ✏️ Payment details: write how customers pay you (for example `bKash: 01XXXXXXXXX`, a Binance Pay ID or a USDT address). Then:
+
+1. The customer taps 💳 Add balance, sees your payment details, pays you, and sends the amount and the transaction ID or a screenshot.
+2. You get the request in your bot at once (#1, #2, ...), with the screenshot, and three buttons: ✅ Approve, ✏️ Other amount (credit what really arrived) and ❌ Reject.
+3. The customer gets a message: approved with their new balance, or not approved with your support contact.
+
+A request is credited exactly once, even if you tap twice or on two devices. A customer has one request waiting at a time and at most 5 a day; you can set a minimum. Requests that wait are also listed under 💳 Deposits. Send `-` as the payment details to turn deposits off.
 
 ### Custom prices
 

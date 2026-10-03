@@ -816,6 +816,168 @@ async def test_custom_prices():
           "ceiling_at_buy" in cols and "max_profit" in rcols)
 
 
+async def test_picker_pages():
+    """Owner feedback 2026-10-03: only 16 countries were listed, the rest looked
+    unavailable. Every country is reachable now, page by page."""
+    print("custom prices: every country")
+    from app.bots.admin import country_picker
+    api = FakeNumberHub()
+    api.countries["tg"] = [{"country": str(i), "name": f"Land {i:02d}", "flag": "US", "price": "0.50",
+                            "price_max": "0.50", "in_stock": i % 3 != 0, "rate": 30, "rate_low": False,
+                            "rate_dead": False, "collapsed": False} for i in range(1, 46)]
+    r = await make_reseller(api, bot_id=7971)
+    selling.forget_prices(r.id)
+    text, kb = await country_picker(r, "tg")
+    labels = [b.text for row in kb.inline_keyboard for b in row]
+    check("page 1: all countries, 20 countries, a page counter", "45 countries" in text
+          and labels[0] == "🌍 All countries" and len([x for x in labels if "Land" in x]) == 20 and "1/3" in labels)
+    _t, kb3 = await country_picker(r, "tg", page=2)
+    l3 = [b.text for row in kb3.inline_keyboard for b in row]
+    check("the last page has the rest, out of stock marked ⏳",
+          len([x for x in l3 if "Land" in x]) == 5 and "3/3" in l3 and any("⏳" in x for x in l3))
+    _t, kbq = await country_picker(r, "tg", query="land 4")
+    check("typing still finds any country", len([b for row in kbq.inline_keyboard for b in row if "Land 4" in b.text]) == 6)
+
+
+def photo_msg(uid, caption=None):
+    return Update.model_validate({"update_id": next(_uid), "message": {
+        "message_id": next(_uid), "date": 0, "chat": {"id": uid, "type": "private"}, "from": _user(uid, "en"),
+        "photo": [{"file_id": "small-id", "file_unique_id": "s", "width": 90, "height": 90},
+                  {"file_id": "BIG-file-id", "file_unique_id": "b", "width": 1280, "height": 1280}],
+        **({"caption": caption} if caption else {})}})
+
+
+async def test_deposits():
+    """Owner feedback 2026-10-03 ("✅ Deposit #5 approved" - such a system): the
+    customer asks for balance in the bot, the owner approves with one tap."""
+    print("deposits")
+    from aiogram.methods import EditMessageCaption, SendMessage, SendPhoto
+    from app.bots.reseller import build_router
+    from app.models import Deposit
+    api = FakeNumberHub()
+    r = await make_reseller(api, bot_id=7961)
+    session = FakeSession()
+    bot = fake_bot(session)
+    runtime._bots[r.id] = bot
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(build_router(r.id))
+    cust = 9401
+    to = lambda uid: [m for m in session.requests if isinstance(m, (SendMessage, SendPhoto))  # noqa: E731
+                      and m.chat_id == uid]
+
+    await dp.feed_update(bot, msg(cust, "/start"))
+    await dp.feed_update(bot, tap(cust, button(session, "Balance")))
+    check("deposits off: no Add balance button (send your ID to the seller, as before)",
+          button(session, "Add balance") is None and "send your ID" in session.last_text())
+
+    await dp.feed_update(bot, msg(OWNER, "/admin"))
+    await dp.feed_update(bot, tap(OWNER, button(session, "Deposits")))
+    check("admin: 💳 Deposits explains it and says it is off", "Off." in session.last_text())
+    await dp.feed_update(bot, tap(OWNER, button(session, "Payment details")))
+    await dp.feed_update(bot, msg(OWNER, "bKash: 01700000000\nBinance Pay ID: 123456789"))
+    check("payment details turn deposits on", "deposits are on" in session.last_text()
+          and "Binance Pay ID: 123456789" in session.last_text())
+    await dp.feed_update(bot, tap(OWNER, button(session, "Minimum")))
+    await dp.feed_update(bot, msg(OWNER, "2"))
+    check("a minimum deposit", (await repo.get_reseller(r.id)).deposit_min == D("2"))
+
+    await dp.feed_update(bot, msg(cust, "/start"))
+    await dp.feed_update(bot, tap(cust, button(session, "Balance")))
+    await dp.feed_update(bot, tap(cust, button(session, "Add balance")))
+    check("the customer sees how to pay, and the minimum",
+          "bKash: 01700000000" in session.last_text() and "Minimum: <b>$2.00</b>" in session.last_text())
+    await dp.feed_update(bot, msg(cust, "abc"))
+    check("a bad amount is refused", "Send the amount as a number" in session.last_text())
+    await dp.feed_update(bot, msg(cust, "1"))
+    check("below the minimum is refused", "The minimum is <b>$2.00</b>" in session.last_text())
+    await dp.feed_update(bot, msg(cust, "5"))
+    check("asks for the transaction ID or a screenshot", "transaction ID" in session.last_text())
+    n_owner = len(to(OWNER))
+    await dp.feed_update(bot, msg(cust, "TX-778899"))
+    mem = await repo.get_or_create_member(r.id, cust, None, None)
+    dep = await repo.pending_deposit(mem.id)
+    owner_note = to(OWNER)[n_owner:]
+    check("the request is saved as #1 and the customer is told",
+          dep is not None and dep.number == 1 and dep.amount == D("5") and dep.proof_text == "TX-778899"
+          and "Deposit #1</b> sent: $5.00" in session.last_text())
+    check("the owner gets it at once with Approve / Other amount / Reject",
+          owner_note and "Deposit #1" in owner_note[-1].text and "TX-778899" in owner_note[-1].text
+          and any("Approve $5.00" in b.text for row in owner_note[-1].reply_markup.inline_keyboard for b in row))
+    await dp.feed_update(bot, tap(cust, "n:deposit"))
+    check("one deposit at a time: a second one waits for the first", "still waiting" in session.last_text())
+
+    m_before = await repo.get_member(mem.id)
+    await dp.feed_update(bot, tap(cust, f"d:ok:{dep.id}"))
+    check("the customer can't approve their own deposit",
+          (await repo.get_deposit(r.id, dep.id)).status == Deposit.PENDING)
+    # Two taps / two devices at once: credited exactly once.
+    await asyncio.gather(dp.feed_update(bot, tap(OWNER, f"d:ok:{dep.id}")),
+                         dp.feed_update(bot, tap(OWNER, f"d:ok:{dep.id}")))
+    m_after = await repo.get_member(mem.id)
+    check("approve: +$5.00 exactly once, even on a double tap",
+          m_after.balance - m_before.balance == D("5")
+          and (await repo.get_deposit(r.id, dep.id)).status == Deposit.APPROVED,
+          f"{m_before.balance} -> {m_after.balance}")
+    check("the customer is told, with the new balance",
+          any("Deposit #1 approved:</b> +$5.00" in (x.text or "") for x in to(cust)))
+    await dp.feed_update(bot, tap(OWNER, f"d:ok:{dep.id}"))
+    check("a late tap is told it was already approved", "already approved" in session.alerts()[-1])
+
+    # A screenshot; the owner corrects the amount.
+    await dp.feed_update(bot, tap(cust, "n:deposit"))
+    await dp.feed_update(bot, msg(cust, "10"))
+    await dp.feed_update(bot, photo_msg(cust))
+    dep2 = await repo.pending_deposit(mem.id)
+    photos = [x for x in to(OWNER) if isinstance(x, SendPhoto)]
+    check("a screenshot is kept and sent to the owner as the photo",
+          dep2 is not None and dep2.proof_photo == "BIG-file-id" and photos and photos[-1].photo == "BIG-file-id"
+          and "Deposit #2" in photos[-1].caption)
+    await dp.feed_update(bot, tap(OWNER, f"d:amt:{dep2.id}"))
+    await dp.feed_update(bot, msg(OWNER, "9.50"))
+    m3 = await repo.get_member(mem.id)
+    d2 = await repo.get_deposit(r.id, dep2.id)
+    check("other amount: the owner credits what really arrived",
+          d2.status == Deposit.APPROVED and d2.credited == D("9.50") and m3.balance - m_after.balance == D("9.50"))
+
+    # Rejected.
+    await dp.feed_update(bot, tap(cust, "n:deposit"))
+    await dp.feed_update(bot, msg(cust, "3"))
+    await dp.feed_update(bot, msg(cust, "fake-id"))
+    dep3 = await repo.pending_deposit(mem.id)
+    await dp.feed_update(bot, tap(OWNER, f"d:no:{dep3.id}"))
+    m4 = await repo.get_member(mem.id)
+    check("reject: nothing added, the customer is told",
+          (await repo.get_deposit(r.id, dep3.id)).status == Deposit.REJECTED and m4.balance == m3.balance
+          and any("Deposit #3 (" in (x.text or "") and "not approved" in x.text for x in to(cust)))
+
+    # The admin list: what waits, with approve buttons.
+    await dp.feed_update(bot, tap(cust, "n:deposit"))
+    await dp.feed_update(bot, msg(cust, "4"))
+    await dp.feed_update(bot, msg(cust, "TX-1"))
+    await dp.feed_update(bot, msg(OWNER, "/admin"))
+    check("the dashboard shows what waits", "Deposits waiting for you: <b>1</b>" in session.last_text()
+          and button(session, "Deposits (1)") is not None)
+    await dp.feed_update(bot, tap(OWNER, button(session, "Deposits")))
+    approve4 = button(session, "✅ #4 $4.00")
+    check("…and the list approves from there too", approve4 is not None)
+    for _ in range(3):
+        await dp.feed_update(bot, tap(OWNER, approve4))
+    check("…once", (await repo.get_member(mem.id)).balance - m4.balance == D("4"))
+
+    # Limits and switching off.
+    for i in range(5):
+        await repo.create_deposit(r.id, mem.id, D("1"), f"x{i}", None)
+        p = await repo.pending_deposit(mem.id)
+        await repo.decide_deposit(r.id, p.id, False)
+    await dp.feed_update(bot, tap(cust, "n:deposit"))
+    check("at most 5 requests a day", "several deposits today" in session.last_text())
+    await dp.feed_update(bot, msg(OWNER, "/admin"))
+    await dp.feed_update(bot, tap(OWNER, "a:dep_info:"))
+    await dp.feed_update(bot, msg(OWNER, "-"))
+    check("'-' turns deposits off", (await repo.get_reseller(r.id)).deposit_info is None)
+    _ = EditMessageCaption
+
+
 async def test_paused_shop():
     print("a paused shop")
     from app.bots.reseller import build_router
@@ -1171,7 +1333,7 @@ async def main():
     test_prices()
     test_i18n()
     for fn in (test_buy_and_code, test_no_code_refund, test_failures, test_lost_reply, test_cancel,
-               test_races_and_limits, test_bot_flow, test_builder, test_provision, test_custom_prices, test_paused_shop, test_review_money,
+               test_races_and_limits, test_bot_flow, test_builder, test_provision, test_custom_prices, test_picker_pages, test_deposits, test_paused_shop, test_review_money,
                test_review_sync, test_review_bots, test_review_runtime, test_cards_render):
         try:
             await fn()

@@ -78,4 +78,16 @@ T = {
     "lang_set": "✅ Đã đổi ngôn ngữ.",
     "blocked": "⛔ Tài khoản của bạn đã bị khóa.",
     "bot_paused": "⏸ Bot đang tạm dừng. Vui lòng thử lại sau.",
+    # deposits (customers ask the owner to add balance; the owner approves)
+    'dep_how': '💳 <b>Nạp số dư</b>\n\n{info}\n\nSau khi thanh toán, hãy gửi số tiền bạn đã trả, ví dụ <code>5</code>.',
+    'dep_min': 'Tối thiểu: <b>{min}</b>',
+    'dep_bad_amount': '❌ Gửi số tiền dạng số, ví dụ <code>5</code> hoặc <code>2.50</code>.',
+    'dep_below_min': '❌ Tối thiểu là <b>{min}</b>.',
+    'dep_proof': 'Bây giờ gửi mã giao dịch hoặc ảnh chụp màn hình thanh toán.',
+    'dep_bad_proof': '❌ Gửi mã giao dịch dạng chữ, hoặc một ảnh chụp màn hình.',
+    'dep_sent': '📨 <b>Nạp tiền #{n}</b> đã gửi: {amount}\nBạn sẽ nhận được tin nhắn ngay khi người bán duyệt.',
+    'dep_pending': '⏳ Lệnh nạp #{n} ({amount}) của bạn vẫn đang chờ người bán.',
+    'dep_approved': '✅ <b>Lệnh nạp #{n} đã được duyệt:</b> +{amount}\nSố dư của bạn: <b>{balance}</b>',
+    'dep_rejected': '❌ Lệnh nạp #{n} ({amount}) không được duyệt. Có thắc mắc? {support}',
+    'dep_too_many': '⏳ Hôm nay bạn đã gửi nhiều lệnh nạp. Vui lòng chờ người bán.',
 }

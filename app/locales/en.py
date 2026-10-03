@@ -87,4 +87,16 @@ T = {
     "lang_set": "✅ Language changed.",
     "blocked": "⛔ Your account is blocked.",
     "bot_paused": "⏸ This bot is paused. Please try again later.",
+    # deposits (customers ask the owner to add balance; the owner approves)
+    'dep_how': '💳 <b>Add balance</b>\n\n{info}\n\nAfter you pay, send the amount you paid, for example <code>5</code>.',
+    'dep_min': 'Minimum: <b>{min}</b>',
+    'dep_bad_amount': '❌ Send the amount as a number, for example <code>5</code> or <code>2.50</code>.',
+    'dep_below_min': '❌ The minimum is <b>{min}</b>.',
+    'dep_proof': "Now send the payment's transaction ID, or a screenshot of it.",
+    'dep_bad_proof': '❌ Send the transaction ID as text, or a screenshot.',
+    'dep_sent': "📨 <b>Deposit #{n}</b> sent: {amount}\nYou'll get a message as soon as the seller approves it.",
+    'dep_pending': '⏳ Your deposit #{n} ({amount}) is still waiting for the seller.',
+    'dep_approved': '✅ <b>Deposit #{n} approved:</b> +{amount}\nYour balance: <b>{balance}</b>',
+    'dep_rejected': '❌ Deposit #{n} ({amount}) was not approved. Questions? {support}',
+    'dep_too_many': "⏳ You've sent several deposits today. Please wait for the seller.",
 }

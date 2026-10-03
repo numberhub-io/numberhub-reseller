@@ -42,6 +42,14 @@ class AdminForm(StatesGroup):
     price_country = State()    # ...which country (typed name), app in state data
     price_value = State()      # ...the price, app + country in state data
     profit_cap = State()
+    dep_info = State()         # the owner's payment details for deposits
+    dep_min = State()
+    dep_amount = State()       # approve a deposit with another amount (deposit id in state data)
+
+
+class DepositForm(StatesGroup):
+    amount = State()           # the customer: how much they paid
+    proof = State()            # ...and the transaction ID or a screenshot
 
 
 class Context(BaseMiddleware):
@@ -345,12 +353,40 @@ def balance_screen(reseller: Reseller, member: Member, lang: str):
     text = t(lang, "balance", available=money(member.available), held=money(member.held),
              id=member.telegram_id, support=support_label(reseller, lang))
     kb = InlineKeyboardBuilder()
+    if reseller.deposit_info:
+        # Deposits on: the customer asks for balance here and the owner approves.
+        kb.button(text=t(lang, "btn_topup"), callback_data=Nav(to="deposit"))
     url = support_url(reseller)
     if url:
         kb.button(text=t(lang, "btn_support"), url=url)
     kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
     kb.adjust(1)
     return text, kb.as_markup()
+
+
+DEPOSIT_MAX = Decimal("10000")
+
+
+def _cancel_member(lang: str):
+    kb = InlineKeyboardBuilder()
+    kb.button(text=t(lang, "btn_cancel"), callback_data=Nav(to="menu"))
+    return kb.as_markup()
+
+
+async def deposit_start(reseller: Reseller, member: Member, lang: str) -> tuple[str, object, bool]:
+    """(text, keyboard, asking) for the customer's first deposit step. `asking`
+    False = a refusal (one waiting already, too many today, deposits off)."""
+    if not reseller.deposit_info:
+        return balance_screen(reseller, member, lang) + (False,)
+    waiting = await repo.pending_deposit(member.id)
+    if waiting is not None:
+        return t(lang, "dep_pending", n=waiting.number, amount=money(waiting.amount)), _cancel_member(lang), False
+    if await repo.deposits_today(member.id) >= repo.DEPOSITS_PER_DAY:
+        return t(lang, "dep_too_many"), _cancel_member(lang), False
+    text = t(lang, "dep_how", info=esc(reseller.deposit_info))
+    if reseller.deposit_min:
+        text += "\n" + t(lang, "dep_min", min=money(reseller.deposit_min))
+    return text, _cancel_member(lang), True
 
 
 def error_text(exc: SellError, reseller: Reseller, member: Member, lang: str) -> str:
@@ -393,6 +429,11 @@ def build_router(reseller_id: int) -> Router:
             await _show(c, *await orders_screen(member, lang))
         elif to in ("balance", "support"):   # support lives on the balance screen now
             await _show(c, *balance_screen(reseller, member, lang))
+        elif to == "deposit":
+            text, kb, asking = await deposit_start(reseller, member, lang)
+            if asking:
+                await state.set_state(DepositForm.amount)
+            await _show(c, text, kb)
         elif to == "lang":
             kb = InlineKeyboardBuilder()
             for code, label in LANGS.items():
@@ -546,6 +587,48 @@ def build_router(reseller_id: int) -> Router:
         await _show(c, text, kb)
         await repo.set_card(order.id, c.message.chat.id, c.message.message_id)
         await c.answer()
+
+    # ── deposits: the customer asks for balance, the owner approves ──
+    @r.message(StateFilter(DepositForm.amount), F.text, ~F.text.startswith("/"))
+    async def dep_amount(m: Message, reseller: Reseller, member: Member, lang: str, state: FSMContext):
+        amount = parse_amount(m.text)
+        if amount is None or amount > DEPOSIT_MAX:
+            await m.answer(t(lang, "dep_bad_amount"), reply_markup=_cancel_member(lang))
+            return
+        if reseller.deposit_min and amount < reseller.deposit_min:
+            await m.answer(t(lang, "dep_below_min", min=money(reseller.deposit_min)), reply_markup=_cancel_member(lang))
+            return
+        await state.update_data(dep_amount=str(amount))
+        await state.set_state(DepositForm.proof)
+        await m.answer(t(lang, "dep_proof"), reply_markup=_cancel_member(lang))
+
+    @r.message(StateFilter(DepositForm.proof))
+    async def dep_proof(m: Message, reseller: Reseller, member: Member, lang: str, state: FSMContext):
+        photo = m.photo[-1].file_id if m.photo else None
+        text = (m.text or m.caption or "").strip()
+        if text.startswith("/") and not photo:
+            await state.clear()
+            await _show(m, *await menu_screen(reseller, member, lang, member.telegram_id == reseller.owner_id))
+            return
+        if not photo and not text:
+            await m.answer(t(lang, "dep_bad_proof"), reply_markup=_cancel_member(lang))
+            return
+        data = await state.get_data()
+        await state.clear()
+        try:
+            amount = Decimal(str(data.get("dep_amount")))
+        except (InvalidOperation, ValueError):
+            await _show(m, *balance_screen(reseller, member, lang))
+            return
+        dep = await repo.create_deposit(reseller.id, member.id, amount, text[:300] or None, photo)
+        if dep is None:
+            waiting = await repo.pending_deposit(member.id)
+            await m.answer(t(lang, "dep_pending", n=waiting.number if waiting else "?",
+                             amount=money(waiting.amount if waiting else amount)))
+            return
+        from app.bots import admin
+        await admin.notify_owner_deposit(m.bot, reseller, member, dep)
+        await m.answer(t(lang, "dep_sent", n=dep.number, amount=money(dep.amount)))
 
     # ── owner admin panel ──
     from app.bots import admin

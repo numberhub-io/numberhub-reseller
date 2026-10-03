@@ -78,4 +78,16 @@ T = {
     "lang_set": "✅ Dil değiştirildi.",
     "blocked": "⛔ Hesabınız engellendi.",
     "bot_paused": "⏸ Bu bot şu an duraklatıldı. Daha sonra tekrar deneyin.",
+    # deposits (customers ask the owner to add balance; the owner approves)
+    'dep_how': '💳 <b>Bakiye ekle</b>\n\n{info}\n\nÖdemeden sonra ödediğiniz tutarı gönderin, örneğin <code>5</code>.',
+    'dep_min': 'En az: <b>{min}</b>',
+    'dep_bad_amount': '❌ Tutarı sayı olarak gönderin, örneğin <code>5</code> veya <code>2.50</code>.',
+    'dep_below_min': '❌ En düşük tutar <b>{min}</b>.',
+    'dep_proof': 'Şimdi ödemenin işlem numarasını (transaction ID) veya ekran görüntüsünü gönderin.',
+    'dep_bad_proof': '❌ İşlem numarasını metin olarak ya da bir ekran görüntüsü gönderin.',
+    'dep_sent': '📨 <b>Yatırma #{n}</b> gönderildi: {amount}\nSatıcı onaylar onaylamaz bir mesaj alacaksınız.',
+    'dep_pending': '⏳ Yatırma #{n} ({amount}) hâlâ satıcıyı bekliyor.',
+    'dep_approved': '✅ <b>Yatırma #{n} onaylandı:</b> +{amount}\nBakiyeniz: <b>{balance}</b>',
+    'dep_rejected': '❌ Yatırma #{n} ({amount}) onaylanmadı. Sorunuz mu var? {support}',
+    'dep_too_many': '⏳ Bugün birkaç yatırma gönderdiniz. Lütfen satıcıyı bekleyin.',
 }

@@ -30,6 +30,8 @@ if _is_sqlite:
 _ADDED_COLUMNS = (
     ("resellers", "max_profit", "NUMERIC(12, 2)"),
     ("orders", "ceiling_at_buy", "NUMERIC(12, 2)"),
+    ("resellers", "deposit_info", "TEXT"),
+    ("resellers", "deposit_min", "NUMERIC(12, 2)"),
 )
 
 
