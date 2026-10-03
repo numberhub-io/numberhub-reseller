@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     sync_interval_sec: float = 5.0
     max_open_per_member: int = 10
     max_open_per_route: int = 3
+    # Hosted shops (app/provision.py): NumberHub's own bot creates shops from just a
+    # bot token. Off unless a secret of 32+ characters is set; 127.0.0.1 only.
+    provision_secret: str = ""
+    provision_port: int = 8097
 
     @property
     def admin_id_list(self) -> list[int]:

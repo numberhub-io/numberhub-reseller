@@ -559,6 +559,102 @@ async def test_builder():
         rt.make_bot, rt.start, builder.NumberHub = orig_make, orig_start, orig_nh
 
 
+async def test_provision():
+    """Hosted shops: NumberHub's bot creates a shop from a token + a key it minted."""
+    print("hosted shops (provisioning)")
+    from aiohttp.test_utils import TestClient, TestServer
+    from app import provision
+    from app import runtime as rt
+    from app.config import settings
+    api = FakeNumberHub(key="nh_live_hostedkey-0123456789abcd")
+    started, restarted = [], []
+    orig = (rt.make_bot, rt.start, rt.restart, provision.NumberHub, settings.provision_secret)
+    sessions = {}
+
+    def make(token):
+        bot_id = 7700 + int(token.split(":")[0][-2:])
+        sessions[token] = FakeSession(bot_id=bot_id, username=f"hosted{bot_id}_bot")
+        if token.endswith("REVOKED"):
+            sessions[token].fail_get_me = 99
+        return fake_bot(sessions[token])
+
+    async def fake_start(res):
+        started.append(res.id)
+
+    async def fake_restart(rid):
+        restarted.append(rid)
+    rt.make_bot, rt.start, rt.restart = make, fake_start, fake_restart
+    provision.NumberHub = lambda key: api.client(key)
+    settings.provision_secret = "s" * 40
+    tok = lambda n, tail="": f"1234567{n:02d}:" + ("C" * 35 + tail)[-35:]  # noqa: E731
+    client = TestClient(TestServer(provision.build_app()))
+    await client.start_server()
+    H = {"X-Provision-Secret": "s" * 40}
+    try:
+        r = await client.post("/internal/shops", json={"owner_id": 9101, "token": tok(1), "api_key": api.key})
+        check("no secret: refused before anything", r.status == 403)
+        r = await client.post("/internal/shops", headers={"X-Provision-Secret": "s" * 39 + "x"},
+                              json={"owner_id": 9101, "token": tok(1), "api_key": api.key})
+        check("wrong secret: refused", r.status == 403)
+        r = await client.post("/internal/shops", headers=H, json={"owner_id": 9101, "token": "nope", "api_key": api.key})
+        check("not a token: bad_token", r.status == 400 and (await r.json())["error"] == "bad_token")
+        r = await client.post("/internal/shops", headers=H,
+                              json={"owner_id": 9101, "token": tok(1, "REVOKED"), "api_key": api.key})
+        check("a token Telegram refuses: token_rejected", r.status == 400 and (await r.json())["error"] == "token_rejected")
+        r = await client.post("/internal/shops", headers=H,
+                              json={"owner_id": 9101, "token": tok(1), "api_key": "nh_live_wrongkey-0123456789abc"})
+        check("a key NumberHub refuses: key_rejected, no shop",
+              r.status == 409 and (await r.json())["error"] == "key_rejected"
+              and not await repo.list_resellers(owner_id=9101))
+        r = await client.post("/internal/shops", headers=H,
+                              json={"owner_id": 9101, "owner_username": "shopowner", "token": tok(1),
+                                    "api_key": api.key, "markup_pct": "25"})
+        body = await r.json()
+        rows = await repo.list_resellers(owner_id=9101)
+        check("token + key: the shop is created and started, secrets encrypted",
+              r.status == 201 and len(rows) == 1 and started == [rows[0].id]
+              and crypto.decrypt(rows[0].api_key_enc) == api.key and crypto.decrypt(rows[0].bot_token_enc) == tok(1)
+              and rows[0].markup_pct == D("25") and rows[0].support_contact == "@shopowner"
+              and body["shop"]["bot_username"] == "hosted7701_bot" and body["wallet"] == "50.00", str(body))
+        r = await client.post("/internal/shops", headers=H,
+                              json={"owner_id": 9101, "token": tok(1), "api_key": api.key})
+        check("the same bot again: reconnected in place (customers and balances stay)",
+              r.status == 200 and (await r.json())["reconnected"] and restarted == [rows[0].id]
+              and len(await repo.list_resellers(owner_id=9101)) == 1)
+        r = await client.post("/internal/shops", headers=H,
+                              json={"owner_id": 9102, "token": tok(1), "api_key": api.key})
+        check("someone else's bot: taken", r.status == 409 and (await r.json())["error"] == "taken")
+        r = await client.post("/internal/shops", headers=H,
+                              json={"owner_id": 9101, "token": tok(2), "api_key": api.key, "markup_pct": "999"})
+        check("a commission over the maximum is refused", r.status == 400)
+        for n in (2, 3):
+            await client.post("/internal/shops", headers=H, json={"owner_id": 9101, "token": tok(n), "api_key": api.key})
+        r = await client.post("/internal/shops", headers=H, json={"owner_id": 9101, "token": tok(4), "api_key": api.key})
+        check("at most 3 shops per owner", r.status == 409 and (await r.json())["error"] == "too_many"
+              and len(await repo.list_resellers(owner_id=9101)) == 3)
+        r = await client.get("/internal/shops?owner_id=9101", headers=H)
+        shops = (await r.json())["shops"]
+        check("the owner's shops, with this week's numbers", r.status == 200 and len(shops) == 3
+              and {"members", "orders_7d", "profit_7d", "status"} <= set(shops[0]))
+        rid = rows[0].id
+        r = await client.post(f"/internal/shops/{rid}/status", headers=H, json={"owner_id": 9102, "status": "disabled"})
+        check("someone else can't pause it", r.status == 404)
+        r = await client.post(f"/internal/shops/{rid}/status", headers=H, json={"owner_id": 9101, "status": "disabled"})
+        check("pause: the shop shows paused", r.status == 200
+              and (await repo.get_reseller(rid)).status == Reseller.DISABLED)
+        r = await client.post(f"/internal/shops/{rid}/status", headers=H, json={"owner_id": 9101, "status": "active"})
+        check("resume: selling again", r.status == 200 and (await repo.get_reseller(rid)).status == Reseller.ACTIVE)
+        await repo.update_reseller(rid, status=Reseller.SUSPENDED)
+        r = await client.post(f"/internal/shops/{rid}/status", headers=H, json={"owner_id": 9101, "status": "active"})
+        check("a shop the platform suspended can't be resumed by its owner",
+              r.status == 409 and (await repo.get_reseller(rid)).status == Reseller.SUSPENDED)
+        settings.provision_secret = "short"
+        check("a short secret keeps the listener off", await provision.start_server() is None)
+    finally:
+        await client.close()
+        rt.make_bot, rt.start, rt.restart, provision.NumberHub, settings.provision_secret = orig
+
+
 async def test_paused_shop():
     print("a paused shop")
     from app.bots.reseller import build_router
@@ -914,7 +1010,7 @@ async def main():
     test_prices()
     test_i18n()
     for fn in (test_buy_and_code, test_no_code_refund, test_failures, test_lost_reply, test_cancel,
-               test_races_and_limits, test_bot_flow, test_builder, test_paused_shop, test_review_money,
+               test_races_and_limits, test_bot_flow, test_builder, test_provision, test_paused_shop, test_review_money,
                test_review_sync, test_review_bots, test_review_runtime, test_cards_render):
         try:
             await fn()

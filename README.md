@@ -29,6 +29,8 @@ There are two kinds of bots and two kinds of money.
 
 The builder bot belongs to the platform (you). A reseller opens it, sends a bot token from @BotFather and a NumberHub API key, picks a commission, and their shop bot starts selling within a minute. The builder bot is optional: without `BUILDER_BOT_TOKEN` the process runs the shop bots that already exist and nobody can create new ones.
 
+There is a shorter way in too, the hosted path: in @TheNumberHubBot a NumberHub customer taps 🤖 Your own bot and sends only the bot token. NumberHub creates the API key on their account itself and hands both to this platform through its provisioning listener (`app/provision.py`, below). The shop that comes out is the same as one made in the builder.
+
 A shop bot belongs to one reseller. Their customers buy numbers in it, and the reseller manages it from an admin panel inside the same bot.
 
 Customer balances live in this project's database. Customers pay the reseller however the reseller likes (cash, bank transfer, crypto, anything), and the reseller adds that amount to the customer in the admin panel. The reseller's NumberHub wallet is separate: NumberHub holds and charges it for every number the shop buys. The reseller's profit is the difference between what customers are charged and what NumberHub charges.
@@ -44,7 +46,7 @@ Tech used:
 | Secrets at rest | Fernet (`cryptography`): bot tokens and API keys are stored encrypted with `SECRET_KEY` |
 | Settings | pydantic-settings, read from the environment or `.env` |
 
-Nothing listens on a port. The process only makes outgoing connections to Telegram and NumberHub, so the server needs no open inbound ports.
+Nothing listens on a public port. The process makes outgoing connections to Telegram and NumberHub, so the server needs no open inbound ports. The one exception is optional: with `PROVISION_SECRET` set, the hosted path's listener runs on `127.0.0.1` only (`PROVISION_PORT`, 8097), and every request must carry that secret. It creates, reconnects, lists, pauses and resumes shops with the same checks as the builder.
 
 Background loops in `main.py`:
 
@@ -89,6 +91,10 @@ Your own @username becomes the shop's support contact, so customers know who to 
 If you revoke the bot's token in @BotFather, tap ➕ Create my bot again and send the new token of the same bot. The builder recognises the bot and reconnects it with all its customers, balances and orders; nobody else can take over a bot you connected.
 
 Your bot starts selling immediately. 🤖 My bots in the builder lists your bots (up to 3 per person) with sales, profit and status, and lets you pause or resume a bot or replace its API key. A paused bot stops selling but keeps running: customers are told it is paused, and orders bought before the pause still get their codes and can still be cancelled. While the bot has open orders, a new API key must come from the same NumberHub account, because those orders live there; the builder checks this.
+
+### Or: from the NumberHub bot
+
+If you already use NumberHub, open @TheNumberHubBot and tap 🤖 Your own bot, then send your bot token. That is all: NumberHub creates an API key for your shop on your own account (named `Shop bot @yourbot`, with only the permissions a shop needs), and your bot is live a minute later with a 30% commission you can change in `/admin`. The same screen lists your bots with their week and lets you pause or resume them. You need one paid top-up on your NumberHub account first, because your shop sells from that balance.
 
 ### Your admin panel
 
@@ -176,6 +182,8 @@ Every setting is an environment variable, or a line in `.env`.
 | `SYNC_INTERVAL_SEC` | `5` | How often open orders are synced with NumberHub |
 | `MAX_OPEN_PER_MEMBER` | `10` | Open orders one customer may have |
 | `MAX_OPEN_PER_ROUTE` | `3` | Open orders one customer may have for the same app and country |
+| `PROVISION_SECRET` | empty | Turns on the hosted path's listener (32+ characters). The NumberHub backend sends the same value. Empty means off |
+| `PROVISION_PORT` | `8097` | Port of that listener, always on `127.0.0.1` |
 
 ## Deploy on a Linux server
 
@@ -263,6 +271,7 @@ It loads the catalog, buys the cheapest WhatsApp number in stock, checks the hol
 |---|---|
 | `main.py` | Starts the builder bot, every shop bot and the sync, sweep and warm loops; graceful shutdown |
 | `app/runtime.py` | Starts and stops one shop bot (aiogram `Bot` and `Dispatcher`) and its NumberHub client |
+| `app/provision.py` | The hosted path: a localhost listener NumberHub calls to create, reconnect, list, pause and resume shops |
 | `app/selling.py` | Prices, buying, cancelling, recovery of lost purchases, sync with NumberHub, settlement |
 | `app/repo.py` | All database reads and writes, including the atomic balance updates |
 | `app/models.py` | Tables: `resellers`, `members`, `member_tx`, `orders` |

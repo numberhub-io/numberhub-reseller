@@ -9,7 +9,7 @@ from aiogram import Dispatcher
 from aiogram.exceptions import TelegramUnauthorizedError
 from aiogram.fsm.storage.memory import MemoryStorage
 
-from app import db, repo, runtime, selling
+from app import db, provision, repo, runtime, selling
 from app.bots import builder
 from app.config import settings
 
@@ -113,6 +113,7 @@ async def main() -> int:
     if bot is None:
         log.warning("BUILDER_BOT_TOKEN not set: running reseller bots only")
     await runtime.start_all()
+    provisioning = await provision.start_server()
     loops = [asyncio.create_task(sync_loop()), asyncio.create_task(sweep_loop()),
              asyncio.create_task(warm_loop())]
     stop = asyncio.Event()
@@ -127,6 +128,8 @@ async def main() -> int:
         await stop.wait()
     finally:
         log.info("shutting down: no new updates, waiting for purchases in flight")
+        if provisioning is not None:
+            await provisioning.cleanup()      # no new hosted shops while the others stop
         if bot is not None:
             try:
                 await dp.stop_polling()
