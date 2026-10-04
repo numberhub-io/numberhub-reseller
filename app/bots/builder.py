@@ -228,6 +228,10 @@ async def nav(c: CallbackQuery, callback_data: Bld, state: FSMContext):
                 await c.answer("NumberHub rejected this bot's API key: send a new one with 🔑 New API key.",
                                show_alert=True)
                 return
+            if reseller.status == Reseller.TOKEN_INVALID:
+                await c.answer("Telegram rejects this bot's token, or another service is using it. "
+                               "Send the bot's token again (from @BotFather) to reconnect it.", show_alert=True)
+                return
             await repo.update_reseller(reseller.id, status=Reseller.ACTIVE)
             await runtime.start(await repo.get_reseller(reseller.id))
             await c.answer("Your bot is selling again.")
@@ -242,6 +246,7 @@ async def nav(c: CallbackQuery, callback_data: Bld, state: FSMContext):
 
 
 STATUS_LABEL = {"active": "✅ selling", "disabled": "⏸ paused", "key_invalid": "⚠️ API key rejected — send a new key",
+                "token_invalid": "⚠️ bot token rejected — send the token again",
                 "suspended": "⛔ disabled by the platform"}
 
 

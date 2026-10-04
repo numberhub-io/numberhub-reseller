@@ -151,7 +151,10 @@ async def create_shop(request: web.Request) -> web.Response:
 
 
 def _shop_json(r: Reseller, week: dict | None = None) -> dict:
-    out = {"id": r.id, "bot_username": r.bot_username, "status": r.status,
+    # A rejected token is shown like a rejected key ("needs reconnecting"): the
+    # cure is the same, sending the bot's token again.
+    status = Reseller.KEY_INVALID if r.status == Reseller.TOKEN_INVALID else r.status
+    out = {"id": r.id, "bot_username": r.bot_username, "status": status,
            "markup_pct": str(r.markup_pct)}
     if week is not None:
         out.update(members=week["members"], orders_7d=week["orders"],
@@ -184,7 +187,7 @@ async def set_status(request: web.Request) -> web.Response:
         # Paused: the bot keeps running, customers see "paused", open orders finish.
         await repo.update_reseller(rid, status=Reseller.DISABLED)
     elif want == "active":
-        if reseller.status == Reseller.KEY_INVALID:
+        if reseller.status in (Reseller.KEY_INVALID, Reseller.TOKEN_INVALID):
             return _err("key_invalid", 409)
         await repo.update_reseller(rid, status=Reseller.ACTIVE)
         await runtime.start(await repo.get_reseller(rid))

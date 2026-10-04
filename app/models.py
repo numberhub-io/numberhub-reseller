@@ -31,6 +31,7 @@ class Reseller(Base):
     DISABLED = "disabled"      # paused by the reseller (they can resume it)
     SUSPENDED = "suspended"    # disabled by a platform operator (only /enable lifts it)
     KEY_INVALID = "key_invalid"  # NumberHub rejected the API key (revoked/rotated)
+    TOKEN_INVALID = "token_invalid"  # Telegram rejects the bot token, or another service took the bot
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     owner_id: Mapped[int] = mapped_column(BigInteger, index=True)          # reseller's Telegram id

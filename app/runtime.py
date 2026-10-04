@@ -7,9 +7,11 @@ import logging
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.middlewares.base import BaseRequestMiddleware
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramUnauthorizedError
+from aiogram.exceptions import TelegramConflictError, TelegramUnauthorizedError
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.methods import GetUpdates
 from aiogram.types import BotCommand
 
 from app import crypto, repo, selling
@@ -31,6 +33,55 @@ COMMANDS = [
 
 def make_bot(token: str) -> Bot:
     return Bot(token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+
+
+# Consecutive getUpdates conflicts before the shop gives the bot up: another
+# service keeps setting a webhook (or polling) with the same token.
+CONFLICTS_BEFORE_GIVING_UP = 5
+
+
+class _TokenWatch(BaseRequestMiddleware):
+    """Sees every getUpdates answer. aiogram retries a failed poll forever, so a
+    revoked token (Unauthorized) or a token another service keeps using
+    (Conflict: a webhook set elsewhere) polled every 5 s for a whole day:
+    2,400 errors from two paused shops on 2026-10-04. Either one ends this
+    shop's polling and marks it for reconnecting; its open orders keep syncing."""
+
+    def __init__(self, reseller_id: int):
+        self.reseller_id = reseller_id
+        self.conflicts = 0
+        self.tripped = False
+
+    async def __call__(self, make_request, bot, method):
+        if not isinstance(method, GetUpdates):
+            return await make_request(bot, method)
+        try:
+            result = await make_request(bot, method)
+        except TelegramUnauthorizedError:
+            self._trip("Telegram rejects the token (revoked)")
+            raise
+        except TelegramConflictError:
+            self.conflicts += 1
+            if self.conflicts >= CONFLICTS_BEFORE_GIVING_UP:
+                self._trip("another service is using the token (webhook or polling elsewhere)")
+            raise
+        self.conflicts = 0
+        return result
+
+    def _trip(self, why: str) -> None:
+        if self.tripped:
+            return
+        self.tripped = True
+        log.error("reseller bot %s: %s; polling stopped until the owner sends the token again",
+                  self.reseller_id, why)
+        asyncio.create_task(_give_up_token(self.reseller_id))
+
+
+async def _give_up_token(reseller_id: int) -> None:
+    reseller = await repo.get_reseller(reseller_id)
+    if reseller is not None and reseller.status != Reseller.SUSPENDED:
+        await repo.update_reseller(reseller_id, status=Reseller.TOKEN_INVALID)
+    await _halt_polling(reseller_id)
 
 
 def bot_for(reseller_id: int) -> Bot | None:
@@ -61,7 +112,14 @@ async def start(reseller: Reseller) -> None:
                   "the owner has to reconnect the bot in the builder", reseller.id)
         return
     selling.set_client(reseller.id, NumberHub(key))
+    if reseller.status == Reseller.TOKEN_INVALID:
+        # Its orders keep syncing (the client above); polling waits for a new
+        # token, so a restart does not fight the service now holding the bot.
+        log.info("reseller bot %s (@%s): token needs reconnecting, not polling",
+                 reseller.id, reseller.bot_username)
+        return
     bot = make_bot(token)
+    bot.session.middleware(_TokenWatch(reseller.id))
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(build_router(reseller.id))
     _bots[reseller.id], _dps[reseller.id] = bot, dp
@@ -91,6 +149,7 @@ async def _run(reseller_id: int, bot: Bot, dp: Dispatcher) -> None:
         except TelegramUnauthorizedError:
             log.error("reseller bot %s: Telegram rejected the token (revoked?); the owner has to "
                       "reconnect it in the builder", reseller_id)
+            await _give_up_token(reseller_id)
             return
         except Exception:  # noqa: BLE001
             log.exception("reseller bot %s stopped with an error; retrying in %ss", reseller_id, delay)

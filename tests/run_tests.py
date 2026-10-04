@@ -866,6 +866,95 @@ async def test_rank_order():
     runtime._bots.pop(r.id, None)
 
 
+async def test_dead_token():
+    """2026-10-04: two paused shops polled Telegram every 5 s all day, one with a
+    revoked token (Unauthorized), one whose token another service used with a
+    webhook (Conflict): 2,400 errors. The shop now stops polling and is marked
+    for reconnecting; its orders keep syncing; sending the token again revives it."""
+    print("dead or taken bot token")
+    from aiogram.exceptions import TelegramConflictError, TelegramUnauthorizedError
+    from aiogram.methods import GetMe, GetUpdates
+    from app import provision
+    api = FakeNumberHub()
+    r = await make_reseller(api, bot_id=7991)
+    halted = []
+
+    async def fake_halt(rid):
+        halted.append(rid)
+    real_halt, runtime._halt_polling = runtime._halt_polling, fake_halt
+
+    async def unauthorized(bot, method):
+        raise TelegramUnauthorizedError(method=method, message="Unauthorized")
+    watch = runtime._TokenWatch(r.id)
+    try:
+        await watch(unauthorized, None, GetUpdates())
+    except TelegramUnauthorizedError:
+        pass
+    await asyncio.sleep(0.05)
+    fresh = await repo.get_reseller(r.id)
+    check("a revoked token stops polling and marks the shop", halted == [r.id] and fresh.status == "token_invalid",
+          fresh.status)
+    check("its orders keep syncing (the NumberHub client stays)", selling.client_for(r.id) is not None)
+    check("the hosting side shows it as 'needs reconnecting'",
+          provision._shop_json(fresh)["status"] == Reseller.KEY_INVALID)
+
+    r2 = await make_reseller(api, bot_id=7992)
+    w2 = runtime._TokenWatch(r2.id)
+    calls = {"n": 0}
+
+    async def conflict(bot, method):
+        calls["n"] += 1
+        raise TelegramConflictError(method=method, message="Conflict: can't use getUpdates method while webhook is active")
+
+    async def ok(bot, method):
+        return []
+    for _ in range(runtime.CONFLICTS_BEFORE_GIVING_UP - 1):
+        try:
+            await w2(conflict, None, GetUpdates())
+        except TelegramConflictError:
+            pass
+    await w2(ok, None, GetUpdates())
+    for _ in range(runtime.CONFLICTS_BEFORE_GIVING_UP - 1):
+        try:
+            await w2(conflict, None, GetUpdates())
+        except TelegramConflictError:
+            pass
+    await asyncio.sleep(0.05)
+    check("a few conflicts with a good poll between them are tolerated",
+          (await repo.get_reseller(r2.id)).status == Reseller.ACTIVE and r2.id not in halted)
+    try:
+        await w2(conflict, None, GetUpdates())
+    except TelegramConflictError:
+        pass
+    await asyncio.sleep(0.05)
+    check(f"{runtime.CONFLICTS_BEFORE_GIVING_UP} conflicts in a row: another service has the bot, polling stops",
+          (await repo.get_reseller(r2.id)).status == "token_invalid" and r2.id in halted)
+    try:
+        await w2(unauthorized, None, GetMe())
+    except TelegramUnauthorizedError:
+        pass
+    check("only getUpdates is watched (a failed send does not end the shop)", halted.count(r2.id) == 1)
+    runtime._halt_polling = real_halt
+
+    started = []
+    real_make = runtime.make_bot
+    runtime.make_bot = lambda token: started.append(token) or real_make(token)
+    await runtime.start(await repo.get_reseller(r.id))
+    check("a restart does not poll a shop waiting for its token", not started and r.id not in runtime.running())
+    runtime.make_bot = real_make
+
+    class Req(dict):
+        def __init__(self, rid, body):
+            super().__init__()
+            self.match_info = {"id": str(rid)}
+            self._body = body
+
+        async def json(self):
+            return self._body
+    resp = await provision.set_status(Req(r.id, {"owner_id": OWNER, "status": "active"}))
+    check("resuming is refused until the token is sent again", resp.status == 409)
+
+
 def photo_msg(uid, caption=None):
     return Update.model_validate({"update_id": next(_uid), "message": {
         "message_id": next(_uid), "date": 0, "chat": {"id": uid, "type": "private"}, "from": _user(uid, "en"),
@@ -1360,7 +1449,7 @@ async def main():
     test_prices()
     test_i18n()
     for fn in (test_buy_and_code, test_no_code_refund, test_failures, test_lost_reply, test_cancel,
-               test_races_and_limits, test_bot_flow, test_builder, test_provision, test_custom_prices, test_picker_pages, test_rank_order, test_deposits, test_paused_shop, test_review_money,
+               test_races_and_limits, test_bot_flow, test_builder, test_provision, test_custom_prices, test_picker_pages, test_rank_order, test_dead_token, test_deposits, test_paused_shop, test_review_money,
                test_review_sync, test_review_bots, test_review_runtime, test_cards_render):
         try:
             await fn()
