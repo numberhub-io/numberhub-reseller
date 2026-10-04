@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from collections import deque
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -35,9 +37,12 @@ def make_bot(token: str) -> Bot:
     return Bot(token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 
 
-# Consecutive getUpdates conflicts before the shop gives the bot up: another
-# service keeps setting a webhook (or polling) with the same token.
+# getUpdates conflicts within CONFLICT_WINDOW_SEC before the shop gives the bot
+# up: another service keeps setting a webhook (or polling) with the same token.
+# Not "in a row": two pollers knock each other off every ~35 s with good polls
+# in between (shop 5, 2026-10-04), so a success must not reset the count.
 CONFLICTS_BEFORE_GIVING_UP = 5
+CONFLICT_WINDOW_SEC = 600
 
 
 class _TokenWatch(BaseRequestMiddleware):
@@ -47,26 +52,28 @@ class _TokenWatch(BaseRequestMiddleware):
     2,400 errors from two paused shops on 2026-10-04. Either one ends this
     shop's polling and marks it for reconnecting; its open orders keep syncing."""
 
-    def __init__(self, reseller_id: int):
+    def __init__(self, reseller_id: int, clock=time.monotonic):
         self.reseller_id = reseller_id
-        self.conflicts = 0
+        self.clock = clock
+        self.conflicts: deque[float] = deque()
         self.tripped = False
 
     async def __call__(self, make_request, bot, method):
         if not isinstance(method, GetUpdates):
             return await make_request(bot, method)
         try:
-            result = await make_request(bot, method)
+            return await make_request(bot, method)
         except TelegramUnauthorizedError:
             self._trip("Telegram rejects the token (revoked)")
             raise
         except TelegramConflictError:
-            self.conflicts += 1
-            if self.conflicts >= CONFLICTS_BEFORE_GIVING_UP:
+            now = self.clock()
+            self.conflicts.append(now)
+            while self.conflicts and now - self.conflicts[0] > CONFLICT_WINDOW_SEC:
+                self.conflicts.popleft()
+            if len(self.conflicts) >= CONFLICTS_BEFORE_GIVING_UP:
                 self._trip("another service is using the token (webhook or polling elsewhere)")
             raise
-        self.conflicts = 0
-        return result
 
     def _trip(self, why: str) -> None:
         if self.tripped:

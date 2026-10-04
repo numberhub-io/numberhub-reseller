@@ -899,35 +899,34 @@ async def test_dead_token():
           provision._shop_json(fresh)["status"] == Reseller.KEY_INVALID)
 
     r2 = await make_reseller(api, bot_id=7992)
-    w2 = runtime._TokenWatch(r2.id)
-    calls = {"n": 0}
+    clock = {"t": 0.0}
+    w2 = runtime._TokenWatch(r2.id, clock=lambda: clock["t"])
 
     async def conflict(bot, method):
-        calls["n"] += 1
-        raise TelegramConflictError(method=method, message="Conflict: can't use getUpdates method while webhook is active")
+        raise TelegramConflictError(method=method, message="Conflict: terminated by other getUpdates request")
 
     async def ok(bot, method):
         return []
-    for _ in range(runtime.CONFLICTS_BEFORE_GIVING_UP - 1):
+
+    async def poll(fn):
         try:
-            await w2(conflict, None, GetUpdates())
+            await w2(fn, None, GetUpdates())
         except TelegramConflictError:
             pass
-    await w2(ok, None, GetUpdates())
-    for _ in range(runtime.CONFLICTS_BEFORE_GIVING_UP - 1):
-        try:
-            await w2(conflict, None, GetUpdates())
-        except TelegramConflictError:
-            pass
+    for _ in range(runtime.CONFLICTS_BEFORE_GIVING_UP):     # spread over more than the window
+        await poll(conflict)
+        clock["t"] += runtime.CONFLICT_WINDOW_SEC / (runtime.CONFLICTS_BEFORE_GIVING_UP - 1) + 1
     await asyncio.sleep(0.05)
-    check("a few conflicts with a good poll between them are tolerated",
+    check("conflicts spread over more than 10 minutes are tolerated (a restart overlap, a stray poll)",
           (await repo.get_reseller(r2.id)).status == Reseller.ACTIVE and r2.id not in halted)
-    try:
-        await w2(conflict, None, GetUpdates())
-    except TelegramConflictError:
-        pass
+    w2 = runtime._TokenWatch(r2.id, clock=lambda: clock["t"])
+    for _ in range(runtime.CONFLICTS_BEFORE_GIVING_UP):     # two pollers knocking each other off every 35 s
+        await poll(conflict)
+        clock["t"] += 5
+        await poll(ok)
+        clock["t"] += 30
     await asyncio.sleep(0.05)
-    check(f"{runtime.CONFLICTS_BEFORE_GIVING_UP} conflicts in a row: another service has the bot, polling stops",
+    check(f"{runtime.CONFLICTS_BEFORE_GIVING_UP} conflicts in 10 minutes, good polls between: another service has the bot, polling stops",
           (await repo.get_reseller(r2.id)).status == "token_invalid" and r2.id in halted)
     try:
         await w2(unauthorized, None, GetMe())
