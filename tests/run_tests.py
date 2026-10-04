@@ -920,6 +920,12 @@ async def test_dead_token():
     check("conflicts spread over more than 10 minutes are tolerated (a restart overlap, a stray poll)",
           (await repo.get_reseller(r2.id)).status == Reseller.ACTIVE and r2.id not in halted)
     w2 = runtime._TokenWatch(r2.id, clock=lambda: clock["t"])
+    told = []
+
+    async def send_message(chat_id, text, **_):
+        told.append((chat_id, text))
+    from types import SimpleNamespace
+    runtime._bots[r2.id] = SimpleNamespace(send_message=send_message)
     for _ in range(runtime.CONFLICTS_BEFORE_GIVING_UP):     # two pollers knocking each other off every 35 s
         await poll(conflict)
         clock["t"] += 5
@@ -928,6 +934,9 @@ async def test_dead_token():
     await asyncio.sleep(0.05)
     check(f"{runtime.CONFLICTS_BEFORE_GIVING_UP} conflicts in 10 minutes, good polls between: another service has the bot, polling stops",
           (await repo.get_reseller(r2.id)).status == "token_invalid" and r2.id in halted)
+    check("the owner is told in their own bot why it stopped and what to do",
+          len(told) == 1 and told[0][0] == OWNER and "Another program" in told[0][1] and "@my_shop_bot" in told[0][1])
+    runtime._bots.pop(r2.id, None)
     try:
         await w2(unauthorized, None, GetMe())
     except TelegramUnauthorizedError:

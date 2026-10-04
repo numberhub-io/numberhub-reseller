@@ -72,23 +72,38 @@ class _TokenWatch(BaseRequestMiddleware):
             while self.conflicts and now - self.conflicts[0] > CONFLICT_WINDOW_SEC:
                 self.conflicts.popleft()
             if len(self.conflicts) >= CONFLICTS_BEFORE_GIVING_UP:
-                self._trip("another service is using the token (webhook or polling elsewhere)")
+                self._trip("another service is using the token (webhook or polling elsewhere)", taken=True)
             raise
 
-    def _trip(self, why: str) -> None:
+    def _trip(self, why: str, taken: bool = False) -> None:
         if self.tripped:
             return
         self.tripped = True
         log.error("reseller bot %s: %s; polling stopped until the owner sends the token again",
                   self.reseller_id, why)
-        asyncio.create_task(_give_up_token(self.reseller_id))
+        asyncio.create_task(_give_up_token(self.reseller_id, taken=taken))
 
 
-async def _give_up_token(reseller_id: int) -> None:
+TAKEN_NOTICE = (
+    "⚠️ <b>Your shop bot @{bot} stopped taking messages.</b>\n\n"
+    "Another program is using this bot's token at the same time (another bot host, a webhook or "
+    "your own code). Telegram splits the messages between the two, so your customers would miss replies.\n\n"
+    "Stop the other program (or give it a new bot from @BotFather), then send this bot's token again "
+    "in @TheNumberHubBot → 🤖 Your own bot. Open orders still finish.")
+
+
+async def _give_up_token(reseller_id: int, taken: bool = False) -> None:
     reseller = await repo.get_reseller(reseller_id)
     if reseller is not None and reseller.status != Reseller.SUSPENDED:
         await repo.update_reseller(reseller_id, status=Reseller.TOKEN_INVALID)
     await _halt_polling(reseller_id)
+    bot = _bots.get(reseller_id)
+    if taken and reseller is not None and bot is not None:
+        # The token still sends (only receiving is contested): tell the owner why.
+        try:
+            await bot.send_message(reseller.owner_id, TAKEN_NOTICE.format(bot=reseller.bot_username or "your_bot"))
+        except Exception:  # noqa: BLE001 — the owner never opened the bot, or it is blocked
+            log.warning("reseller bot %s: owner not told about the taken token", reseller_id)
 
 
 def bot_for(reseller_id: int) -> Bot | None:
