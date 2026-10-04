@@ -839,6 +839,33 @@ async def test_picker_pages():
     check("typing still finds any country", len([b for row in kbq.inline_keyboard for b in row if "Land 4" in b.text]) == 6)
 
 
+async def test_rank_order():
+    """2026-10-04: a shop's Telegram list opened on countries that never deliver.
+    NumberHub sends `rank` (its own bot's order); the shop follows it."""
+    print("country order = NumberHub's rank")
+    api = FakeNumberHub()
+    api.countries["tg"] = [
+        {"country": "6", "name": "Indonesia", "flag": "ID", "price": "0.10", "price_max": "0.10",
+         "in_stock": True, "rate": 0, "rate_low": True, "rate_dead": False, "collapsed": False, "rank": 3},
+        {"country": "187", "name": "USA", "flag": "US", "price": "0.80", "price_max": "0.80",
+         "in_stock": True, "rate": 34, "rate_low": False, "rate_dead": False, "collapsed": False, "rank": 2},
+        {"country": "39", "name": "Argentina", "flag": "AR", "price": "0.60", "price_max": "0.60",
+         "in_stock": True, "rate": 21, "rate_low": False, "rate_dead": False, "collapsed": False, "rank": 1},
+        {"country": "0", "name": "Russia", "flag": "RU", "price": "0.50", "price_max": "0.50",
+         "in_stock": False, "rate": None, "rate_low": False, "rate_dead": False, "collapsed": False, "rank": 4},
+    ]
+    r = await make_reseller(api, bot_id=7981)
+    rows = await selling.countries(r, "tg", fresh=True)
+    check("the shop lists countries in NumberHub's order (not by its own rate guess)",
+          [x["name"] for x in rows] == ["Argentina", "USA", "Indonesia", "Russia"], str([x["name"] for x in rows]))
+    for x in api.countries["tg"]:
+        x.pop("rank")
+    rows = await selling.countries(r, "tg", fresh=True)
+    check("an older server without `rank`: stock and rate still decide",
+          [x["name"] for x in rows] == ["USA", "Argentina", "Indonesia", "Russia"], str([x["name"] for x in rows]))
+    runtime._bots.pop(r.id, None)
+
+
 def photo_msg(uid, caption=None):
     return Update.model_validate({"update_id": next(_uid), "message": {
         "message_id": next(_uid), "date": 0, "chat": {"id": uid, "type": "private"}, "from": _user(uid, "en"),
@@ -1333,7 +1360,7 @@ async def main():
     test_prices()
     test_i18n()
     for fn in (test_buy_and_code, test_no_code_refund, test_failures, test_lost_reply, test_cancel,
-               test_races_and_limits, test_bot_flow, test_builder, test_provision, test_custom_prices, test_picker_pages, test_deposits, test_paused_shop, test_review_money,
+               test_races_and_limits, test_bot_flow, test_builder, test_provision, test_custom_prices, test_picker_pages, test_rank_order, test_deposits, test_paused_shop, test_review_money,
                test_review_sync, test_review_bots, test_review_runtime, test_cards_render):
         try:
             await fn()

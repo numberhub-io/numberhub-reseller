@@ -115,6 +115,12 @@ async def known_service(reseller: Reseller, code: str) -> bool:
 
 
 def _quality_key(r: dict):
+    # NumberHub's own order when the API sends it (`rank`, 1 = best): it weighs the
+    # route's record against the app's average, so a messenger route delivering 34%
+    # leads one with no results at all. Older servers: our own approximation.
+    rank = r.get("rank")
+    if isinstance(rank, int) and not isinstance(rank, bool):
+        return (0, rank, r["member_price"], r.get("name") or "")
     # In stock and delivering first, then in stock but weak, out of stock, dead.
     if r.get("rate_dead"):
         tier = 3
@@ -125,7 +131,7 @@ def _quality_key(r: dict):
     else:
         tier = 0
     rate = r.get("rate")
-    return (tier, -(rate if rate is not None else 25), r["member_price"], r.get("name") or "")
+    return (1 + tier, -(rate if rate is not None else 25), r["member_price"], r.get("name") or "")
 
 
 async def countries(reseller: Reseller, service: str, fresh: bool = False) -> list[dict]:
