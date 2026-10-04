@@ -310,7 +310,7 @@ It loads the catalog, buys the cheapest WhatsApp number in stock, checks the hol
 
 ## Troubleshooting
 
-The bot does not answer at all. Check `journalctl -u numberhub-reseller` for `stopped with an error` (the bot retries on its own, with backoff) or `Telegram rejected the token`. A revoked token stops that one shop until the owner sends the new token through ➕ Create my bot, which reconnects the same bot. If the log shows `TelegramConflictError`, a second copy of the process (or another program) is polling the same token.
+The bot does not answer at all. Check `journalctl -u numberhub-reseller` for `stopped with an error` (the bot retries on its own, with backoff) or `Telegram rejected the token`. A revoked token stops that one shop until the owner sends the new token through ➕ Create my bot, which reconnects the same bot. If the log shows `TelegramConflictError`, a second copy of the process (or another program) is polling the same token. The shop watches its own polling: Telegram rejecting the token, or 5 conflicts within 10 minutes, marks it `token_invalid` (shown as needs reconnecting), stops its polling and, for a conflict, tells the owner in their bot why. Its open orders keep syncing, a restart does not poll it, and sending the token again reconnects it.
 
 Customers keep seeing "price changed". The price on NumberHub moved between the list and the purchase. The bot shows the new price and the next tap buys; if it repeats for one route, the route's price is moving fast or is out of stock.
 
