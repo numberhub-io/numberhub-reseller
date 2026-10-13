@@ -1,6 +1,6 @@
 # NumberHub reseller bots
 
-This project lets anyone who already has customers run their own Telegram shop bot that sells virtual phone numbers for SMS verification. The bot has the reseller's name, the reseller's prices and the reseller's customers. NumberHub supplies every number through its public API, billed to the reseller's own NumberHub wallet with the reseller's own API key.
+This project lets anyone who already has customers run their own Telegram shop bot that sells virtual phone numbers for SMS verification. The bot has the reseller's name, the reseller's prices and the reseller's customers. NumberHub supplies every number through its [public API](https://numberhub.io/api-docs/), billed to the reseller's own NumberHub wallet with the reseller's own API key.
 
 One Python process runs everything: the builder bot where resellers create their shops, every reseller's shop bot, and the background loops that keep orders in step with NumberHub.
 
@@ -76,7 +76,7 @@ Under 💰 Balance customers see their ID. That is what they send to the reselle
 ### What you need
 
 1. A Telegram bot token. In Telegram open @BotFather, send `/newbot`, choose a name and a username, and copy the token (it looks like `123456789:AAH...`).
-2. A NumberHub API key with money in the wallet. Sign in at numberhub.io, open Account, then API keys, then Create key, and leave every permission ticked (the shop needs catalog, orders read and write, and wallet). The key starts with `nh_`. One key per bot is a good habit. A daily spend limit on the key is a good safety net: it counts what your numbers really cost, and numbers that got no code don't use it up.
+2. A NumberHub API key with money in the wallet. Sign in at [numberhub.io](https://numberhub.io), open Account, then API keys, then Create key, and leave every permission ticked (the shop needs catalog, orders read and write, and wallet). The key starts with `nh_`. One key per bot is a good habit. A daily spend limit on the key is a good safety net: it counts what your numbers really cost, and numbers that got no code don't use it up.
 
 ### Create your bot
 
@@ -140,7 +140,7 @@ The most specific setting wins: the app in that country, then the app, then your
 
 The shop bot messages you, at most once an hour per problem, when:
 
-- your NumberHub balance is too low for a customer's purchase (top up at numberhub.io; sales continue as soon as there is money),
+- your NumberHub balance is too low for a customer's purchase (top up at [numberhub.io](https://numberhub.io); sales continue as soon as there is money),
 - your API key reached its daily spend limit,
 - NumberHub rejected your API key (it was revoked or rotated). Send a new one with 🤖 My bots, then 🔑 New API key,
 - the key is missing a permission, or only works from certain IP addresses,
