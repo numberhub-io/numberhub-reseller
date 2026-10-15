@@ -963,6 +963,54 @@ async def test_dead_token():
     check("resuming is refused until the token is sent again", resp.status == 409)
 
 
+async def test_rejected_key():
+    """2026-10-15: a shop whose NumberHub key was revoked had no live orders, so
+    only the 2-minute price warm-up used the key: 1,280 refused calls in 38 h,
+    with no end. A 401 on any call now parks the shop as KEY_INVALID, and only
+    selling shops are warmed."""
+    print("a rejected NumberHub key parks the shop")
+    api = FakeNumberHub()
+    r = await make_reseller(api, bot_id=7993)
+    api.reject_key = True
+    api.calls.clear()
+    await selling.warm_popular(await repo.get_reseller(r.id))
+    first = len(api.calls)
+    check("the warm-up stops at the first refusal", 1 <= first <= 2, f"{first} calls")
+    check("…and parks the shop as 'key rejected'", (await repo.get_reseller(r.id)).status == Reseller.KEY_INVALID)
+    for _ in range(3):
+        await selling.warm_popular(await repo.get_reseller(r.id))
+    check("later warm-ups send nothing with the dead key", len(api.calls) == first, f"{len(api.calls) - first} more")
+
+    api.reject_key = False
+    r2 = await make_reseller(api, bot_id=7994)
+    m = await member(r2, ALICE + 900, "5")
+    await selling.buy(r2, m, "wa", "187", None)
+    api.reject_key = True
+    selling._backoff_until.pop(r2.id, None)
+    await selling.sync_reseller(await repo.get_reseller(r2.id))
+    check("an order sync that hits the 401 parks the shop the same way",
+          (await repo.get_reseller(r2.id)).status == Reseller.KEY_INVALID)
+
+    r3 = await make_reseller(api, bot_id=7995)
+    old = selling.client_for(r3.id)
+    await repo.update_reseller(r3.id, api_key_enc=crypto.encrypt("nh_live_reconnected_" + "k" * 24),
+                               status=Reseller.ACTIVE)          # the owner reconnects with a new key
+    await selling.key_rejected(r3.id, old)                      # a late 401 from a request on the old key
+    check("a late 401 from the old key never undoes a reconnect",
+          (await repo.get_reseller(r3.id)).status == Reseller.ACTIVE)
+
+    api.reject_key = False
+    for status in (Reseller.DISABLED, Reseller.TOKEN_INVALID, Reseller.SUSPENDED, Reseller.KEY_INVALID):
+        await repo.update_reseller(r3.id, status=status)
+        before = len(api.calls)
+        await selling.warm_popular(await repo.get_reseller(r3.id))
+        check(f"a {status} shop is not warmed", len(api.calls) == before)
+    for rid in (r.id, r2.id, r3.id):
+        cli = selling.drop_client(rid)
+        if cli is not None:
+            await cli.close()
+
+
 def photo_msg(uid, caption=None):
     return Update.model_validate({"update_id": next(_uid), "message": {
         "message_id": next(_uid), "date": 0, "chat": {"id": uid, "type": "private"}, "from": _user(uid, "en"),
@@ -1457,7 +1505,7 @@ async def main():
     test_prices()
     test_i18n()
     for fn in (test_buy_and_code, test_no_code_refund, test_failures, test_lost_reply, test_cancel,
-               test_races_and_limits, test_bot_flow, test_builder, test_provision, test_custom_prices, test_picker_pages, test_rank_order, test_dead_token, test_deposits, test_paused_shop, test_review_money,
+               test_races_and_limits, test_bot_flow, test_builder, test_provision, test_custom_prices, test_picker_pages, test_rank_order, test_dead_token, test_rejected_key, test_deposits, test_paused_shop, test_review_money,
                test_review_sync, test_review_bots, test_review_runtime, test_cards_render):
         try:
             await fn()

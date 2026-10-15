@@ -54,6 +54,26 @@ def drop_client(reseller_id: int) -> NumberHub | None:
     return _clients.pop(reseller_id, None)
 
 
+async def key_rejected(reseller_id: int, cli: NumberHub) -> None:
+    """NumberHub answered 401 to `cli`: the key was revoked (or its account
+    blocked). Park the shop as KEY_INVALID (sales paused, no more calls with that
+    key) until the owner connects a new one; a reconnect that already stored
+    another key is left alone. Before, only the order sync noticed, and it runs
+    only while a shop has live orders: a shop with a revoked key and none asked
+    for prices with it every 2 minutes for days (1,280 refused calls in 38 h,
+    2026-10-15)."""
+    from app import crypto
+    shop = await repo.get_reseller(reseller_id)
+    if shop is None or shop.status != Reseller.ACTIVE:
+        return
+    try:
+        stored = crypto.decrypt(shop.api_key_enc)
+    except Exception:  # noqa: BLE001 — undecryptable: runtime.start already refuses this shop
+        return
+    if cli.uses(stored) and await repo.mark_key_invalid(reseller_id, shop.api_key_enc):
+        log.warning("reseller %s: NumberHub rejected the API key; sales paused until a new key", reseller_id)
+
+
 # ─── prices / catalog ────────────────────────────────────────────────────────
 def member_price(ceiling: Decimal, markup_pct: Decimal) -> Decimal:
     return (Decimal(ceiling) * (1 + Decimal(markup_pct) / 100)).quantize(CENT, rounding=ROUND_CEILING)
@@ -147,6 +167,8 @@ async def countries(reseller: Reseller, service: str, fresh: bool = False) -> li
     try:
         rows = await cli.countries(service)
     except NumberHubError as exc:
+        if exc.status == 401:
+            await key_rejected(reseller.id, cli)
         raise _map_error(exc, reseller) from exc
     rules = await price_rules(reseller.id)
     out = []
@@ -194,7 +216,11 @@ def price_example(reseller_id: int, service: str) -> tuple[Decimal, Decimal] | N
 
 async def warm_popular(reseller: Reseller) -> None:
     """Keep the popular apps' "from" prices fresh (one request every 0.5 s, well
-    inside the API's 60 per 10 s), so the service grid shows them instantly."""
+    inside the API's 60 per 10 s), so the service grid shows them instantly.
+    Selling shops only: a paused one, one waiting for a new key or token, or a
+    suspended one has no customers browsing it."""
+    if reseller.status != Reseller.ACTIVE:
+        return
     from app.catalog_ui import POPULAR
     for code, _icon, _name in POPULAR:
         hit = _from_price.get((reseller.id, code))
@@ -595,7 +621,7 @@ async def sync_reseller(reseller: Reseller) -> None:
     try:
         listed = {int(o["id"]): o for o in await cli.orders(limit=100) if o.get("id") is not None}
     except NumberHubError as exc:
-        await _sync_trouble(reseller, exc)
+        await _sync_trouble(reseller, exc, cli)
         return
     from app import runtime, texts
     bot = runtime.bot_for(reseller.id)
@@ -611,7 +637,7 @@ async def sync_reseller(reseller: Reseller) -> None:
                 nh = await cli.number(order.nh_id)
             except NumberHubError as exc:
                 if exc.status in (401, 403, 429):
-                    await _sync_trouble(reseller, exc)
+                    await _sync_trouble(reseller, exc, cli)
                     return
                 continue
         before = order.status
@@ -656,7 +682,7 @@ def _track(reseller_id: int, live_ids: set[int]) -> None:
         _order_reseller[oid] = reseller_id
 
 
-async def _sync_trouble(reseller: Reseller, exc: NumberHubError) -> None:
+async def _sync_trouble(reseller: Reseller, exc: NumberHubError, cli: NumberHub) -> None:
     """The key can't read orders right now: back off instead of hammering."""
     now = time.monotonic()
     if exc.status == 429:
@@ -664,9 +690,8 @@ async def _sync_trouble(reseller: Reseller, exc: NumberHubError) -> None:
     elif exc.status in (401, 403):
         _backoff_until[reseller.id] = now + 60
         problem = _key_problem(exc)
-        if exc.status == 401 and reseller.status == Reseller.ACTIVE:
-            await repo.update_reseller(reseller.id, status=Reseller.KEY_INVALID)
-            log.warning("reseller %s: NumberHub rejected the API key; sales paused until a new key", reseller.id)
+        if exc.status == 401:
+            await key_rejected(reseller.id, cli)
         if problem:
             await warn_owner(reseller, problem)
 

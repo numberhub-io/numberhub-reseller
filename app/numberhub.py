@@ -7,6 +7,7 @@ Money comes back as 2-dp strings; errors as {"error": code, ...}.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 from decimal import Decimal
@@ -70,6 +71,10 @@ class NumberHub:
     async def close(self) -> None:
         if self._own_http:
             await self._http.aclose()
+
+    def uses(self, api_key: str) -> bool:
+        """Whether this client sends `api_key` (constant time; the key is never exposed)."""
+        return hmac.compare_digest(self._key.encode(), (api_key or "").encode())
 
     async def _send(self, method: str, path: str, *, params=None, content: bytes | None = None,
                     headers=None) -> httpx.Response:

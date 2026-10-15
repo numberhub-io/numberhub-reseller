@@ -72,6 +72,17 @@ async def update_reseller(reseller_id: int, **values) -> None:
             await s.commit()
 
 
+async def mark_key_invalid(reseller_id: int, api_key_enc: str) -> bool:
+    """ACTIVE -> KEY_INVALID, only while the shop still stores the key NumberHub
+    rejected: a reconnect that saved a new key in between is never undone."""
+    async with session_factory() as s:
+        res = await s.execute(update(Reseller).where(
+            Reseller.id == reseller_id, Reseller.status == Reseller.ACTIVE,
+            Reseller.api_key_enc == api_key_enc).values(status=Reseller.KEY_INVALID))
+        await s.commit()
+        return res.rowcount == 1
+
+
 # ─── members ─────────────────────────────────────────────────────────────────
 async def get_or_create_member(reseller_id: int, telegram_id: int, username: str | None,
                                full_name: str | None, language: str = "en") -> Member:
