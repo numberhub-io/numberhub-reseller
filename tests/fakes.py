@@ -264,3 +264,69 @@ def fake_bot(session: FakeSession) -> Bot:
     from aiogram.client.default import DefaultBotProperties
     from aiogram.enums import ParseMode
     return Bot("123456:" + "A" * 35, session=session, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+
+
+# ─── payment gateways (app/payments.py) ──────────────────────────────────────
+class FakeGateways:
+    """OxaPay (api.oxapay.com/v1) and Crypto Pay (pay.crypt.bot/api) for one shop
+    owner's own account. Tests set invoice states and knobs, then let the real
+    payments code talk to them through an httpx.MockTransport."""
+
+    def __init__(self, ox_key: str = "OXA-GOOD-KEY-123", cb_token: str = "12345:CRYPTOPAYTOKEN"):
+        self.ox_key, self.cb_token = ox_key, cb_token
+        self.ox: dict[str, dict] = {}        # track_id -> {"status", "amount", "sandbox", ...}
+        self.cb: dict[int, dict] = {}
+        self.calls: list[tuple[str, str]] = []
+        self.refuse_create = False
+        self.next = 1
+
+    def transport(self) -> httpx.MockTransport:
+        return httpx.MockTransport(self.handle)
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        host, path = request.url.host, request.url.path
+        self.calls.append((host, path))
+        if host == "api.oxapay.com":
+            if request.headers.get("merchant_api_key") != self.ox_key:
+                return httpx.Response(400, json={"data": {}, "message": "", "error": {
+                    "type": "invalid_key", "key": "merchant_api_key", "message": "Invalid merchant API key"},
+                    "status": 400})
+            if request.method == "POST" and path == "/v1/payment/invoice":
+                body = json.loads(request.content)
+                if self.refuse_create:
+                    return httpx.Response(400, json={"error": {"message": "Merchant is blocked"}, "status": 400})
+                track = f"T{self.next}"
+                self.next += 1
+                self.ox[track] = {"status": "Waiting", "amount": body["amount"], "sandbox": body.get("sandbox"),
+                                  "fee_paid_by_payer": body.get("fee_paid_by_payer"), "order_id": body["order_id"]}
+                exp = int((dt.datetime.now(UTC) + dt.timedelta(minutes=body["lifetime"])).timestamp())
+                return httpx.Response(200, json={"data": {"track_id": track, "payment_url":
+                                                          f"https://pay.oxapay.com/m1/{track}", "expired_at": exp},
+                                                 "message": "ok", "error": {}, "status": 200})
+            if request.method == "GET" and path.startswith("/v1/payment/"):
+                track = path.rsplit("/", 1)[1]
+                inv = self.ox.get(track)
+                if inv is None:
+                    return httpx.Response(404, json={"error": {"message": "not found"}, "status": 404})
+                return httpx.Response(200, json={"data": {"track_id": track, "status": inv["status"]},
+                                                 "message": "ok", "error": {}, "status": 200})
+        if host == "pay.crypt.bot":
+            if request.headers.get("crypto-pay-api-token") != self.cb_token:
+                return httpx.Response(401, json={"ok": False, "error": {"code": 401, "name": "UNAUTHORIZED"}})
+            body = json.loads(request.content or b"{}")
+            method = path.rsplit("/", 1)[1]
+            if method == "getMe":
+                return httpx.Response(200, json={"ok": True, "result": {"app_id": 9, "name": "My shop app"}})
+            if method == "createInvoice":
+                if self.refuse_create:
+                    return httpx.Response(400, json={"ok": False, "error": {"code": 400, "name": "APP_BLOCKED"}})
+                iid = self.next
+                self.next += 1
+                self.cb[iid] = {"status": "active", **body}
+                return httpx.Response(200, json={"ok": True, "result": {
+                    "invoice_id": iid, "status": "active", "bot_invoice_url": f"https://t.me/CryptoBot?start=IV{iid}"}})
+            if method == "getInvoices":
+                ids = [int(x) for x in str(body.get("invoice_ids", "")).split(",") if x]
+                return httpx.Response(200, json={"ok": True, "result": {"items": [
+                    {"invoice_id": i, "status": self.cb[i]["status"]} for i in ids if i in self.cb]}})
+        return httpx.Response(404, json={"error": "no such route"})

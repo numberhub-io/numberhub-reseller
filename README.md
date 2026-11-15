@@ -69,7 +69,7 @@ Everything below is in the customer's Telegram language when it is one of the 14
 5. The order card. The number (tap to copy), a 20 minute countdown, and the code as soon as it arrives. The code is also sent as a separate message. When an app verified by phone call, the "code" is the caller's number, and the card says to type its last 6 (or 4) digits. A cancel button unlocks after about 2 minutes (NumberHub refuses earlier cancels) and shows the seconds left until then. The card updates by itself.
 6. No code means no charge. If the time runs out or the customer cancels, the reserved amount goes back and the customer gets a message saying so.
 
-Under 💰 Balance customers see their ID. That is what they send to the reseller when they want to top up. The shop bot only works in private chats; in a group it stays silent, so nobody's number or code is shown to the group.
+Under 💰 Balance customers see their ID and, when the reseller has connected a payment gateway, a 💳 Add balance button that tops them up by crypto on the spot (see Automatic payments). Without one, the ID is what they send to the reseller when they want to top up. The shop bot only works in private chats; in a group it stays silent, so nobody's number or code is shown to the group.
 
 ## Guide for resellers
 
@@ -107,7 +107,7 @@ Open your own shop bot and send `/admin`, or tap ⚙️ Admin panel in the menu 
 | 👥 Customers | The latest 25 customers with their IDs and balances |
 | 📣 Broadcast | Sends your message to every customer of this bot |
 | 💲 Commission | Changes your commission. It applies to new purchases only |
-| 💳 Deposits | Lets customers ask for balance in the bot (see below). Set your payment details and a minimum here, and approve what waits |
+| 💳 Payments | Automatic crypto top-ups with your own OxaPay or @CryptoBot, and manual deposits customers ask for in the bot (both below). Also a minimum, the recent payments, and the deposits that wait for you |
 | 🏷 Custom prices | Your own price for one app, or for one app in one country: a fixed price (`0.35`) or its own commission (`10%`). Also a profit cap: the most you earn on one number |
 | 📝 Welcome text | Replaces the greeting on the menu |
 | 🆘 Support contact | A `@username` or an `https://` link. Customers see it on their balance screen |
@@ -117,15 +117,28 @@ Open your own shop bot and send `/admin`, or tap ⚙️ Admin panel in the menu 
 
 Your commission is a percentage added on top of NumberHub's price for each country. With a 30% commission, a number NumberHub prices at $0.25 costs your customer $0.33 (rounded up to the cent) and you keep $0.08. The bot uses NumberHub's highest price for that route (`price_max`) as the base, so NumberHub can never charge you more for a sale than the customer paid.
 
+### Automatic payments (crypto)
+
+Connect your own payment account and customers top up without waiting for you. ⚙️ Admin panel → 💳 Payments:
+
+- **🔑 Connect 🪙 OxaPay**: sign up at oxapay.com, create a merchant API key (Merchant Service) and send it to your bot. Customers pay in BTC, ETH, USDT and many more coins; the gateway fee is added to what they pay, so you receive the full amount.
+- **🔑 Connect 🤖 @CryptoBot**: in @CryptoBot open Crypto Pay → Create App, copy the API token and send it to your bot. Customers pay inside Telegram with USDT, TON, BTC and more.
+
+The bot checks the key with the gateway before keeping it (OxaPay with a sandbox invoice, so nothing is charged), deletes your message at once and stores the key encrypted. Connect one or both; with both, the customer picks.
+
+Then the customer taps 💳 Add balance, picks $5, $10, $20 or $50 (or types an amount; your minimum applies, the maximum is $1,000), and gets a payment link valid for 60 minutes. When the gateway reports the payment as paid, their balance goes up by itself, within about 20 seconds, and both of you get a message. The customer can also tap 🔄 I've paid: check.
+
+The money goes straight to your own OxaPay or @CryptoBot balance; this platform never holds it. A payment is credited exactly once, even when the background check and the customer's button race. A customer can have 3 unpaid links open and open 10 a day. A link that expires unpaid is closed, and it is still checked for 6 hours in case a payment confirms late. An underpayment you accept by hand in your OxaPay dashboard is not credited automatically: the bot tells you to add what really arrived with ➕ Add balance. Removing a key (🗑) stops new links at once.
+
 ### Deposits
 
-Instead of customers sending you their ID, they can ask for balance in the bot. Turn it on in ⚙️ Admin panel → 💳 Deposits → ✏️ Payment details: write how customers pay you (for example `bKash: 01XXXXXXXXX`, a Binance Pay ID or a USDT address). Then:
+Instead of customers sending you their ID, they can ask for balance in the bot. Turn it on in ⚙️ Admin panel → 💳 Payments → ✏️ Payment details: write how customers pay you (for example `bKash: 01XXXXXXXXX`, a Binance Pay ID or a USDT address). Then:
 
 1. The customer taps 💳 Add balance, sees your payment details, pays you, and sends the amount and the transaction ID or a screenshot.
 2. You get the request in your bot at once (#1, #2, ...), with the screenshot, and three buttons: ✅ Approve, ✏️ Other amount (credit what really arrived) and ❌ Reject.
 3. The customer gets a message: approved with their new balance, or not approved with your support contact.
 
-A request is credited exactly once, even if you tap twice or on two devices. A customer has one request waiting at a time and at most 5 a day; you can set a minimum. Requests that wait are also listed under 💳 Deposits. Send `-` as the payment details to turn deposits off.
+A request is credited exactly once, even if you tap twice or on two devices. With a payment gateway connected too, customers see both: the crypto amounts first and 📝 I paid another way for this. A customer has one request waiting at a time and at most 5 a day; you can set a minimum. Requests that wait are also listed under 💳 Payments. Send `-` as the payment details to turn deposits off.
 
 ### Custom prices
 

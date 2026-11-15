@@ -11,7 +11,7 @@ from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.db import session_factory
-from app.models import Deposit, Member, MemberTx, Order, PriceRule, Reseller
+from app.models import Deposit, Member, MemberTx, Order, Payment, PriceRule, Reseller
 
 
 def _now() -> dt.datetime:
@@ -64,7 +64,8 @@ async def list_resellers(status: str | None = None, owner_id: int | None = None)
 
 async def update_reseller(reseller_id: int, **values) -> None:
     allowed = {"markup_pct", "welcome_text", "support_contact", "status", "bot_username", "bot_title",
-               "bot_token_enc", "api_key_enc", "api_key_hint", "max_profit", "deposit_info", "deposit_min"}
+               "bot_token_enc", "api_key_enc", "api_key_hint", "max_profit", "deposit_info", "deposit_min",
+               "oxapay_key_enc", "cryptobot_token_enc"}
     values = {k: v for k, v in values.items() if k in allowed}
     if values:
         async with session_factory() as s:
@@ -589,3 +590,101 @@ async def decide_deposit(reseller_id: int, deposit_id: int, approve: bool,
         await s.commit()
     return await get_deposit(reseller_id, deposit_id)
 
+
+
+# ─── automatic payments (app/payments.py) ────────────────────────────────────
+async def create_payment(reseller_id: int, member_id: int, provider: str, amount: Decimal) -> Payment:
+    async with session_factory() as s:
+        row = Payment(reseller_id=reseller_id, member_id=member_id, provider=provider, amount=amount,
+                      status=Payment.PENDING)
+        s.add(row)
+        await s.commit()
+        await s.refresh(row)
+        return row
+
+
+async def attach_invoice(payment_id: int, invoice_id: str, pay_url: str, expires_at: dt.datetime) -> None:
+    async with session_factory() as s:
+        await s.execute(update(Payment).where(Payment.id == payment_id)
+                        .values(invoice_id=invoice_id, pay_url=pay_url, expires_at=expires_at))
+        await s.commit()
+
+
+async def get_payment(payment_id: int) -> Payment | None:
+    async with session_factory() as s:
+        return await s.get(Payment, payment_id)
+
+
+async def close_payment(payment_id: int, status: str) -> bool:
+    """pending -> expired | failed | manual. False when it was not pending."""
+    async with session_factory() as s:
+        res = await s.execute(update(Payment).where(Payment.id == payment_id, Payment.status == Payment.PENDING)
+                              .values(status=status))
+        await s.commit()
+        return res.rowcount == 1
+
+
+async def credit_payment(payment_id: int) -> Payment | None:
+    """pending -> paid AND the member's balance + the amount, in ONE transaction.
+    Only from pending, so the poller, the customer's check button and a restart
+    racing each other credit it exactly once. None = it was not pending."""
+    async with session_factory() as s:
+        row = await s.get(Payment, payment_id)
+        if row is None:
+            return None
+        credit = Decimal(row.amount)
+        res = await s.execute(update(Payment).where(Payment.id == payment_id, Payment.status == Payment.PENDING)
+                              .values(status=Payment.PAID, credited=credit, paid_at=_now()))
+        if res.rowcount != 1:
+            await s.rollback()
+            return None
+        res = await s.execute(update(Member).where(Member.id == row.member_id, Member.reseller_id == row.reseller_id)
+                              .values(balance=money2(Member.balance + credit)))
+        if res.rowcount != 1:
+            await s.rollback()
+            return None
+        s.add(MemberTx(reseller_id=row.reseller_id, member_id=row.member_id, kind="payment", amount=credit))
+        await s.commit()
+    return await get_payment(payment_id)
+
+
+async def open_payments(member_id: int) -> list[Payment]:
+    """The member's unpaid links that can still be paid."""
+    async with session_factory() as s:
+        rows = list((await s.execute(select(Payment).where(
+            Payment.member_id == member_id, Payment.status == Payment.PENDING,
+            Payment.invoice_id.is_not(None)).order_by(Payment.id.desc()))).scalars())
+    now = _now()
+    return [p for p in rows if p.expires_at is None
+            or (p.expires_at if p.expires_at.tzinfo else p.expires_at.replace(tzinfo=dt.timezone.utc)) > now]
+
+
+async def payments_today(member_id: int) -> int:
+    since = _now() - dt.timedelta(hours=24)
+    async with session_factory() as s:
+        return int(await s.scalar(select(func.count(Payment.id)).where(
+            Payment.member_id == member_id, Payment.created_at >= since)) or 0)
+
+
+async def pending_payments(limit: int = 500) -> list[Payment]:
+    """Every link still waiting for the gateway, oldest first (for the poller)."""
+    async with session_factory() as s:
+        return list((await s.execute(select(Payment).where(
+            Payment.status == Payment.PENDING, Payment.invoice_id.is_not(None))
+            .order_by(Payment.id).limit(limit))).scalars())
+
+
+async def recent_payments(reseller_id: int, limit: int = 8) -> list[Payment]:
+    async with session_factory() as s:
+        return list((await s.execute(select(Payment).where(
+            Payment.reseller_id == reseller_id, Payment.status.in_([Payment.PAID, Payment.PENDING, Payment.MANUAL]),
+            Payment.invoice_id.is_not(None)).order_by(Payment.id.desc()).limit(limit))).scalars())
+
+
+async def payment_totals(reseller_id: int, days: int = 30) -> tuple[int, Decimal]:
+    since = _now() - dt.timedelta(days=days)
+    async with session_factory() as s:
+        n, total = (await s.execute(select(func.count(Payment.id), func.coalesce(func.sum(Payment.credited), 0))
+                                    .where(Payment.reseller_id == reseller_id, Payment.status == Payment.PAID,
+                                           Payment.paid_at >= since))).one()
+    return int(n or 0), Decimal(str(total or 0)).quantize(Decimal("0.01"))

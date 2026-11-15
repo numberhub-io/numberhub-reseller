@@ -13,7 +13,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app import repo, selling
+from app import payments, repo, selling
 from app.bots.callbacks import Adm, Dep, Nav
 from app.config import settings
 from app.i18n import t
@@ -65,6 +65,13 @@ async def dashboard(reseller: Reseller):
     waiting = len(await repo.pending_deposits(reseller.id, limit=100))
     if waiting:
         extras.append(f"💳 Deposits waiting for you: <b>{waiting}</b>")
+    gates = payments.connected(reseller)
+    if gates:
+        n_paid, total = await repo.payment_totals(reseller.id, 30)
+        extras.append(f"💳 Automatic payments: <b>{' + '.join(payments.LABEL[g] for g in gates)}</b>"
+                      + (f" · {n_paid} paid, {money(total)} in 30 days" if n_paid else ""))
+    else:
+        extras.append("💳 Automatic payments: <b>off</b> (connect OxaPay or @CryptoBot in 💳 Payments)")
 
     text = "\n".join([
         f"⚙️ <b>Admin panel</b> · @{esc(reseller.bot_username)}",
@@ -78,8 +85,9 @@ async def dashboard(reseller: Reseller):
         f"🏦 NumberHub wallet: {wallet}",
         f"🔗 Share your bot: <code>t.me/{esc(reseller.bot_username)}</code>",
         "",
-        "<i>Customers top up with you, your way. You add the amount here, and each number "
-        "is paid from your NumberHub wallet only when its code arrives.</i>",
+        "<i>Customers pay you by crypto through your own OxaPay or @CryptoBot and their balance goes up "
+        "by itself (💳 Payments), or they pay you your way and you add it here. Each number is paid from "
+        "your NumberHub wallet only when its code arrives.</i>",
     ])
     kb = InlineKeyboardBuilder()
     kb.button(text="➕ Add balance", callback_data=Adm(a="add"))
@@ -88,7 +96,7 @@ async def dashboard(reseller: Reseller):
     kb.button(text="📣 Broadcast", callback_data=Adm(a="broadcast"))
     kb.button(text="💲 Commission", callback_data=Adm(a="markup"))
     kb.button(text="🏷 Custom prices", callback_data=Adm(a="prices"))
-    kb.button(text="💳 Deposits" + (f" ({waiting})" if waiting else ""), callback_data=Adm(a="deposits"))
+    kb.button(text="💳 Payments" + (f" ({waiting})" if waiting else ""), callback_data=Adm(a="deposits"))
     kb.button(text="📝 Welcome text", callback_data=Adm(a="welcome"))
     kb.button(text="🆘 Support contact", callback_data=Adm(a="support"))
     kb.button(text="🚫 Block / unblock", callback_data=Adm(a="block"))
@@ -168,7 +176,7 @@ async def notify_owner_deposit(bot, reseller: Reseller, member: Member, dep) -> 
             await bot.send_photo(reseller.owner_id, dep.proof_photo, caption=text, reply_markup=deposit_buttons(dep))
         else:
             await bot.send_message(reseller.owner_id, text, reply_markup=deposit_buttons(dep))
-    except Exception:  # noqa: BLE001 — the request is saved: it also waits in ⚙️ Admin → 💳 Deposits
+    except Exception:  # noqa: BLE001 — the request is saved: it also waits in ⚙️ Admin → 💳 Payments
         log.warning("reseller %s: deposit #%s notice not delivered to the owner", reseller.id, dep.number)
 
 
@@ -190,24 +198,55 @@ async def settle_deposit(bot, reseller: Reseller, deposit_id: int, approve: bool
     return dep, member
 
 
+def _status_word(p) -> str:
+    return {"paid": "✅", "pending": "⏳", "manual": "✋"}.get(p.status, "•")
+
+
 async def deposits_screen(reseller: Reseller, note: str = ""):
     rows = await repo.pending_deposits(reseller.id, limit=10)
     on = bool(reseller.deposit_info)
+    gates = payments.connected(reseller)
     lines = ([note, ""] if note else []) + [
-        "💳 <b>Deposits</b>",
+        "💳 <b>Payments</b>",
         "",
-        ("✅ On. Customers tap 💳 Add balance, pay you your way, then send the amount and a "
-         "transaction ID or screenshot. You approve here, and their balance goes up at once."
-         if on else "⏸ Off. Customers send their ID to your support contact and you add balance by hand. "
-                    "Turn deposits on by setting your payment details."),
+        "<b>⚡ Automatic (crypto)</b>",
+        "Customers tap 💳 Add balance, pick an amount and pay a link. Their balance goes up by itself "
+        "when the payment arrives, and the money goes straight to YOUR own OxaPay or @CryptoBot account.",
+        f"🪙 OxaPay: <b>{'✅ connected' if payments.OXAPAY in gates else '— not connected'}</b>"
+        " · BTC, ETH, USDT and many more coins",
+        f"🤖 @CryptoBot: <b>{'✅ connected' if payments.CRYPTOBOT in gates else '— not connected'}</b>"
+        " · USDT, TON, BTC and more, inside Telegram",
+    ]
+    recent = await repo.recent_payments(reseller.id, limit=6) if gates else []
+    if recent:
+        n_paid, total = await repo.payment_totals(reseller.id, 30)
+        lines += ["", f"Last 30 days: <b>{n_paid}</b> paid, <b>{money(total)}</b>"]
+        for p in recent:
+            mbr = await repo.get_member(p.member_id)
+            tag = f"@{mbr.username}" if mbr and mbr.username else (str(mbr.telegram_id) if mbr else "?")
+            when = p.paid_at or p.created_at
+            lines.append(f"{_status_word(p)} {money(p.amount)} · {payments.LABEL.get(p.provider, p.provider)} · "
+                         f"{esc(tag)} · {when:%d %b %H:%M}")
+    lines += [
+        "",
+        "<b>✍️ Manual</b>",
+        ("✅ On. Customers can also pay you your way, then send the amount and a transaction ID or "
+         "screenshot. You approve here, and their balance goes up at once."
+         if on else "⏸ Off. Set your payment details to let customers pay you your way and send proof."),
     ]
     if on:
         lines += ["", "<b>What customers see:</b>", esc(reseller.deposit_info)]
-        if reseller.deposit_min:
-            lines.append(f"Minimum: <b>{money(reseller.deposit_min)}</b>")
-    lines += ["", f"<b>Waiting for you:</b> {len(rows)}" if rows else "Nothing waiting."]
+    if reseller.deposit_min:
+        lines.append(f"Minimum top-up: <b>{money(reseller.deposit_min)}</b>")
+    lines += ["", f"<b>Waiting for you:</b> {len(rows)}" if rows else "No manual deposit waiting."]
     kb = InlineKeyboardBuilder()
     sizes = []
+    for g, label in ((payments.OXAPAY, "🪙 OxaPay"), (payments.CRYPTOBOT, "🤖 @CryptoBot")):
+        if g in gates:
+            kb.button(text=f"🗑 Remove {label[2:]}", callback_data=Adm(a="pay_off", arg=g))
+        else:
+            kb.button(text=f"🔑 Connect {label}", callback_data=Adm(a="pay_on", arg=g))
+    sizes.append(2)
     for d in rows:
         member = await repo.get_member(d.member_id)
         tag = f"@{member.username}" if member and member.username else (str(member.telegram_id) if member else "?")
@@ -222,6 +261,26 @@ async def deposits_screen(reseller: Reseller, note: str = ""):
     kb.button(text="⬅️ Admin panel", callback_data=Adm(a="home"))
     kb.adjust(*sizes, 2, 1)
     return "\n".join(lines), kb.as_markup()
+
+
+GATEWAY_HOWTO = {
+    payments.OXAPAY: (
+        "🪙 <b>Connect OxaPay</b>\n\n"
+        "1. Sign up at <b>oxapay.com</b>.\n"
+        "2. In your dashboard, create a <b>Merchant API key</b> (Merchant Service) and copy it.\n"
+        "3. Send the key here.\n\n"
+        "Customers then pay in BTC, ETH, USDT and many more coins; the gateway fee is added to what "
+        "they pay, so you get the full amount in your OxaPay balance.\n\n"
+        "<i>Your message is deleted at once and the key is stored encrypted. Send <code>-</code> to cancel.</i>"),
+    payments.CRYPTOBOT: (
+        "🤖 <b>Connect @CryptoBot</b>\n\n"
+        "1. Open @CryptoBot → <b>Crypto Pay</b> → <b>Create App</b>.\n"
+        "2. Open the app → <b>API Token</b> and copy it.\n"
+        "3. Send the token here.\n\n"
+        "Customers then pay inside Telegram with USDT, TON, BTC and more, and the money goes to your "
+        "@CryptoBot wallet.\n\n"
+        "<i>Your message is deleted at once and the token is stored encrypted. Send <code>-</code> to cancel.</i>"),
+}
 
 
 def _back_to_prices():
@@ -422,6 +481,16 @@ def register(r: Router) -> None:
             return
         elif a == "deposits":
             await show(c, *await deposits_screen(reseller))
+        elif a == "pay_on" and callback_data.arg in payments.PROVIDERS:
+            await state.set_state(AdminForm.pay_key)
+            await state.update_data(provider=callback_data.arg)
+            await show(c, GATEWAY_HOWTO[callback_data.arg], _cancel_kb())
+        elif a == "pay_off" and callback_data.arg in payments.PROVIDERS:
+            await payments.disconnect(reseller.id, callback_data.arg)
+            label = payments.LABEL[callback_data.arg]
+            await show(c, *await deposits_screen(await repo.get_reseller(reseller.id),
+                                                 f"🗑 {label} disconnected. Links already open can't be "
+                                                 "confirmed automatically any more."))
         elif a == "dep_info":
             await state.set_state(AdminForm.dep_info)
             await show(c, "✏️ <b>Payment details</b>\n\nSend what your customers see when they add balance: how "
@@ -611,6 +680,37 @@ def register(r: Router) -> None:
         await state.clear()
         note = "⏸ Deposits are off." if text == "-" else "✅ Payment details saved: deposits are on."
         await reply(m, await deposits_screen(await repo.get_reseller(reseller.id), note))
+
+    @r.message(StateFilter(AdminForm.pay_key), F.text)
+    @owner_only
+    async def f_pay_key(m: Message, reseller: Reseller, state: FSMContext, is_owner: bool = False):
+        # A payment key is a secret: off the chat at once, whatever happens next.
+        try:
+            await m.delete()
+        except Exception:  # noqa: BLE001 — too old / no rights: the owner can delete it
+            pass
+        provider = (await state.get_data()).get("provider")
+        raw = (m.text or "").strip()
+        if provider not in payments.PROVIDERS or raw == "-":
+            await state.clear()
+            await reply(m, await deposits_screen(reseller))
+            return
+        label = payments.LABEL[provider]
+        try:
+            name = await payments.connect(reseller.id, provider, raw)
+        except payments.PayError as exc:
+            await m.answer(f"❌ {label} didn't accept that: {esc(str(exc))}\n\nSend the key again, or "
+                           "<code>-</code> to cancel.", reply_markup=_cancel_kb())
+            return
+        except Exception:  # noqa: BLE001
+            log.exception("reseller %s: connecting %s crashed", reseller.id, provider)
+            await m.answer(f"❌ Couldn't reach {label} right now. Please send the key again in a minute.",
+                           reply_markup=_cancel_kb())
+            return
+        await state.clear()
+        await reply(m, await deposits_screen(await repo.get_reseller(reseller.id),
+                                             f"✅ <b>{label} connected</b> ({esc(name)}). Customers can now "
+                                             "top up by crypto, and their balance goes up by itself."))
 
     @r.message(StateFilter(AdminForm.dep_min), F.text)
     @owner_only

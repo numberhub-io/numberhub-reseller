@@ -3,9 +3,11 @@
 Two kinds of money, never mixed:
   * the reseller's NumberHub wallet — real money, held and charged by NumberHub
     for every number their members buy (we only read it through the API);
-  * a member's balance here — credit the reseller sells to their own customers
-    their own way and adds in the admin panel. A purchase holds the member's
-    price; when the order ends it is charged (a code arrived) or released.
+  * a member's balance here — credit the reseller sells to their own customers:
+    paid by crypto through the reseller's own OxaPay / @CryptoBot and credited
+    automatically (app/payments.py), or paid their own way and added in the admin
+    panel. A purchase holds the member's price; when the order ends it is charged
+    (a code arrived) or released.
 """
 from __future__ import annotations
 
@@ -49,6 +51,10 @@ class Reseller(Base):
     # None = deposits off (customers send their ID to the support contact instead).
     deposit_info: Mapped[str | None] = mapped_column(Text, nullable=True)
     deposit_min: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    # Automatic top-ups (app/payments.py) with the owner's OWN gateway account,
+    # encrypted like the bot token. None = not connected.
+    oxapay_key_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cryptobot_token_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
     welcome_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     support_contact: Mapped[str | None] = mapped_column(String(128), nullable=True)
     status: Mapped[str] = mapped_column(String(16), default=ACTIVE, index=True)
@@ -185,4 +191,30 @@ class Deposit(Base):
     status: Mapped[str] = mapped_column(String(16), default=PENDING, index=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
     decided_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class Payment(Base):
+    """An automatic top-up: a payment link from the owner's own OxaPay or
+    @CryptoBot. Credited exactly once, by repo.credit_payment (from pending only,
+    in the same transaction as the balance change)."""
+    __tablename__ = "payments"
+    __table_args__ = (UniqueConstraint("provider", "invoice_id", name="uq_payment_invoice"),)
+    PENDING = "pending"        # link open, not paid yet
+    PAID = "paid"              # credited
+    EXPIRED = "expired"        # never paid (or refunded)
+    FAILED = "failed"          # the gateway refused to make the link
+    MANUAL = "manual"          # the owner accepted a short payment in their dashboard: added by hand
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    reseller_id: Mapped[int] = mapped_column(ForeignKey("resellers.id", ondelete="CASCADE"), index=True)
+    member_id: Mapped[int] = mapped_column(ForeignKey("members.id", ondelete="CASCADE"), index=True)
+    provider: Mapped[str] = mapped_column(String(16))           # oxapay | cryptobot
+    invoice_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    pay_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    amount: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    credited: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default=PENDING, index=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+    expires_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    paid_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

@@ -52,3 +52,11 @@ class Noop(CallbackData, prefix="x"):
 class Dep(CallbackData, prefix="d"):
     a: str                     # ok | no | amt (owner: approve / reject / approve another amount)
     id: int
+
+
+class Pay(CallbackData, prefix="p"):
+    """Automatic top-ups (app/payments.py)."""
+    a: str                     # amt (an amount, cents) | other (type one) | via (gateway + cents) | chk (payment id)
+    c: int = 0                 # amount in cents
+    g: str = ""                # ox | cb
+    id: int = 0

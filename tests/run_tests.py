@@ -1043,8 +1043,8 @@ async def test_deposits():
           button(session, "Add balance") is None and "send your ID" in session.last_text())
 
     await dp.feed_update(bot, msg(OWNER, "/admin"))
-    await dp.feed_update(bot, tap(OWNER, button(session, "Deposits")))
-    check("admin: 💳 Deposits explains it and says it is off", "Off." in session.last_text())
+    await dp.feed_update(bot, tap(OWNER, button(session, "Payments")))
+    check("admin: 💳 Payments explains it and says manual deposits are off", "Off." in session.last_text())
     await dp.feed_update(bot, tap(OWNER, button(session, "Payment details")))
     await dp.feed_update(bot, msg(OWNER, "bKash: 01700000000\nBinance Pay ID: 123456789"))
     check("payment details turn deposits on", "deposits are on" in session.last_text()
@@ -1128,8 +1128,8 @@ async def test_deposits():
     await dp.feed_update(bot, msg(cust, "TX-1"))
     await dp.feed_update(bot, msg(OWNER, "/admin"))
     check("the dashboard shows what waits", "Deposits waiting for you: <b>1</b>" in session.last_text()
-          and button(session, "Deposits (1)") is not None)
-    await dp.feed_update(bot, tap(OWNER, button(session, "Deposits")))
+          and button(session, "Payments (1)") is not None)
+    await dp.feed_update(bot, tap(OWNER, button(session, "Payments")))
     approve4 = button(session, "✅ #4 $4.00")
     check("…and the list approves from there too", approve4 is not None)
     for _ in range(3):
@@ -1148,6 +1148,192 @@ async def test_deposits():
     await dp.feed_update(bot, msg(OWNER, "-"))
     check("'-' turns deposits off", (await repo.get_reseller(r.id)).deposit_info is None)
     _ = EditMessageCaption
+
+
+def url_button(session: FakeSession, contains: str) -> str | None:
+    mk = session.last_markup()
+    for row in (mk.inline_keyboard if mk else []):
+        for b in row:
+            if contains in b.text and b.url:
+                return b.url
+    return None
+
+
+async def test_auto_payments():
+    """Owner 2026-11-15 (#61): customers top up by crypto through the shop owner's
+    OWN OxaPay / @CryptoBot, and their balance goes up by itself."""
+    print("automatic payments (the owner's own OxaPay / @CryptoBot)")
+    from aiogram.methods import DeleteMessage, SendMessage
+    from app import payments
+    from app.bots.callbacks import Pay
+    from app.bots.reseller import build_router, error_text
+    from app.models import MemberTx, Payment
+    from fakes import FakeGateways
+    from sqlalchemy import func, select
+    gw = FakeGateways()
+    payments.TRANSPORT = gw.transport()
+    api = FakeNumberHub()
+    r = await make_reseller(api, bot_id=86061)
+    session = FakeSession()
+    bot = fake_bot(session)
+    runtime._bots[r.id] = bot
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(build_router(r.id))
+    cust = 9501
+    to = lambda uid: [m.text or "" for m in session.requests if isinstance(m, SendMessage) and m.chat_id == uid]  # noqa: E731
+
+    # ── the owner connects OxaPay ──
+    await dp.feed_update(bot, msg(OWNER, "/admin"))
+    check("dashboard: automatic payments are off until a gateway is connected",
+          "Automatic payments: <b>off</b>" in session.last_text())
+    await dp.feed_update(bot, tap(OWNER, button(session, "Payments")))
+    check("💳 Payments offers both gateways", button(session, "Connect 🪙 OxaPay") is not None
+          and button(session, "Connect 🤖 @CryptoBot") is not None)
+    await dp.feed_update(bot, tap(OWNER, button(session, "Connect 🪙 OxaPay")))
+    check("…with how to get the key", "Merchant API key" in session.last_text())
+    n_del = sum(isinstance(x, DeleteMessage) for x in session.requests)
+    await dp.feed_update(bot, msg(OWNER, "OXA-WRONG-KEY-999"))
+    check("a wrong key is refused, and the message holding it is deleted",
+          "didn't accept" in session.last_text() and (await repo.get_reseller(r.id)).oxapay_key_enc is None
+          and sum(isinstance(x, DeleteMessage) for x in session.requests) == n_del + 1)
+    await dp.feed_update(bot, msg(OWNER, gw.ox_key))
+    fresh = await repo.get_reseller(r.id)
+    check("the right key is checked with a sandbox invoice (no real payment) and stored encrypted",
+          fresh.oxapay_key_enc and gw.ox_key not in fresh.oxapay_key_enc
+          and crypto.decrypt(fresh.oxapay_key_enc) == gw.ox_key
+          and any(v["sandbox"] for v in gw.ox.values()) and "OxaPay connected" in session.last_text())
+
+    # ── a customer tops up $10 ──
+    await dp.feed_update(bot, msg(cust, "/start"))
+    await dp.feed_update(bot, tap(cust, button(session, "Balance")))
+    check("balance: 'tap 💳 Add balance' instead of 'send your ID to the seller'",
+          "tap 💳 Add balance" in session.last_text() and "send your ID" not in session.last_text()
+          and button(session, "Add balance") is not None)
+    await dp.feed_update(bot, tap(cust, button(session, "Add balance")))
+    check("amounts to pick", button(session, "$10.00") is not None and button(session, "Other amount") is not None)
+    await dp.feed_update(bot, tap(cust, button(session, "$10.00")))
+    link = url_button(session, "Pay $10.00")
+    p1 = (await repo.open_payments((await repo.get_or_create_member(r.id, cust, None, None)).id))[0]
+    check("one gateway: straight to a $10.00 payment link from the owner's OxaPay",
+          link and link.startswith("https://pay.oxapay.com/") and p1.amount == D("10")
+          and gw.ox[p1.invoice_id]["fee_paid_by_payer"] == 1 and not gw.ox[p1.invoice_id]["sandbox"]
+          and "within 60 minutes" in session.last_text())
+    mem = await repo.get_or_create_member(r.id, cust, None, None)
+    await dp.feed_update(bot, tap(cust, Pay(a="chk", id=p1.id).pack()))
+    check("'I've paid' before it arrives: not yet, nothing added",
+          "Not received yet" in session.alerts()[-1] and (await repo.get_member(mem.id)).balance == 0)
+    gw.ox[p1.invoice_id]["status"] = "Paid"
+    # The poller twice and the customer's button at the same time: credited ONCE.
+    await asyncio.gather(payments.poll_all(), payments.poll_all(),
+                         dp.feed_update(bot, tap(cust, Pay(a="chk", id=p1.id).pack())))
+    after = await repo.get_member(mem.id)
+    async with repo.session_factory() as s:
+        n_tx = await s.scalar(select(func.count(MemberTx.id)).where(MemberTx.member_id == mem.id,
+                                                                     MemberTx.kind == "payment"))
+    check("paid: +$10.00 exactly once, even with the poller and the button racing",
+          after.balance == D("10") and n_tx == 1 and (await repo.get_payment(p1.id)).status == Payment.PAID,
+          f"balance={after.balance} tx={n_tx}")
+    check("the customer is told, with the new balance",
+          any("Payment received:</b> +$10.00" in x and "$10.00" in x for x in to(cust))
+          or "Payment received:</b> +$10.00" in session.last_text())
+    check("the owner is told the money is in THEIR OxaPay balance",
+          any("Payment received:</b> +$10.00" in x and "OxaPay balance" in x for x in to(OWNER)))
+    await dp.feed_update(bot, tap(cust, Pay(a="chk", id=p1.id).pack()))
+    check("a later check: already on your balance", "already on your balance" in session.alerts()[-1])
+    await dp.feed_update(bot, tap(BOB, Pay(a="chk", id=p1.id).pack()))
+    check("another customer can't touch someone else's link", "old message" in session.alerts()[-1])
+
+    # ── both gateways: the customer chooses ──
+    await dp.feed_update(bot, msg(OWNER, "/admin"))
+    await dp.feed_update(bot, tap(OWNER, button(session, "Payments")))
+    await dp.feed_update(bot, tap(OWNER, button(session, "Connect 🤖 @CryptoBot")))
+    await dp.feed_update(bot, msg(OWNER, gw.cb_token))
+    check("@CryptoBot connected after getMe accepted the token",
+          "@CryptoBot connected" in session.last_text() and "My shop app" in session.last_text())
+    await dp.feed_update(bot, tap(cust, "n:deposit"))
+    await dp.feed_update(bot, tap(cust, button(session, "Other amount")))
+    await dp.feed_update(bot, msg(cust, "0.50"))
+    check("a typed amount below the minimum is refused", "Send an amount from <b>$1.00</b>" in session.last_text())
+    await dp.feed_update(bot, msg(cust, "5000"))
+    check("…and above the maximum", "to <b>$1000.00</b>" in session.last_text())
+    await dp.feed_update(bot, msg(cust, "15"))
+    check("two gateways: the customer picks one", button(session, "BTC, ETH, USDT") is not None
+          and button(session, "@CryptoBot wallet") is not None and "<b>$15.00</b>" in session.last_text())
+    await dp.feed_update(bot, tap(cust, button(session, "@CryptoBot wallet")))
+    cb_link = url_button(session, "Pay $15.00")
+    p2 = (await repo.open_payments(mem.id))[0]
+    inv = gw.cb[int(p2.invoice_id)]
+    check("@CryptoBot: an invoice in USD (the customer picks the coin) for $15.00",
+          cb_link and cb_link.startswith("https://t.me/CryptoBot") and inv["currency_type"] == "fiat"
+          and inv["fiat"] == "USD" and inv["amount"] == "15.00" and p2.provider == payments.CRYPTOBOT)
+    inv["status"] = "expired"
+    await payments.poll_all()
+    check("an expired link: closed, nothing added",
+          (await repo.get_payment(p2.id)).status == Payment.EXPIRED and (await repo.get_member(mem.id)).balance == D("10"))
+    await dp.feed_update(bot, tap(cust, Pay(a="chk", id=p2.id).pack()))
+    check("…and its check button says so", "expired" in session.alerts()[-1])
+
+    # ── forged buttons, limits, refusals ──
+    n_before = len(gw.ox)
+    await dp.feed_update(bot, tap(cust, Pay(a="via", g="ox", c=1).pack()))
+    check("a forged one-cent button makes no link", len(gw.ox) == n_before and "How much" in session.last_text())
+    for _ in range(3):
+        await dp.feed_update(bot, tap(cust, Pay(a="via", g="ox", c=500).pack()))
+    n_open = len(await repo.open_payments(mem.id))
+    await dp.feed_update(bot, tap(cust, Pay(a="via", g="ox", c=500).pack()))
+    check("at most 3 open links per customer", n_open == 3 and len(await repo.open_payments(mem.id)) == 3
+          and "several payment links open" in session.last_text())
+    await dp.feed_update(bot, tap(cust, "n:deposit"))
+    check("the amount screen shows the open link to pay", url_button(session, "Pay $5.00") is not None)
+    for p in await repo.open_payments(mem.id):
+        await repo.close_payment(p.id, Payment.EXPIRED)
+    gw.refuse_create = True
+    n_owner = len(to(OWNER))
+    await dp.feed_update(bot, tap(cust, Pay(a="via", g="ox", c=700).pack()))
+    await dp.feed_update(bot, tap(cust, Pay(a="via", g="ox", c=700).pack()))
+    owner_warns = [x for x in to(OWNER)[n_owner:] if "refused to make a payment link" in x]
+    async with repo.session_factory() as s:
+        failed = await s.scalar(select(func.count(Payment.id)).where(Payment.member_id == mem.id,
+                                                                      Payment.status == Payment.FAILED))
+    check("the gateway refuses: the customer is told, the owner warned once, the row marked failed",
+          "not available right now" in session.last_text() and len(owner_warns) == 1 and failed == 2)
+    gw.refuse_create = False
+
+    # ── accepted short payment, late link, owner removes a gateway ──
+    p3 = await payments.open_link(await repo.get_reseller(r.id), mem.id, payments.OXAPAY, D("8"))
+    gw.ox[p3.invoice_id]["status"] = "Manual_Accept"
+    n_owner = len(to(OWNER))
+    await payments.poll_all()
+    check("an underpayment the owner accepted in OxaPay is left for the owner to add by hand",
+          (await repo.get_payment(p3.id)).status == Payment.MANUAL and (await repo.get_member(mem.id)).balance == D("10")
+          and any("add what really arrived" in x for x in to(OWNER)[n_owner:]))
+    p4 = await payments.open_link(await repo.get_reseller(r.id), mem.id, payments.OXAPAY, D("6"))
+    async with repo.session_factory() as s:
+        from sqlalchemy import update as sa_update
+        await s.execute(sa_update(Payment).where(Payment.id == p4.id).values(
+            expires_at=dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=7)))
+        await s.commit()
+    await payments.poll_all()
+    check("a link still unpaid hours after it expired is closed",
+          (await repo.get_payment(p4.id)).status == Payment.EXPIRED)
+    await dp.feed_update(bot, msg(OWNER, "/admin"))
+    check("dashboard: both gateways and 30-day totals",
+          "OxaPay + @CryptoBot" in session.last_text() and "1 paid, $10.00 in 30 days" in session.last_text())
+    await dp.feed_update(bot, tap(OWNER, button(session, "Payments")))
+    check("💳 Payments lists the recent payments", "✅ $10.00 · OxaPay" in session.last_text())
+    await dp.feed_update(bot, tap(OWNER, button(session, "Remove OxaPay")))
+    gone = await repo.get_reseller(r.id)
+    check("removing OxaPay forgets the key, @CryptoBot stays",
+          gone.oxapay_key_enc is None and payments.connected(gone) == [payments.CRYPTOBOT])
+    no_credit = SellError("no_credit", price=D("0.39"))
+    check("not enough balance: 'tap 💳 Add balance', not 'send your ID'",
+          "Add balance" in error_text(no_credit, gone, after, "en")
+          and "send your ID" not in error_text(no_credit, gone, after, "en"))
+    await dp.feed_update(bot, tap(OWNER, button(session, "Remove @CryptoBot")))
+    await dp.feed_update(bot, tap(cust, button(session, "Balance") or "n:balance"))
+    check("with no gateway left, the balance screen is back to 'send your ID'",
+          "send your ID" in session.last_text())
+    payments.TRANSPORT = None
 
 
 async def test_paused_shop():
@@ -1505,7 +1691,7 @@ async def main():
     test_prices()
     test_i18n()
     for fn in (test_buy_and_code, test_no_code_refund, test_failures, test_lost_reply, test_cancel,
-               test_races_and_limits, test_bot_flow, test_builder, test_provision, test_custom_prices, test_picker_pages, test_rank_order, test_dead_token, test_rejected_key, test_deposits, test_paused_shop, test_review_money,
+               test_races_and_limits, test_bot_flow, test_builder, test_provision, test_custom_prices, test_picker_pages, test_rank_order, test_dead_token, test_rejected_key, test_deposits, test_auto_payments, test_paused_shop, test_review_money,
                test_review_sync, test_review_bots, test_review_runtime, test_cards_render):
         try:
             await fn()

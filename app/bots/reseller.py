@@ -14,8 +14,8 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app import repo, selling
-from app.bots.callbacks import AZ, Adm, Buy, Cty, Lang, Nav, Noop, Ord, Svc, SvcPage
+from app import payments, repo, selling
+from app.bots.callbacks import AZ, Adm, Buy, Cty, Lang, Nav, Noop, Ord, Pay, Svc, SvcPage
 from app.catalog_ui import ANY_OTHER, LETTERS, POPULAR, by_letter, icon, letter_counts, more_popular, nice_name
 from app.i18n import LANGS, resolve, t
 from app.models import Member, Reseller
@@ -45,11 +45,16 @@ class AdminForm(StatesGroup):
     dep_info = State()         # the owner's payment details for deposits
     dep_min = State()
     dep_amount = State()       # approve a deposit with another amount (deposit id in state data)
+    pay_key = State()          # an OxaPay key / @CryptoBot token (provider in state data)
 
 
 class DepositForm(StatesGroup):
     amount = State()           # the customer: how much they paid
     proof = State()            # ...and the transaction ID or a screenshot
+
+
+class PayForm(StatesGroup):
+    amount = State()           # the customer types an amount for an automatic payment link
 
 
 class Context(BaseMiddleware):
@@ -350,11 +355,16 @@ async def orders_screen(member: Member, lang: str):
 
 
 def balance_screen(reseller: Reseller, member: Member, lang: str):
-    text = t(lang, "balance", available=money(member.available), held=money(member.held),
-             id=member.telegram_id, support=support_label(reseller, lang))
+    auto = bool(payments.connected(reseller))
+    if auto:
+        text = t(lang, "balance_auto", available=money(member.available), held=money(member.held),
+                 id=member.telegram_id)
+    else:
+        text = t(lang, "balance", available=money(member.available), held=money(member.held),
+                 id=member.telegram_id, support=support_label(reseller, lang))
     kb = InlineKeyboardBuilder()
-    if reseller.deposit_info:
-        # Deposits on: the customer asks for balance here and the owner approves.
+    if auto or reseller.deposit_info:
+        # Automatic payment links, or deposits the owner approves.
         kb.button(text=t(lang, "btn_topup"), callback_data=Nav(to="deposit"))
     url = support_url(reseller)
     if url:
@@ -389,7 +399,47 @@ async def deposit_start(reseller: Reseller, member: Member, lang: str) -> tuple[
     return text, _cancel_member(lang), True
 
 
+GATEWAY = {"ox": payments.OXAPAY, "cb": payments.CRYPTOBOT}
+SHORT = {v: k for k, v in GATEWAY.items()}
+
+
+def pay_limits(reseller: Reseller) -> tuple[Decimal, Decimal]:
+    low = Decimal(reseller.deposit_min) if reseller.deposit_min else Decimal("1")
+    return max(low, Decimal("1")), payments.MAX_AMOUNT
+
+
+async def pay_amount_screen(reseller: Reseller, member: Member, lang: str):
+    """Automatic top-up, step 1: the amount (and the link still open, if any)."""
+    low, high = pay_limits(reseller)
+    text = t(lang, "pay_pick_amount")
+    if reseller.deposit_min:
+        text += "\n" + t(lang, "dep_min", min=money(low))
+    kb = InlineKeyboardBuilder()
+    sizes = []
+    open_ = await repo.open_payments(member.id)
+    if open_ and open_[0].pay_url:
+        text += "\n\n" + t(lang, "pay_open_hint", amount=money(open_[0].amount))
+        kb.button(text=t(lang, "btn_pay_now", amount=money(open_[0].amount)), url=open_[0].pay_url)
+        kb.button(text=t(lang, "btn_pay_check"), callback_data=Pay(a="chk", id=open_[0].id))
+        sizes += [1, 1]
+    presets = [p for p in payments.PRESETS if low <= p <= high]
+    for p in presets:
+        kb.button(text=money(p), callback_data=Pay(a="amt", c=int(p * 100)))
+    sizes += [2] * (len(presets) // 2) + ([1] if len(presets) % 2 else [])
+    kb.button(text=t(lang, "btn_amount_other"), callback_data=Pay(a="other"))
+    sizes.append(1)
+    if reseller.deposit_info:
+        kb.button(text=t(lang, "btn_pay_other_way"), callback_data=Nav(to="deposit_manual"))
+        sizes.append(1)
+    kb.button(text=t(lang, "btn_cancel"), callback_data=Nav(to="menu"))
+    sizes.append(1)
+    kb.adjust(*sizes)
+    return text, kb.as_markup()
+
+
 def error_text(exc: SellError, reseller: Reseller, member: Member, lang: str) -> str:
+    if exc.reason == "no_credit" and payments.connected(reseller):
+        return t(lang, "err_no_credit_auto", price=money(exc.price), available=money(member.available))
     if exc.reason == "no_credit":
         return t(lang, "err_no_credit", price=money(exc.price), available=money(member.available),
                  id=member.telegram_id, support=support_label(reseller, lang))
@@ -429,7 +479,9 @@ def build_router(reseller_id: int) -> Router:
             await _show(c, *await orders_screen(member, lang))
         elif to in ("balance", "support"):   # support lives on the balance screen now
             await _show(c, *balance_screen(reseller, member, lang))
-        elif to == "deposit":
+        elif to == "deposit" and payments.connected(reseller):
+            await _show(c, *await pay_amount_screen(reseller, member, lang))
+        elif to in ("deposit", "deposit_manual"):
             text, kb, asking = await deposit_start(reseller, member, lang)
             if asking:
                 await state.set_state(DepositForm.amount)
@@ -532,7 +584,9 @@ def build_router(reseller_id: int) -> Router:
                 except SellError as again:
                     exc = again
             kb = InlineKeyboardBuilder()
-            if exc.reason == "no_credit" and support_url(reseller):
+            if exc.reason == "no_credit" and (payments.connected(reseller) or reseller.deposit_info):
+                kb.button(text=t(lang, "btn_topup"), callback_data=Nav(to="deposit"))
+            elif exc.reason == "no_credit" and support_url(reseller):
                 kb.button(text=t(lang, "btn_support"), url=support_url(reseller))
             if exc.reason in ("no_credit", "busy", "failed"):
                 # Back to the same number, ready to try again.
@@ -629,6 +683,100 @@ def build_router(reseller_id: int) -> Router:
         from app.bots import admin
         await admin.notify_owner_deposit(m.bot, reseller, member, dep)
         await m.answer(t(lang, "dep_sent", n=dep.number, amount=money(dep.amount)))
+
+    # ── automatic top-ups: the owner's own OxaPay / @CryptoBot (app/payments.py) ──
+    def _menu_kb(lang: str):
+        kb = InlineKeyboardBuilder()
+        kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+        return kb.as_markup()
+
+    async def _after_amount(target, reseller: Reseller, member: Member, lang: str, amount: Decimal):
+        gates = payments.connected(reseller)
+        if not gates:
+            await _show(target, *balance_screen(reseller, member, lang))
+            return
+        if len(gates) == 1:
+            await _make_link(target, reseller, member, lang, gates[0], amount)
+            return
+        kb = InlineKeyboardBuilder()
+        cents = int(amount * 100)
+        kb.button(text=t(lang, "btn_pay_oxapay"), callback_data=Pay(a="via", g="ox", c=cents))
+        kb.button(text=t(lang, "btn_pay_cryptobot"), callback_data=Pay(a="via", g="cb", c=cents))
+        kb.button(text=t(lang, "btn_cancel"), callback_data=Nav(to="menu"))
+        kb.adjust(1)
+        await _show(target, t(lang, "pay_choose_method", amount=money(amount)), kb.as_markup())
+
+    async def _make_link(target, reseller: Reseller, member: Member, lang: str, provider: str, amount: Decimal):
+        low, high = pay_limits(reseller)
+        if not low <= amount <= high or provider not in payments.connected(reseller):
+            await _show(target, *await pay_amount_screen(reseller, member, lang))
+            return
+        if (len(await repo.open_payments(member.id)) >= payments.OPEN_PER_MEMBER
+                or await repo.payments_today(member.id) >= payments.PER_DAY_PER_MEMBER):
+            await _show(target, t(lang, "pay_too_many"), _menu_kb(lang))
+            return
+        try:
+            p = await payments.open_link(reseller, member.id, provider, amount)
+        except payments.PayError as exc:
+            log.warning("reseller %s: %s payment link failed: %s", reseller.id, provider, exc)
+            bot = target.bot if isinstance(target, Message) else target.message.bot
+            await payments.warn_owner_once(bot, reseller, provider, str(exc))
+            await _show(target, t(lang, "pay_unavailable", support=support_label(reseller, lang)), _menu_kb(lang))
+            return
+        kb = InlineKeyboardBuilder()
+        kb.button(text=t(lang, "btn_pay_now", amount=money(p.amount)), url=p.pay_url)
+        kb.button(text=t(lang, "btn_pay_check"), callback_data=Pay(a="chk", id=p.id))
+        kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+        kb.adjust(1)
+        await _show(target, t(lang, "pay_invoice", amount=money(p.amount), minutes=payments.INVOICE_MINUTES),
+                    kb.as_markup())
+
+    @r.callback_query(Pay.filter())
+    async def pay_cb(c: CallbackQuery, callback_data: Pay, reseller: Reseller, member: Member, lang: str,
+                     state: FSMContext):
+        a = callback_data.a
+        await state.clear()
+        if a == "other":
+            low, high = pay_limits(reseller)
+            await state.set_state(PayForm.amount)
+            await _show(c, t(lang, "pay_type_amount") + "\n" + t(lang, "dep_min", min=money(low)),
+                        _cancel_member(lang))
+        elif a == "amt":
+            await _after_amount(c, reseller, member, lang, Decimal(callback_data.c) / 100)
+        elif a == "via" and callback_data.g in GATEWAY:
+            await _make_link(c, reseller, member, lang, GATEWAY[callback_data.g], Decimal(callback_data.c) / 100)
+        elif a == "chk":
+            p = await repo.get_payment(callback_data.id)
+            if p is None or p.member_id != member.id:
+                await c.answer(t(lang, "toast_stale"), show_alert=True)
+                return
+            state_ = await payments.check(p, reseller, c.bot) if p.status == p.PENDING else "already"
+            if state_ == "paid":
+                fresh = await repo.get_member(member.id) or member
+                p = await repo.get_payment(p.id)
+                await _show(c, t(lang, "pay_received", amount=money(p.credited), balance=money(fresh.available)),
+                            _menu_kb(lang))
+            else:
+                key = {"already": "pay_already", "expired": "pay_expired", "manual": "pay_manual",
+                       "failed": "pay_expired"}.get(state_, "pay_not_yet")
+                if state_ == "already" and p.status != p.PAID:
+                    key = "pay_expired" if p.status in (p.EXPIRED, p.FAILED) else "pay_manual"
+                await c.answer(t(lang, key), show_alert=True)
+                return
+        else:
+            await _show(c, *await pay_amount_screen(reseller, member, lang))
+        await c.answer()
+
+    @r.message(StateFilter(PayForm.amount), F.text, ~F.text.startswith("/"))
+    async def pay_amount_typed(m: Message, reseller: Reseller, member: Member, lang: str, state: FSMContext):
+        low, high = pay_limits(reseller)
+        amount = parse_amount(m.text)
+        if amount is None or not low <= amount <= high:
+            await m.answer(t(lang, "pay_bad_amount", min=money(low), max=money(high)),
+                           reply_markup=_cancel_member(lang))
+            return
+        await state.clear()
+        await _after_amount(m, reseller, member, lang, amount)
 
     # ── owner admin panel ──
     from app.bots import admin

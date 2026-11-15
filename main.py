@@ -9,7 +9,7 @@ from aiogram import Dispatcher
 from aiogram.exceptions import TelegramUnauthorizedError
 from aiogram.fsm.storage.memory import MemoryStorage
 
-from app import db, provision, repo, runtime, selling
+from app import db, payments, provision, repo, runtime, selling
 from app.bots import builder
 from app.config import settings
 
@@ -65,6 +65,22 @@ async def sweep_loop() -> None:
         await asyncio.sleep(30)
 
 
+async def payments_loop() -> None:
+    """Automatic top-ups: ask the owners' OxaPay / @CryptoBot about every open
+    payment link and credit the paid ones (once: repo.credit_payment)."""
+    await asyncio.sleep(5)
+    while True:
+        try:
+            await payments.poll_all()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            if _cancelling():
+                raise
+            log.exception("payments check failed")
+        await asyncio.sleep(20)
+
+
 async def warm_loop() -> None:
     """The popular apps' "from" prices, refreshed in the background."""
     await asyncio.sleep(3)
@@ -115,7 +131,7 @@ async def main() -> int:
     await runtime.start_all()
     provisioning = await provision.start_server()
     loops = [asyncio.create_task(sync_loop()), asyncio.create_task(sweep_loop()),
-             asyncio.create_task(warm_loop())]
+             asyncio.create_task(warm_loop()), asyncio.create_task(payments_loop())]
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):

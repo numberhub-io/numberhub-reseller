@@ -51,7 +51,8 @@ WELCOME = (
     "1️⃣ Create a bot in @BotFather and send me its token.\n"
     "2️⃣ Send me your NumberHub API key. Each number your customers buy is paid from your NumberHub "
     "wallet — only when its code arrives.\n"
-    "3️⃣ Set your commission. Customers top up with you, your way; you add their balance in your bot.\n\n"
+    "3️⃣ Set your commission and connect your own OxaPay or @CryptoBot: customers top up by crypto and "
+    "their balance goes up by itself, straight into your account. Or they pay you your way and you add it.\n\n"
     "💰 You keep the difference. No code = no charge, for you and your customer."
 )
 HELP = (
@@ -60,8 +61,10 @@ HELP = (
     f"({settings.numberhub_site} → Account → API keys), with balance in your NumberHub wallet.\n\n"
     "<b>What do my customers see?</b> Your bot only: your name, your welcome text, your prices and your "
     "support contact. They pick a service and a country, get a number and receive the code in the chat.\n\n"
-    "<b>How do customers pay?</b> They pay you directly (any method you like). You add the amount in your "
-    "bot: /admin → ➕ Add balance.\n\n"
+    "<b>How do customers pay?</b> Automatically by crypto: connect your own OxaPay merchant key or "
+    "@CryptoBot app token in /admin → 💳 Payments. Customers pick an amount, pay the link, and their balance "
+    "goes up by itself; the money goes straight to your OxaPay or @CryptoBot account. Any other way works too: "
+    "they pay you directly and you add the amount in /admin → ➕ Add balance, or approve their deposit request.\n\n"
     "<b>What does it cost me?</b> NumberHub's price for each delivered number, from your wallet. "
     "If no code arrives, neither you nor your customer pays.\n\n"
     "<b>Your commission</b> is added on top of NumberHub's price — change it any time in /admin.\n\n"
