@@ -29,7 +29,7 @@ There are two kinds of bots and two kinds of money.
 
 The builder bot belongs to the platform (you). A reseller opens it, sends a bot token from @BotFather and a NumberHub API key, picks a commission, and their shop bot starts selling within a minute. The builder bot is optional: without `BUILDER_BOT_TOKEN` the process runs the shop bots that already exist and nobody can create new ones.
 
-There is a shorter way in too, the hosted path: in @TheNumberHubBot a NumberHub customer taps 🤖 Your own bot and sends only the bot token. NumberHub creates the API key on their account itself and hands both to this platform through its provisioning listener (`app/provision.py`, below). The shop that comes out is the same as one made in the builder.
+There is a shorter way in too, the hosted path: in @SecondNumberHubBot a NumberHub customer taps 🤖 Your own bot and sends only the bot token. NumberHub creates the API key on their account itself and hands both to this platform through its provisioning listener (`app/provision.py`, below). The shop that comes out is the same as one made in the builder.
 
 A shop bot belongs to one reseller. Their customers buy numbers in it, and the reseller manages it from an admin panel inside the same bot.
 
@@ -94,7 +94,7 @@ Your bot starts selling immediately. 🤖 My bots in the builder lists your bots
 
 ### Or: from the NumberHub bot
 
-If you already use NumberHub, open @TheNumberHubBot and tap 🤖 Your own bot, then send your bot token. That is all: NumberHub creates an API key for your shop on your own account (named `Shop bot @yourbot`, with only the permissions a shop needs), and your bot is live a minute later with a 30% commission you can change in `/admin`. The same screen lists your bots with their week and lets you pause or resume them. You need one paid top-up on your NumberHub account first, because your shop sells from that balance.
+If you already use NumberHub, open @SecondNumberHubBot and tap 🤖 Your own bot, then send your bot token. That is all: NumberHub creates an API key for your shop on your own account (named `Shop bot @yourbot`, with only the permissions a shop needs), and your bot is live a minute later with a 30% commission you can change in `/admin`. The same screen lists your bots with their week and lets you pause or resume them. You need one paid top-up on your NumberHub account first, because your shop sells from that balance.
 
 ### Your admin panel
 
