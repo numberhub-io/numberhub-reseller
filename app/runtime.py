@@ -89,7 +89,7 @@ TAKEN_NOTICE = (
     "Another program is using this bot's token at the same time (another bot host, a webhook or "
     "your own code). Telegram splits the messages between the two, so your customers would miss replies.\n\n"
     "Stop the other program (or give it a new bot from @BotFather), then send this bot's token again "
-    "in @SecondNumberHubBot → 🤖 Your own bot. Open orders still finish.")
+    "in @TheNumberHubBot → 🤖 Your own bot. Open orders still finish.")
 
 
 async def _give_up_token(reseller_id: int, taken: bool = False) -> None:

@@ -139,7 +139,7 @@ _NEW_KEY = ("Send a new key in the bot where you created this shop: 🤖 My bots
             "Use a key from the same NumberHub account, so the open orders keep working.")
 OWNER_ALERTS = {
     "low_balance": ("⚠️ <b>A customer could not buy: your NumberHub balance is too low.</b>\n"
-                    "Top up at numberhub.io or in @SecondNumberHubBot to keep selling."),
+                    "Top up at numberhub.io or in @TheNumberHubBot to keep selling."),
     "daily_limit": ("⚠️ <b>Sales stopped: your NumberHub API key reached its daily spend limit.</b>\n"
                     "It counts what your numbers really cost; numbers that got no code don't count. "
                     "Raise or remove it at numberhub.io → Account → API keys."),

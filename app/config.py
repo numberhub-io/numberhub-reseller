@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     db_url: str = "sqlite+aiosqlite:///./reseller.db"
     numberhub_api: str = "https://api.numberhub.io/v1"
     numberhub_site: str = "https://numberhub.io"
-    numberhub_bot: str = "SecondNumberHubBot"
+    numberhub_bot: str = "TheNumberHubBot"
     default_markup_pct: Decimal = Decimal("30")
     max_markup_pct: Decimal = Decimal("300")
     sync_interval_sec: float = 5.0
