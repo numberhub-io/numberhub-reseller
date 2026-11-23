@@ -3,6 +3,7 @@ panel. One router per reseller (build_router), mounted on that bot's own
 Dispatcher by app.runtime."""
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import re
 from decimal import Decimal, InvalidOperation
@@ -401,6 +402,24 @@ async def deposit_start(reseller: Reseller, member: Member, lang: str) -> tuple[
 
 GATEWAY = {"ox": payments.OXAPAY, "cb": payments.CRYPTOBOT}
 SHORT = {v: k for k, v in GATEWAY.items()}
+# Built-in USDT payments: the button's code -> the network (payments.METHODS). The
+# labels are the same in every language: they are what a wallet or exchange shows.
+NETWORK = {"nb": "usdt_bsc", "nt": "usdt_tron"}
+NETWORK_LABEL = {"nb": "💵 USDT · BEP20 (BNB Smart Chain)", "nt": "💵 USDT · TRC20 (Tron)"}
+
+
+def address_screen(p, lang: str):
+    """A built-in payment: where to send, exactly how much, on which network, until when."""
+    d = payments.details(p)
+    until = p.expires_at if p.expires_at is None or p.expires_at.tzinfo else p.expires_at.replace(tzinfo=dt.timezone.utc)
+    left = int((until - dt.datetime.now(dt.timezone.utc)).total_seconds() // 60) if until else payments.INVOICE_MINUTES
+    kb = InlineKeyboardBuilder()
+    kb.button(text=t(lang, "btn_pay_check"), callback_data=Pay(a="chk", id=p.id))
+    kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+    kb.adjust(1)
+    return t(lang, "pay_address", amount=money(p.amount), pay_amount=esc(d.get("pay_amount", "")),
+             network=esc(d.get("network", "")), address=esc(d.get("address", "")),
+             minutes=max(1, left)), kb.as_markup()
 
 
 def pay_limits(reseller: Reseller) -> tuple[Decimal, Decimal]:
@@ -420,6 +439,12 @@ async def pay_amount_screen(reseller: Reseller, member: Member, lang: str):
     if open_ and open_[0].pay_url:
         text += "\n\n" + t(lang, "pay_open_hint", amount=money(open_[0].amount))
         kb.button(text=t(lang, "btn_pay_now", amount=money(open_[0].amount)), url=open_[0].pay_url)
+        kb.button(text=t(lang, "btn_pay_check"), callback_data=Pay(a="chk", id=open_[0].id))
+        sizes += [1, 1]
+    elif open_ and payments.details(open_[0]).get("address"):
+        # A built-in payment has an address instead of a link: one tap shows it again.
+        text += "\n\n" + t(lang, "pay_open_hint_address", amount=money(open_[0].amount))
+        kb.button(text=t(lang, "btn_pay_show", amount=money(open_[0].amount)), callback_data=Pay(a="show", id=open_[0].id))
         kb.button(text=t(lang, "btn_pay_check"), callback_data=Pay(a="chk", id=open_[0].id))
         sizes += [1, 1]
     presets = [p for p in payments.PRESETS if low <= p <= high]
@@ -695,18 +720,25 @@ def build_router(reseller_id: int) -> Router:
         if not gates:
             await _show(target, *balance_screen(reseller, member, lang))
             return
-        if len(gates) == 1:
+        if len(gates) == 1 and gates[0] != payments.NUMBERHUB:
             await _make_link(target, reseller, member, lang, gates[0], amount)
             return
+        # Several ways to pay, or built-in USDT (the customer picks the network).
         kb = InlineKeyboardBuilder()
         cents = int(amount * 100)
-        kb.button(text=t(lang, "btn_pay_oxapay"), callback_data=Pay(a="via", g="ox", c=cents))
-        kb.button(text=t(lang, "btn_pay_cryptobot"), callback_data=Pay(a="via", g="cb", c=cents))
+        if payments.OXAPAY in gates:
+            kb.button(text=t(lang, "btn_pay_oxapay"), callback_data=Pay(a="via", g="ox", c=cents))
+        if payments.CRYPTOBOT in gates:
+            kb.button(text=t(lang, "btn_pay_cryptobot"), callback_data=Pay(a="via", g="cb", c=cents))
+        if payments.NUMBERHUB in gates:
+            for code, label in NETWORK_LABEL.items():
+                kb.button(text=label, callback_data=Pay(a="via", g=code, c=cents))
         kb.button(text=t(lang, "btn_cancel"), callback_data=Nav(to="menu"))
         kb.adjust(1)
         await _show(target, t(lang, "pay_choose_method", amount=money(amount)), kb.as_markup())
 
-    async def _make_link(target, reseller: Reseller, member: Member, lang: str, provider: str, amount: Decimal):
+    async def _make_link(target, reseller: Reseller, member: Member, lang: str, provider: str, amount: Decimal,
+                         method: str | None = None):
         low, high = pay_limits(reseller)
         if not low <= amount <= high or provider not in payments.connected(reseller):
             await _show(target, *await pay_amount_screen(reseller, member, lang))
@@ -716,12 +748,15 @@ def build_router(reseller_id: int) -> Router:
             await _show(target, t(lang, "pay_too_many"), _menu_kb(lang))
             return
         try:
-            p = await payments.open_link(reseller, member.id, provider, amount)
+            p = await payments.open_link(reseller, member.id, provider, amount, method)
         except payments.PayError as exc:
             log.warning("reseller %s: %s payment link failed: %s", reseller.id, provider, exc)
             bot = target.bot if isinstance(target, Message) else target.message.bot
             await payments.warn_owner_once(bot, reseller, provider, str(exc))
             await _show(target, t(lang, "pay_unavailable", support=support_label(reseller, lang)), _menu_kb(lang))
+            return
+        if provider == payments.NUMBERHUB:
+            await _show(target, *address_screen(p, lang))
             return
         kb = InlineKeyboardBuilder()
         kb.button(text=t(lang, "btn_pay_now", amount=money(p.amount)), url=p.pay_url)
@@ -745,6 +780,20 @@ def build_router(reseller_id: int) -> Router:
             await _after_amount(c, reseller, member, lang, Decimal(callback_data.c) / 100)
         elif a == "via" and callback_data.g in GATEWAY:
             await _make_link(c, reseller, member, lang, GATEWAY[callback_data.g], Decimal(callback_data.c) / 100)
+        elif a == "via" and callback_data.g in NETWORK:
+            await _make_link(c, reseller, member, lang, payments.NUMBERHUB, Decimal(callback_data.c) / 100,
+                             NETWORK[callback_data.g])
+        elif a == "show":
+            p = await repo.get_payment(callback_data.id)
+            if p is None or p.member_id != member.id:
+                await c.answer(t(lang, "toast_stale"), show_alert=True)
+                return
+            still = p.expires_at is None or (p.expires_at if p.expires_at.tzinfo
+                                             else p.expires_at.replace(tzinfo=dt.timezone.utc)) > dt.datetime.now(dt.timezone.utc)
+            if p.status != p.PENDING or not still or not payments.details(p).get("address"):
+                await c.answer(t(lang, "pay_already" if p.status == p.PAID else "pay_expired"), show_alert=True)
+                return
+            await _show(c, *address_screen(p, lang))
         elif a == "chk":
             p = await repo.get_payment(callback_data.id)
             if p is None or p.member_id != member.id:

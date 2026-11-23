@@ -121,4 +121,8 @@ T = {
     'pay_too_many': '⏳ You already have several payment links open. Pay one of them, or try again later.',
     'pay_unavailable': '⚠️ Payments are not available right now. Please try again later, or contact {support}.',
     'pay_open_hint': '⏳ You have a payment link for <b>{amount}</b> open: tap it below to pay, or pick another amount.',
+    # built-in USDT payments: an address instead of a link (app/payments.py, provider numberhub)
+    'pay_address': "💳 <b>Pay {amount}</b>\n\nSend exactly <code>{pay_amount}</code> USDT on <b>{network}</b> to this address:\n<code>{address}</code>\n\n⏳ Valid for {minutes} minutes. Your balance goes up by itself a few minutes after the network confirms, and you'll get a message.\n\n⚠️ Use this network only and pay within this time: money sent on another network or after the time is lost.",
+    'btn_pay_show': '📋 Show the address ({amount})',
+    'pay_open_hint_address': '⏳ You have a payment of <b>{amount}</b> open: tap below to see its address again, or pick another amount.',
 }

@@ -165,3 +165,27 @@ class NumberHub:
 
     async def orders(self, limit: int = 100) -> list[dict]:
         return (await self._req("GET", "/orders", params={"limit": limit})).get("orders", [])
+
+    # ── deposits into the reseller's wallet (built-in payments) ───────────────
+    async def open_topup(self, amount: Decimal, method: str, reference: str, lifetime_minutes: int) -> dict:
+        """Open a USDT deposit for ONE of the shop's customers (`reference` says
+        which). A lost reply is asked again: the same amount, network and reference
+        return the deposit that was opened, never a second one."""
+        body = json.dumps({"amount": f"{amount:.2f}", "method": method, "reference": reference,
+                           "lifetime_minutes": int(lifetime_minutes)},
+                          separators=(",", ":"), sort_keys=True).encode()
+        last: TransportError | None = None
+        for attempt in range(3):
+            try:
+                r = await self._send("POST", "/topups", content=body)
+                data = r.json()
+                return data["topup"] if isinstance(data, dict) and isinstance(data.get("topup"), dict) else {}
+            except TransportError as exc:
+                last = exc
+                await asyncio.sleep(1.5 * (attempt + 1))
+        assert last is not None
+        raise last
+
+    async def topup(self, topup_id: int) -> dict:
+        data = await self._req("GET", f"/topups/{int(topup_id)}")
+        return data["topup"] if isinstance(data.get("topup"), dict) else {}

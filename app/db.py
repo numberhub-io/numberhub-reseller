@@ -34,6 +34,8 @@ _ADDED_COLUMNS = (
     ("resellers", "deposit_min", "NUMERIC(12, 2)"),
     ("resellers", "oxapay_key_enc", "TEXT"),
     ("resellers", "cryptobot_token_enc", "TEXT"),
+    ("resellers", "nh_pay", "INTEGER"),
+    ("payments", "details", "TEXT"),
 )
 
 

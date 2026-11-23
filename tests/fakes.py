@@ -58,13 +58,84 @@ class FakeNumberHub:
         self.then_rate_limit = 0                     # after the next lost reply, N requests get 429
         self.in_progress_next = 0                    # next N replays: 409 idempotency_in_progress
         self.scopes = {"catalog:read", "orders:read", "orders:write", "wallet:read"}
+        # deposits into the wallet (POST /topups, GET /topups/{id})
+        self.topups: dict[int, dict] = {}
+        self.next_topup = 500
+        self.topup_bodies: list[dict] = []
+        self.topup_supports_reference = True         # False = an older API that ignores `reference`
+        self.fail_next_topup: str | None = None      # an error code for the next POST /topups
+        self.lose_topup_replies = 0                  # POST /topups that act, then "time out"
 
     def _scope(self, method: str, path: str) -> str:
         if path == "/balance":
             return "wallet:read"
         if path in ("/services", "/countries"):
             return "catalog:read"
+        if path.startswith("/topups"):
+            return "orders:write" if method == "POST" else "wallet:read"
         return "orders:write" if method in ("POST", "DELETE") else "orders:read"
+
+    # ── deposits ──
+    NETWORKS = {"usdt_bsc": ("BNB Smart Chain (BEP20)", "BEP20"), "usdt_tron": ("Tron (TRC20)", "TRC20")}
+
+    def topup_public(self, t: dict, reused: bool | None = None) -> dict:
+        payable = t["status"] == "pending"
+        out = {"id": t["id"], "status": t["status"], "amount": f"{t['amount']:.2f}",
+               "credited": f"{t['credited']:.2f}" if t["credited"] is not None else None, "currency": "USD",
+               "method": t["method"], "pay_currency": "USDT", "network": self.NETWORKS[t["method"]][0],
+               "network_short": self.NETWORKS[t["method"]][1],
+               "address": t["address"] if payable else None, "pay_amount": t["pay_amount"] if payable else None,
+               "expires_at": iso(t["expires_at"]), "created_at": iso(t["created_at"]), "paid_at": iso(t["paid_at"]),
+               "reference": t["reference"]}
+        if reused is not None:
+            out["reused"] = reused
+        return out
+
+    def pay_topup(self, topup_id: int, credited: str | None = None) -> None:
+        """The customer's USDT arrived: the deposit is paid and the wallet has it."""
+        t = self.topups[topup_id]
+        t["status"], t["paid_at"] = "paid", dt.datetime.now(UTC)
+        t["credited"] = Decimal(credited) if credited is not None else t["amount"]
+        self.wallet += t["credited"]
+
+    def owner_topup(self, amount: str) -> int:
+        """A paid top-up the account owner made themselves (no reference)."""
+        tid = self._new_topup(Decimal(amount), "usdt_bsc", None, 2880)
+        self.pay_topup(tid)
+        return tid
+
+    def _new_topup(self, amount: Decimal, method: str, reference, lifetime: int) -> int:
+        tid = self.next_topup
+        self.next_topup += 1
+        now = dt.datetime.now(UTC)
+        self.topups[tid] = {"id": tid, "status": "pending", "amount": amount, "credited": None, "method": method,
+                            "reference": reference, "lifetime": lifetime, "address": f"0xSHOPADDR{tid}",
+                            "pay_amount": f"{amount * Decimal('1.02'):.2f}", "created_at": now, "paid_at": None,
+                            "expires_at": now + dt.timedelta(minutes=lifetime)}
+        return tid
+
+    def _open_topup(self, request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        self.topup_bodies.append(body)
+        if self.fail_next_topup:
+            code, self.fail_next_topup = self.fail_next_topup, None
+            status = {"too_many_open_topups": 429, "topups_unavailable": 503, "topup_failed": 502}.get(code, 400)
+            return self._json(status, {"error": code})
+        amount = Decimal(str(body["amount"])).quantize(Decimal("0.01"))
+        method = body.get("method")
+        if method not in self.NETWORKS:
+            return self._json(400, {"error": "unknown_method"})
+        reference = body.get("reference") if self.topup_supports_reference else None
+        lifetime = int(body.get("lifetime_minutes") or 2880)
+        for t in self.topups.values():      # the same request again: the open deposit, never a second one
+            if (t["status"] == "pending" and t["amount"] == amount and t["method"] == method
+                    and t["reference"] == reference):
+                return self._json(200, {"topup": self.topup_public(t, reused=True)})
+        tid = self._new_topup(amount, method, reference, lifetime)
+        if self.lose_topup_replies > 0:
+            self.lose_topup_replies -= 1
+            raise httpx.ReadTimeout("lost reply", request=request)
+        return self._json(201, {"topup": self.topup_public(self.topups[tid], reused=False)})
 
     # ── state helpers for tests ──
     def set_status(self, nh_id: int, status: str, code: str | None = None) -> None:
@@ -118,6 +189,14 @@ class FakeNumberHub:
             return self._json(200, {"service": svc, "countries": self.countries.get(svc, [])})
         if request.method == "POST" and path == "/numbers":
             return self._buy(request)
+        if request.method == "POST" and path == "/topups":
+            return self._open_topup(request)
+        if request.method == "GET" and path.startswith("/topups/"):
+            tid = path.split("/")[2]
+            t = self.topups.get(int(tid)) if tid.isdigit() else None
+            if t is None:
+                return self._json(404, {"error": "not_found"})
+            return self._json(200, {"topup": self.topup_public(t)})
         if request.method == "GET" and path == "/orders":
             rows = sorted(self.orders.values(), key=lambda o: -o["id"])
             limit = max(1, min(100, int(request.url.params.get("limit", 40))))   # the server clamps to 100

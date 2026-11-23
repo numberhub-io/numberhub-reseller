@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     # bot token. Off unless a secret of 32+ characters is set; 127.0.0.1 only.
     provision_secret: str = ""
     provision_port: int = 8097
+    # Built-in USDT payments (app/payments.py): what a shop gets while its owner has
+    # not chosen. False = each owner turns it on in Admin → Payments.
+    numberhub_pay_default: bool = False
 
     @property
     def admin_id_list(self) -> list[int]:

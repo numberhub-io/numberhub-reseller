@@ -112,4 +112,8 @@ T = {
     'pay_too_many': '⏳ Ya tienes varios enlaces de pago abiertos. Paga uno de ellos o inténtalo más tarde.',
     'pay_unavailable': '⚠️ Los pagos no están disponibles ahora. Inténtalo más tarde o contacta con {support}.',
     'pay_open_hint': '⏳ Tienes un enlace de pago abierto por <b>{amount}</b>: tócalo abajo para pagar o elige otro importe.',
+    # built-in USDT payments: an address instead of a link (app/payments.py, provider numberhub)
+    'pay_address': '💳 <b>Paga {amount}</b>\n\nEnvía exactamente <code>{pay_amount}</code> USDT por la red <b>{network}</b> a esta dirección:\n<code>{address}</code>\n\n⏳ Válida durante {minutes} minutos. Tu saldo sube solo unos minutos después de que la red confirme, y recibirás un mensaje.\n\n⚠️ Usa solo esta red y paga dentro de ese tiempo: el dinero enviado por otra red o después se pierde.',
+    'btn_pay_show': '📋 Ver la dirección ({amount})',
+    'pay_open_hint_address': '⏳ Tienes un pago de <b>{amount}</b> abierto: toca abajo para ver su dirección otra vez, o elige otro importe.',
 }

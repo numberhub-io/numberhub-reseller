@@ -14,7 +14,7 @@ from __future__ import annotations
 import datetime as dt
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -55,6 +55,11 @@ class Reseller(Base):
     # encrypted like the bot token. None = not connected.
     oxapay_key_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
     cryptobot_token_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Built-in USDT payments (app/payments.py, provider "numberhub"): the customer
+    # pays to an address NumberHub opens with the shop's own API key, and the money
+    # is added to the shop's NumberHub wallet. 1 = on, 0 = off, None = the
+    # platform's default (settings.numberhub_pay_default).
+    nh_pay: Mapped[int | None] = mapped_column(Integer, nullable=True)
     welcome_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     support_contact: Mapped[str | None] = mapped_column(String(128), nullable=True)
     status: Mapped[str] = mapped_column(String(16), default=ACTIVE, index=True)
@@ -195,8 +200,9 @@ class Deposit(Base):
 
 class Payment(Base):
     """An automatic top-up: a payment link from the owner's own OxaPay or
-    @CryptoBot. Credited exactly once, by repo.credit_payment (from pending only,
-    in the same transaction as the balance change)."""
+    @CryptoBot, or a built-in USDT address payment into the shop's NumberHub
+    wallet. Credited exactly once, by repo.credit_payment (from pending only, in
+    the same transaction as the balance change)."""
     __tablename__ = "payments"
     __table_args__ = (UniqueConstraint("provider", "invoice_id", name="uq_payment_invoice"),)
     PENDING = "pending"        # link open, not paid yet
@@ -208,9 +214,12 @@ class Payment(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     reseller_id: Mapped[int] = mapped_column(ForeignKey("resellers.id", ondelete="CASCADE"), index=True)
     member_id: Mapped[int] = mapped_column(ForeignKey("members.id", ondelete="CASCADE"), index=True)
-    provider: Mapped[str] = mapped_column(String(16))           # oxapay | cryptobot
+    provider: Mapped[str] = mapped_column(String(16))           # oxapay | cryptobot | numberhub
     invoice_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     pay_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # A built-in payment has no link: JSON {method, address, pay_amount,
+    # pay_currency, network, network_short} that the bot shows instead.
+    details: Mapped[str | None] = mapped_column(Text, nullable=True)
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2))
     credited: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     status: Mapped[str] = mapped_column(String(16), default=PENDING, index=True)

@@ -112,4 +112,8 @@ T = {
     'pay_too_many': '⏳ Bạn đã có vài liên kết thanh toán đang mở. Hãy thanh toán một trong số đó, hoặc thử lại sau.',
     'pay_unavailable': '⚠️ Hiện chưa thể thanh toán. Vui lòng thử lại sau, hoặc liên hệ {support}.',
     'pay_open_hint': '⏳ Bạn có một liên kết thanh toán <b>{amount}</b> đang mở: nhấn vào bên dưới để thanh toán, hoặc chọn số tiền khác.',
+    # built-in USDT payments: an address instead of a link (app/payments.py, provider numberhub)
+    'pay_address': '💳 <b>Thanh toán {amount}</b>\n\nGửi chính xác <code>{pay_amount}</code> USDT qua mạng <b>{network}</b> đến địa chỉ này:\n<code>{address}</code>\n\n⏳ Có hiệu lực trong {minutes} phút. Số dư của bạn tự tăng vài phút sau khi mạng xác nhận, và bạn sẽ nhận được tin nhắn.\n\n⚠️ Chỉ dùng mạng này và thanh toán trong thời gian đó: tiền gửi qua mạng khác hoặc sau thời hạn sẽ bị mất.',
+    'btn_pay_show': '📋 Xem địa chỉ ({amount})',
+    'pay_open_hint_address': '⏳ Bạn có một khoản thanh toán <b>{amount}</b> đang mở: chạm bên dưới để xem lại địa chỉ, hoặc chọn số tiền khác.',
 }

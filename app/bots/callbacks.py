@@ -56,7 +56,7 @@ class Dep(CallbackData, prefix="d"):
 
 class Pay(CallbackData, prefix="p"):
     """Automatic top-ups (app/payments.py)."""
-    a: str                     # amt (an amount, cents) | other (type one) | via (gateway + cents) | chk (payment id)
+    a: str                     # amt (an amount, cents) | other (type one) | via (gateway + cents) | chk | show (payment id)
     c: int = 0                 # amount in cents
-    g: str = ""                # ox | cb
+    g: str = ""                # ox | cb (the owner's gateways) | nb | nt (built-in USDT: BEP20 | TRC20)
     id: int = 0

@@ -65,7 +65,7 @@ async def list_resellers(status: str | None = None, owner_id: int | None = None)
 async def update_reseller(reseller_id: int, **values) -> None:
     allowed = {"markup_pct", "welcome_text", "support_contact", "status", "bot_username", "bot_title",
                "bot_token_enc", "api_key_enc", "api_key_hint", "max_profit", "deposit_info", "deposit_min",
-               "oxapay_key_enc", "cryptobot_token_enc"}
+               "oxapay_key_enc", "cryptobot_token_enc", "nh_pay"}
     values = {k: v for k, v in values.items() if k in allowed}
     if values:
         async with session_factory() as s:
@@ -603,10 +603,11 @@ async def create_payment(reseller_id: int, member_id: int, provider: str, amount
         return row
 
 
-async def attach_invoice(payment_id: int, invoice_id: str, pay_url: str, expires_at: dt.datetime) -> None:
+async def attach_invoice(payment_id: int, invoice_id: str, pay_url: str | None, expires_at: dt.datetime,
+                         details: str | None = None) -> None:
     async with session_factory() as s:
         await s.execute(update(Payment).where(Payment.id == payment_id)
-                        .values(invoice_id=invoice_id, pay_url=pay_url, expires_at=expires_at))
+                        .values(invoice_id=invoice_id, pay_url=pay_url, expires_at=expires_at, details=details))
         await s.commit()
 
 
@@ -624,15 +625,19 @@ async def close_payment(payment_id: int, status: str) -> bool:
         return res.rowcount == 1
 
 
-async def credit_payment(payment_id: int) -> Payment | None:
+async def credit_payment(payment_id: int, amount: Decimal | None = None) -> Payment | None:
     """pending -> paid AND the member's balance + the amount, in ONE transaction.
     Only from pending, so the poller, the customer's check button and a restart
-    racing each other credit it exactly once. None = it was not pending."""
+    racing each other credit it exactly once. None = it was not pending.
+
+    `amount` is what really arrived when the gateway says so (a built-in payment
+    is credited what NumberHub added to the shop's wallet); None = the asked amount."""
     async with session_factory() as s:
         row = await s.get(Payment, payment_id)
         if row is None:
             return None
-        credit = Decimal(row.amount)
+        credit = (Decimal(amount).quantize(Decimal("0.01")) if amount is not None and Decimal(amount) > 0
+                  else Decimal(row.amount))
         res = await s.execute(update(Payment).where(Payment.id == payment_id, Payment.status == Payment.PENDING)
                               .values(status=Payment.PAID, credited=credit, paid_at=_now()))
         if res.rowcount != 1:
@@ -664,6 +669,16 @@ async def payments_today(member_id: int) -> int:
     async with session_factory() as s:
         return int(await s.scalar(select(func.count(Payment.id)).where(
             Payment.member_id == member_id, Payment.created_at >= since)) or 0)
+
+
+async def payments_today_shop(reseller_id: int, provider: str) -> int:
+    """How many payments of one kind a whole shop opened in 24 h (the built-in
+    payments' ceiling, payments.PER_DAY_PER_SHOP)."""
+    since = _now() - dt.timedelta(hours=24)
+    async with session_factory() as s:
+        return int(await s.scalar(select(func.count(Payment.id)).where(
+            Payment.reseller_id == reseller_id, Payment.provider == provider,
+            Payment.created_at >= since)) or 0)
 
 
 async def pending_payments(limit: int = 500) -> list[Payment]:

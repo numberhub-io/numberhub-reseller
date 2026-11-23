@@ -805,15 +805,34 @@ async def test_custom_prices():
     print("custom prices: an older database")
     from sqlalchemy import text as _text
     from app.db import engine, init_db as _init
-    async with engine.begin() as conn:
-        await conn.execute(_text("ALTER TABLE orders DROP COLUMN ceiling_at_buy"))
-        await conn.execute(_text("ALTER TABLE resellers DROP COLUMN max_profit"))
-    await _init()
+    import sqlite3 as _sqlite
+    from app import db as _db
+    want = ("ceiling_at_buy", "max_profit")
+    if _sqlite.sqlite_version_info >= (3, 35):
+        async with engine.begin() as conn:
+            await conn.execute(_text("ALTER TABLE orders DROP COLUMN ceiling_at_buy"))
+            await conn.execute(_text("ALTER TABLE resellers DROP COLUMN max_profit"))
+        await _init()
+    else:
+        # An older SQLite cannot drop a column. The same start-up step is proven with
+        # columns no table has yet (the ORM never reads them).
+        want = ("zz_added_later_a", "zz_added_later_b")
+        saved = _db._ADDED_COLUMNS
+        _db._ADDED_COLUMNS = saved + (("orders", want[0], "NUMERIC(12, 2)"), ("resellers", want[1], "TEXT"))
+        try:
+            await _init()
+            await _init()               # a second start must not try to add them again
+        finally:
+            _db._ADDED_COLUMNS = saved
     async with engine.begin() as conn:
         cols = {row[1] for row in (await conn.execute(_text("PRAGMA table_info(orders)"))).all()}
         rcols = {row[1] for row in (await conn.execute(_text("PRAGMA table_info(resellers)"))).all()}
+        pcols = {row[1] for row in (await conn.execute(_text("PRAGMA table_info(payments)"))).all()}
     check("start-up adds the new columns to a database from before",
-          "ceiling_at_buy" in cols and "max_profit" in rcols)
+          want[0] in cols and want[1] in rcols)
+    check("every column a later release added is in the database",
+          all(col in {"resellers": rcols, "orders": cols, "payments": pcols}[tbl]
+              for tbl, col, _kind in _db._ADDED_COLUMNS))
 
 
 async def test_picker_pages():
@@ -1336,6 +1355,203 @@ async def test_auto_payments():
     payments.TRANSPORT = None
 
 
+async def test_builtin_payments():
+    """Owner 2026-11-23 (#99): built-in USDT payments. The customer pays to an
+    address NumberHub opens with the shop's own key; the money lands in the shop's
+    NumberHub wallet and the same amount on the customer's balance, exactly once."""
+    print("built-in USDT payments (into the shop's NumberHub wallet)")
+    import json
+    import re
+    from aiogram.methods import SendMessage
+    from app import payments
+    from app.bots.callbacks import Pay
+    from app.bots.reseller import build_router
+    from app.config import settings
+    from app.models import MemberTx, Payment
+    from fakes import FakeGateways
+    from sqlalchemy import func, select, update
+    payments.TRANSPORT = FakeGateways().transport()     # leftovers of other tests never reach a real gateway
+    api = FakeNumberHub(wallet="0.00")
+    r = await make_reseller(api, bot_id=86099)
+    session = FakeSession()
+    bot = fake_bot(session)
+    runtime._bots[r.id] = bot
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(build_router(r.id))
+    cust, other = 9601, 9602
+    to = lambda uid: [m.text or "" for m in session.requests if isinstance(m, SendMessage) and m.chat_id == uid]  # noqa: E731
+
+    async def refused(coro) -> str:
+        try:
+            await coro
+        except payments.PayError as exc:
+            return str(exc) or "refused"
+        return ""
+
+    async def to_amounts(uid):
+        await dp.feed_update(bot, msg(uid, "/start"))
+        await dp.feed_update(bot, tap(uid, button(session, "Balance")))
+        await dp.feed_update(bot, tap(uid, button(session, "Add balance")))
+
+    # ── off until the owner turns it on ──
+    check("off by default: nothing changes for a shop", payments.connected(r) == [] and not payments.builtin_on(r))
+    await dp.feed_update(bot, msg(cust, "/start"))
+    await dp.feed_update(bot, tap(cust, button(session, "Balance")))
+    check("…and the customer has no Add balance button", button(session, "Add balance") is None)
+    check("…and opening one by hand is refused",
+          "off" in await refused(payments.open_link(r, 1, payments.NUMBERHUB, D("5"), "usdt_bsc")))
+
+    # ── the owner turns it on with one tap ──
+    await dp.feed_update(bot, msg(OWNER, "/admin"))
+    await dp.feed_update(bot, tap(OWNER, button(session, "Payments")))
+    check("💳 Payments explains built-in USDT and offers the switch",
+          "Built-in USDT" in session.last_text() and "your NumberHub wallet" in session.last_text()
+          and button(session, "Turn on built-in USDT") is not None)
+    await dp.feed_update(bot, tap(OWNER, button(session, "Turn on built-in USDT")))
+    r = await repo.get_reseller(r.id)
+    check("one tap turns it on, nothing to connect", r.nh_pay == 1 and payments.connected(r) == [payments.NUMBERHUB]
+          and button(session, "Turn off built-in USDT") is not None and "are on" in session.last_text())
+    await dp.feed_update(bot, msg(OWNER, "/admin"))
+    check("the dashboard names it", "Built-in USDT" in session.last_text())
+
+    # ── a customer pays $10 on BEP20 ──
+    await to_amounts(cust)
+    await dp.feed_update(bot, tap(cust, button(session, "$10.00")))
+    check("the customer picks the network", button(session, "BEP20") is not None
+          and button(session, "TRC20") is not None and "how do you want to pay" in session.last_text())
+    await dp.feed_update(bot, tap(cust, button(session, "BEP20")))
+    mem = await repo.get_or_create_member(r.id, cust, None, None)
+    p1 = (await repo.open_payments(mem.id))[0]
+    top = api.topups[int(p1.invoice_id)]
+    text = session.last_text()
+    check("an address, the exact USDT, the network and the time; no link",
+          top["address"] in text and "10.20" in text and "BNB Smart Chain (BEP20)" in text
+          and re.search(r"Valid for (59|60) minutes", text) and "is lost" in text
+          and url_button(session, "Pay") is None and p1.pay_url is None and p1.provider == payments.NUMBERHUB,
+          text[:300])
+    check("the deposit was opened for this customer alone, for an hour",
+          top["reference"] == f"s{r.id}-m{mem.id}-p{p1.id}" and top["lifetime"] == 60
+          and top["amount"] == D("10.00") and top["method"] == "usdt_bsc")
+    check("the customer's Telegram id and name never leave the shop",
+          str(cust) not in json.dumps(api.topup_bodies) and "user" not in json.dumps(api.topup_bodies).lower())
+    await dp.feed_update(bot, tap(cust, Pay(a="chk", id=p1.id).pack()))
+    check("'I've paid' before it arrives: not yet, nothing added",
+          "Not received yet" in session.alerts()[-1] and (await repo.get_member(mem.id)).balance == 0)
+    await to_amounts(cust)
+    check("the open payment is offered again", button(session, "Show the address") is not None)
+    await dp.feed_update(bot, tap(cust, button(session, "Show the address")))
+    check("…with the same address, and no second deposit", top["address"] in session.last_text() and len(api.topups) == 1)
+    await dp.feed_update(bot, tap(other, Pay(a="show", id=p1.id).pack()))
+    await dp.feed_update(bot, tap(other, Pay(a="chk", id=p1.id).pack()))
+    check("another customer can neither see nor check it", top["address"] not in "".join(to(other))
+          and (await repo.get_payment(p1.id)).status == Payment.PENDING)
+
+    # ── it arrives: credited once, and the shop's wallet is funded ──
+    api.pay_topup(int(p1.invoice_id))
+    await asyncio.gather(payments.poll_all(), payments.poll_all(),
+                         dp.feed_update(bot, tap(cust, Pay(a="chk", id=p1.id).pack())))
+    async with repo.session_factory() as s:
+        n_tx = await s.scalar(select(func.count(MemberTx.id)).where(MemberTx.member_id == mem.id,
+                                                                     MemberTx.kind == "payment"))
+    check("credited exactly once while the poller and the button race",
+          (await repo.get_member(mem.id)).balance == D("10.00") and n_tx == 1
+          and (await repo.get_payment(p1.id)).status == Payment.PAID)
+    check("the shop's NumberHub wallet has the money to sell with", api.wallet == D("10.00"))
+    check("the customer and the owner are told", any("Payment received" in x for x in to(cust))
+          and any("NumberHub wallet" in x for x in to(OWNER)))
+    await payments.poll_all()
+    await dp.feed_update(bot, tap(cust, Pay(a="chk", id=p1.id).pack()))
+    check("asking again adds nothing", (await repo.get_member(mem.id)).balance == D("10.00")
+          and "already on your balance" in session.alerts()[-1])
+
+    # ── fraud and mistakes ──
+    p2 = await payments.open_link(r, mem.id, payments.NUMBERHUB, D("20"), "usdt_tron")
+    api.pay_topup(int(p2.invoice_id), credited="12.50")
+    await payments.poll_all()
+    check("a short payment is credited as what arrived (12.50 of 20), never the asked amount",
+          (await repo.get_member(mem.id)).balance == D("22.50") and (await repo.get_payment(p2.id)).credited == D("12.50")
+          and api.wallet == D("22.50"))
+    mem2 = await repo.get_or_create_member(r.id, other, None, None)
+    pa = await payments.open_link(r, mem.id, payments.NUMBERHUB, D("5"), "usdt_bsc")
+    pb = await payments.open_link(r, mem2.id, payments.NUMBERHUB, D("5"), "usdt_bsc")
+    check("two customers asking for the same amount and network never share an address",
+          pa.invoice_id != pb.invoice_id and payments.details(pa)["address"] != payments.details(pb)["address"])
+    api.pay_topup(int(pb.invoice_id))
+    await payments.poll_all()
+    check("…and a payment is credited only to the customer it was opened for",
+          (await repo.get_member(mem2.id)).balance == D("5.00") and (await repo.get_member(mem.id)).balance == D("22.50")
+          and (await repo.get_payment(pa.id)).status == Payment.PENDING)
+    mine = api.owner_topup("7.00")
+    async with repo.session_factory() as s:
+        await s.execute(update(Payment).where(Payment.id == pa.id).values(invoice_id=str(mine)))
+        await s.commit()
+    await payments.poll_all()
+    check("a payment row pointed at another paid deposit (the owner's own top-up) is never credited",
+          (await repo.get_payment(pa.id)).status == Payment.PENDING and (await repo.get_member(mem.id)).balance == D("22.50"))
+    api.topup_supports_reference = False
+    why = await refused(payments.open_link(r, mem.id, payments.NUMBERHUB, D("9"), "usdt_bsc"))
+    async with repo.session_factory() as s:
+        last = (await s.execute(select(Payment).where(Payment.member_id == mem.id).order_by(Payment.id.desc()))).scalars().first()
+    check("an API that ignores the reference is refused: no address is shown and the row is closed",
+          "per-customer" in why and last.status == Payment.FAILED and last.invoice_id is None, why)
+    api.topup_supports_reference = True
+    n = len(api.topups)
+    api.lose_topup_replies = 1
+    p5 = await payments.open_link(r, mem.id, payments.NUMBERHUB, D("11"), "usdt_bsc")
+    check("a lost reply is asked again and still gives ONE deposit",
+          len(api.topups) == n + 1 and p5.invoice_id == str(max(api.topups)) and payments.details(p5).get("address"))
+    api.fail_next_topup = "too_many_open_topups"
+    await to_amounts(cust)
+    await dp.feed_update(bot, tap(cust, button(session, "$5.00")))
+    await dp.feed_update(bot, tap(cust, button(session, "BEP20")))
+    check("NumberHub refuses: the customer is told to try later, the owner is told why",
+          "not available right now" in session.last_text()
+          and any("could not get a payment address" in x and "too many customers" in x for x in to(OWNER)))
+    await repo.update_reseller(r.id, status=Reseller.SUSPENDED)
+    why = await refused(payments.open_link(await repo.get_reseller(r.id), mem.id, payments.NUMBERHUB, D("5"), "usdt_tron"))
+    await repo.update_reseller(r.id, status=Reseller.ACTIVE)
+    r = await repo.get_reseller(r.id)
+    check("a shop that is not selling takes no money", "not selling" in why, why)
+    before, payments.PER_DAY_PER_SHOP = payments.PER_DAY_PER_SHOP, await repo.payments_today_shop(r.id, payments.NUMBERHUB)
+    why = await refused(payments.open_link(r, mem2.id, payments.NUMBERHUB, D("5"), "usdt_tron"))
+    payments.PER_DAY_PER_SHOP = before
+    check("the shop's daily ceiling stops new addresses", "too many payment addresses" in why, why)
+    why = await refused(payments.open_link(r, mem2.id, payments.NUMBERHUB, D("5"), "btc"))
+    check("an unknown network is refused before anything is opened", "unknown network" in why, why)
+    p6 = await payments.open_link(r, mem2.id, payments.NUMBERHUB, D("6"), "usdt_tron")
+    api.topups[int(p6.invoice_id)]["status"] = "expired"
+    await payments.poll_all()
+    check("a deposit NumberHub reports expired is closed, nothing added",
+          (await repo.get_payment(p6.id)).status == Payment.EXPIRED and (await repo.get_member(mem2.id)).balance == D("5.00"))
+
+    # ── the owner turns it off: an address already given still counts ──
+    p7 = await payments.open_link(r, mem2.id, payments.NUMBERHUB, D("4"), "usdt_bsc")
+    await dp.feed_update(bot, msg(OWNER, "/admin"))
+    await dp.feed_update(bot, tap(OWNER, button(session, "Payments")))
+    await dp.feed_update(bot, tap(OWNER, button(session, "Turn off built-in USDT")))
+    r = await repo.get_reseller(r.id)
+    check("turned off: no new addresses", r.nh_pay == 0 and payments.connected(r) == []
+          and "off" in await refused(payments.open_link(r, mem2.id, payments.NUMBERHUB, D("5"), "usdt_bsc")))
+    api.pay_topup(int(p7.invoice_id))
+    await payments.poll_all()
+    check("…but money sent to an address given before is still added",
+          (await repo.get_member(mem2.id)).balance == D("9.00") and (await repo.get_payment(p7.id)).status == Payment.PAID)
+
+    # ── the platform's default for shops whose owner has not chosen ──
+    api2 = FakeNumberHub()
+    r2 = await make_reseller(api2, bot_id=86100)
+    settings.numberhub_pay_default = True
+    try:
+        on_by_default = payments.builtin_on(r2) and payments.connected(r2) == [payments.NUMBERHUB]
+        await payments.set_builtin(r2.id, False)
+        owner_said_no = not payments.builtin_on(await repo.get_reseller(r2.id))
+    finally:
+        settings.numberhub_pay_default = False
+    check("the platform default applies only while the owner has not chosen", on_by_default and owner_said_no
+          and not payments.builtin_on(await repo.get_reseller(r2.id)))
+    payments.TRANSPORT = None
+
+
 async def test_paused_shop():
     print("a paused shop")
     from app.bots.reseller import build_router
@@ -1691,7 +1907,7 @@ async def main():
     test_prices()
     test_i18n()
     for fn in (test_buy_and_code, test_no_code_refund, test_failures, test_lost_reply, test_cancel,
-               test_races_and_limits, test_bot_flow, test_builder, test_provision, test_custom_prices, test_picker_pages, test_rank_order, test_dead_token, test_rejected_key, test_deposits, test_auto_payments, test_paused_shop, test_review_money,
+               test_races_and_limits, test_bot_flow, test_builder, test_provision, test_custom_prices, test_picker_pages, test_rank_order, test_dead_token, test_rejected_key, test_deposits, test_auto_payments, test_builtin_payments, test_paused_shop, test_review_money,
                test_review_sync, test_review_bots, test_review_runtime, test_cards_render):
         try:
             await fn()

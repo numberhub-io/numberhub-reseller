@@ -69,7 +69,7 @@ Everything below is in the customer's Telegram language when it is one of the 14
 5. The order card. The number (tap to copy), a 20 minute countdown, and the code as soon as it arrives. The code is also sent as a separate message. When an app verified by phone call, the "code" is the caller's number, and the card says to type its last 6 (or 4) digits. A cancel button unlocks after about 2 minutes (NumberHub refuses earlier cancels) and shows the seconds left until then. The card updates by itself.
 6. No code means no charge. If the time runs out or the customer cancels, the reserved amount goes back and the customer gets a message saying so.
 
-Under 💰 Balance customers see their ID and, when the reseller has connected a payment gateway, a 💳 Add balance button that tops them up by crypto on the spot (see Automatic payments). Without one, the ID is what they send to the reseller when they want to top up. The shop bot only works in private chats; in a group it stays silent, so nobody's number or code is shown to the group.
+Under 💰 Balance customers see their ID and, when the shop takes automatic payments (built in, or the reseller's own gateway), a 💳 Add balance button that tops them up by crypto on the spot (see Automatic payments). Without one, the ID is what they send to the reseller when they want to top up. The shop bot only works in private chats; in a group it stays silent, so nobody's number or code is shown to the group.
 
 ## Guide for resellers
 
@@ -107,7 +107,7 @@ Open your own shop bot and send `/admin`, or tap ⚙️ Admin panel in the menu 
 | 👥 Customers | The latest 25 customers with their IDs and balances |
 | 📣 Broadcast | Sends your message to every customer of this bot |
 | 💲 Commission | Changes your commission. It applies to new purchases only |
-| 💳 Payments | Automatic crypto top-ups with your own OxaPay or @CryptoBot, and manual deposits customers ask for in the bot (both below). Also a minimum, the recent payments, and the deposits that wait for you |
+| 💳 Payments | Built-in USDT payments (one switch, nothing to set up), automatic crypto top-ups with your own OxaPay or @CryptoBot, and manual deposits customers ask for in the bot (all below). Also a minimum, the recent payments, and the deposits that wait for you |
 | 🏷 Custom prices | Your own price for one app, or for one app in one country: a fixed price (`0.35`) or its own commission (`10%`). Also a profit cap: the most you earn on one number |
 | 📝 Welcome text | Replaces the greeting on the menu |
 | 🆘 Support contact | A `@username` or an `https://` link. Customers see it on their balance screen |
@@ -117,7 +117,24 @@ Open your own shop bot and send `/admin`, or tap ⚙️ Admin panel in the menu 
 
 Your commission is a percentage added on top of NumberHub's price for each country. With a 30% commission, a number NumberHub prices at $0.25 costs your customer $0.33 (rounded up to the cent) and you keep $0.08. The bot uses NumberHub's highest price for that route (`price_max`) as the base, so NumberHub can never charge you more for a sale than the customer paid.
 
-### Automatic payments (crypto)
+### Built-in payments (USDT, nothing to set up)
+
+⚙️ Admin panel → 💳 Payments → 💵 Turn on built-in USDT. That is the whole setup: no account to open, no key to paste.
+
+A customer taps 💳 Add balance, picks an amount and a network (USDT on BNB Smart Chain, BEP20, or on Tron, TRC20) and gets an address, the exact amount to send and 60 minutes to send it. A few minutes after the network confirms, the money is added to **your NumberHub wallet** and the same amount to the customer's balance in your shop, and both of you get a message. So your customers' payments are the money your shop buys numbers with: you do not have to fund the wallet yourself first. What you earn on each number stays in your NumberHub wallet.
+
+How it stays safe:
+
+- Every customer gets an address of their own, opened for that one payment. Two customers who ask for the same amount never share one.
+- The customer is credited exactly what reached your wallet. A short payment is credited as what arrived, never as the amount that was asked.
+- A payment is credited once, even when the background check and the customer's 🔄 I've paid: check button race.
+- A customer can have 3 addresses open and open 10 a day; a shop can open 300 a day. A shop that is paused, suspended or disconnected takes no payments.
+- Money sent on another network, or after the 60 minutes, cannot be recovered. The customer is told so on the payment screen.
+- Turning it off stops new addresses at once. An address a customer already has still works until it runs out, and a payment to it is still added.
+
+You can use it together with your own gateway and with manual deposits; the customer then picks how to pay. An operator can make it the default for shops whose owner has not chosen (`NUMBERHUB_PAY_DEFAULT`).
+
+### Automatic payments with your own account (crypto)
 
 Connect your own payment account and customers top up without waiting for you. ⚙️ Admin panel → 💳 Payments:
 
@@ -218,6 +235,7 @@ Every setting is an environment variable, or a line in `.env`.
 | `MAX_OPEN_PER_ROUTE` | `3` | Open orders one customer may have for the same app and country |
 | `PROVISION_SECRET` | empty | Turns on the hosted path's listener (32+ characters). The NumberHub backend sends the same value. Empty means off |
 | `PROVISION_PORT` | `8097` | Port of that listener, always on `127.0.0.1` |
+| `NUMBERHUB_PAY_DEFAULT` | `false` | Built-in USDT payments for shops whose owner has not chosen. `false`: each owner turns them on in Admin, Payments. `true`: on for every shop until its owner turns them off |
 
 ## Deploy on a Linux server
 
@@ -308,7 +326,8 @@ It loads the catalog, buys the cheapest WhatsApp number in stock, checks the hol
 | `app/provision.py` | The hosted path: a localhost listener NumberHub calls to create, reconnect, list, pause and resume shops |
 | `app/selling.py` | Prices, buying, cancelling, recovery of lost purchases, sync with NumberHub, settlement |
 | `app/repo.py` | All database reads and writes, including the atomic balance updates |
-| `app/models.py` | Tables: `resellers`, `members`, `member_tx`, `orders` |
+| `app/models.py` | Tables: `resellers`, `members`, `member_tx`, `orders`, `price_rules`, `deposits`, `payments` |
+| `app/payments.py` | Automatic top-ups: built-in USDT into the shop's NumberHub wallet, and the owner's own OxaPay or @CryptoBot |
 | `app/numberhub.py` | NumberHub API client (retries, idempotency, error mapping) |
 | `app/bots/builder.py` | The builder bot: create a shop, my bots, operator commands |
 | `app/bots/reseller.py` | The shop bot's customer screens |
