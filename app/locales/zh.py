@@ -116,4 +116,7 @@ T = {
     'pay_address': '💳 <b>支付 {amount}</b>\n\n请通过 <b>{network}</b> 网络向以下地址准确发送 <code>{pay_amount}</code> {coin}：\n<code>{address}</code>\n\n⏳ {minutes} 分钟内有效。网络确认后几分钟，余额会自动增加，您会收到一条消息。\n\n⚠️ 只能使用该网络，并在有效期内付款：通过其他网络或超过有效期发送的资金将无法找回。',
     'btn_pay_show': '📋 查看地址（{amount}）',
     'pay_open_hint_address': '⏳ 您有一笔 <b>{amount}</b> 的付款尚未完成：点击下方再次查看地址，或选择其他金额。',
+    # QRIS through the owner's KaseraPay account (app/payments.py, provider kasera)
+    'btn_pay_qris': '🇮🇩 QRIS（印尼盾）',
+    'pay_qris': '💳 <b>通过 QRIS 支付 {idr}</b>\n\n请使用任意印尼银行或钱包应用（GoPay、OVO、DANA、ShopeePay）扫描此二维码，并在 {minutes} 分钟内付款。款项到账后，<b>{amount}</b> 会自动加入您的余额，您会收到一条消息。',
 }

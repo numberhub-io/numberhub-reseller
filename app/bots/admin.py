@@ -237,6 +237,11 @@ async def deposits_screen(reseller: Reseller, note: str = ""):
         " · BTC, ETH, USDT and many more coins",
         f"🤖 @CryptoBot: <b>{'✅ connected' if payments.CRYPTOBOT in gates else '— not connected'}</b>"
         " · USDT, TON, BTC and more, inside Telegram",
+        "🇮🇩 KaseraPay (QRIS): <b>" + (
+            f"✅ connected · Rp {int(payments.kasera_rate(reseller)):,} = $1".replace(",", ".")
+            if payments.KASERA in gates else
+            "⚠️ key saved: set the rupiah rate" if payments.has_key(reseller, payments.KASERA) else "— not connected")
+        + "</b> · customers in Indonesia pay by QR from any bank or wallet app",
     ]
     recent = await repo.recent_payments(reseller.id, limit=6) if gates else []
     if recent:
@@ -264,12 +269,16 @@ async def deposits_screen(reseller: Reseller, note: str = ""):
     sizes = [1]
     kb.button(text="⏸ Turn off built-in crypto" if builtin else "💵 Turn on built-in crypto",
               callback_data=Adm(a="nhpay", arg="off" if builtin else "on"))
-    for g, label in ((payments.OXAPAY, "🪙 OxaPay"), (payments.CRYPTOBOT, "🤖 @CryptoBot")):
-        if g in gates:
-            kb.button(text=f"🗑 Remove {label[2:]}", callback_data=Adm(a="pay_off", arg=g))
+    for g, label in ((payments.OXAPAY, "🪙 OxaPay"), (payments.CRYPTOBOT, "🤖 @CryptoBot"),
+                     (payments.KASERA, "🇮🇩 KaseraPay")):
+        if payments.has_key(reseller, g):
+            kb.button(text=f"🗑 Remove {label.split(' ', 1)[1]}", callback_data=Adm(a="pay_off", arg=g))
         else:
             kb.button(text=f"🔑 Connect {label}", callback_data=Adm(a="pay_on", arg=g))
-    sizes.append(2)
+    sizes += [2, 1]
+    if payments.has_key(reseller, payments.KASERA):
+        kb.button(text="💱 Rupiah for $1", callback_data=Adm(a="kasera_rate"))
+        sizes.append(1)
     for d in rows:
         member = await repo.get_member(d.member_id)
         tag = f"@{member.username}" if member and member.username else (str(member.telegram_id) if member else "?")
@@ -303,7 +312,23 @@ GATEWAY_HOWTO = {
         "Customers then pay inside Telegram with USDT, TON, BTC and more, and the money goes to your "
         "@CryptoBot wallet.\n\n"
         "<i>Your message is deleted at once and the token is stored encrypted. Send <code>-</code> to cancel.</i>"),
+    payments.KASERA: (
+        "🇮🇩 <b>Connect KaseraPay (QRIS)</b>\n\n"
+        "1. Sign up at <b>pay.kasera.id</b> and verify your account (an unverified account can take only "
+        "a few payments).\n"
+        "2. In your dashboard open <b>Developer</b>, create an API key and copy it. A test key "
+        "(<code>kp_test_…</code>) lets you try the whole flow first: test payments add no balance.\n"
+        "3. Send the key here. Next you set how many rupiah one dollar costs in your shop.\n\n"
+        "Customers then pay by QR from any Indonesian bank or wallet app, and the money goes to your "
+        "KaseraPay balance. KaseraPay takes its fee from you unless you switch \"buyer pays\" on in its "
+        "dashboard. One payment can be up to Rp 1.000.000.\n\n"
+        "<i>Your message is deleted at once and the key is stored encrypted. Send <code>-</code> to cancel.</i>"),
 }
+
+
+KASERA_RATE_ASK = ("💱 <b>How many rupiah is one dollar in your shop?</b>\n\nSend a number, for example "
+                   "<code>16500</code>. A customer who adds $5.00 then pays Rp 82.500 by QRIS. You can change "
+                   "it any time; a QR already shown keeps the rate it was made with.")
 
 
 def _back_to_prices():
@@ -513,6 +538,9 @@ def register(r: Router) -> None:
             await state.set_state(AdminForm.pay_key)
             await state.update_data(provider=callback_data.arg)
             await show(c, GATEWAY_HOWTO[callback_data.arg], _cancel_kb())
+        elif a == "kasera_rate" and payments.has_key(reseller, payments.KASERA):
+            await state.set_state(AdminForm.kasera_rate)
+            await show(c, KASERA_RATE_ASK, _cancel_kb())
         elif a == "nhpay" and callback_data.arg in ("on", "off"):
             turn_on = callback_data.arg == "on"
             await payments.set_builtin(reseller.id, turn_on)
@@ -745,9 +773,29 @@ def register(r: Router) -> None:
                            reply_markup=_cancel_kb())
             return
         await state.clear()
+        if provider == payments.KASERA:
+            # Balances are in dollars and QRIS is paid in rupiah: the shop needs its rate.
+            await state.set_state(AdminForm.kasera_rate)
+            await m.answer(f"✅ <b>{label} connected</b> ({esc(name)}).\n\n" + KASERA_RATE_ASK, reply_markup=_cancel_kb())
+            return
         await reply(m, await deposits_screen(await repo.get_reseller(reseller.id),
                                              f"✅ <b>{label} connected</b> ({esc(name)}). Customers can now "
                                              "top up by crypto, and their balance goes up by itself."))
+
+    @r.message(StateFilter(AdminForm.kasera_rate), F.text)
+    @owner_only
+    async def f_kasera_rate(m: Message, reseller: Reseller, state: FSMContext, is_owner: bool = False):
+        raw = (m.text or "").strip().replace(".", "").replace(",", "").replace(" ", "")
+        if not raw.isdigit() or not 1000 <= int(raw) <= 100000:
+            await m.answer("❌ Send the rupiah for one dollar as a number from 1000 to 100000, for example "
+                           "<code>16500</code>.", reply_markup=_cancel_kb())
+            return
+        await repo.update_reseller(reseller.id, kasera_rate=Decimal(raw))
+        await state.clear()
+        fresh = await repo.get_reseller(reseller.id)
+        low, high = payments.kasera_limits(fresh)
+        await reply(m, await deposits_screen(fresh, f"✅ Rate saved: Rp {int(raw):,} = $1.".replace(",", ".")
+                                             + f" Customers can pay by QRIS from {money(low)} to {money(high)} at a time."))
 
     @r.message(StateFilter(AdminForm.dep_min), F.text)
     @owner_only

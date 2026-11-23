@@ -125,4 +125,7 @@ T = {
     'pay_address': "💳 <b>Pay {amount}</b>\n\nSend exactly <code>{pay_amount}</code> {coin} on <b>{network}</b> to this address:\n<code>{address}</code>\n\n⏳ Valid for {minutes} minutes. Your balance goes up by itself a few minutes after the network confirms, and you'll get a message.\n\n⚠️ Use this network only and pay within this time: money sent on another network or after the time is lost.",
     'btn_pay_show': '📋 Show the address ({amount})',
     'pay_open_hint_address': '⏳ You have a payment of <b>{amount}</b> open: tap below to see its address again, or pick another amount.',
+    # QRIS through the owner's KaseraPay account (app/payments.py, provider kasera)
+    'btn_pay_qris': '🇮🇩 QRIS (Rupiah)',
+    'pay_qris': "💳 <b>Pay {idr} by QRIS</b>\n\nScan this QR with any Indonesian bank or wallet app (GoPay, OVO, DANA, ShopeePay, m-banking) and pay within {minutes} minutes. <b>{amount}</b> is added to your balance by itself as soon as the payment arrives, and you'll get a message.",
 }

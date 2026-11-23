@@ -1775,6 +1775,158 @@ async def test_owner_stats():
     check("…and its statistics screen opens with zeros", "Sold <b>$0.00</b>" in idle and "(–)" in idle)
 
 
+async def test_kasera_qris():
+    """A shop owner in Indonesia asked for it (support chat, 2026-11-23): customers pay
+    by QRIS through the owner's own KaseraPay account and are credited by themselves."""
+    print("QRIS through the owner's own KaseraPay account")
+    import datetime as dtm
+    from aiogram.methods import SendMessage, SendPhoto
+    from app import payments
+    from app.bots.callbacks import Pay
+    from app.bots.reseller import build_router
+    from app.models import Payment
+    from fakes import FakeGateways
+    from sqlalchemy import update
+    gw = FakeGateways()
+    payments.TRANSPORT = gw.transport()
+    api = FakeNumberHub()
+    r = await make_reseller(api, bot_id=86301)
+    session = FakeSession()
+    bot = fake_bot(session)
+    runtime._bots[r.id] = bot
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(build_router(r.id))
+    cust = 9801
+    to = lambda uid: [m.text or "" for m in session.requests if isinstance(m, SendMessage) and m.chat_id == uid]  # noqa: E731
+    photos = lambda uid: [m for m in session.requests if isinstance(m, SendPhoto) and m.chat_id == uid]        # noqa: E731
+
+    async def refused(coro) -> str:
+        try:
+            await coro
+        except payments.PayError as exc:
+            return str(exc) or "refused"
+        return ""
+
+    async def add(uid, amount_button):
+        await dp.feed_update(bot, msg(uid, "/start"))
+        await dp.feed_update(bot, tap(uid, button(session, "Balance")))
+        await dp.feed_update(bot, tap(uid, button(session, "Add balance")))
+        await dp.feed_update(bot, tap(uid, button(session, amount_button)))
+
+    # ── the owner connects it ──
+    await dp.feed_update(bot, msg(OWNER, "/admin"))
+    await dp.feed_update(bot, tap(OWNER, button(session, "Payments")))
+    check("💳 Payments offers KaseraPay next to the other two", button(session, "Connect 🇮🇩 KaseraPay") is not None
+          and "KaseraPay (QRIS): <b>— not connected</b>" in session.last_text())
+    await dp.feed_update(bot, tap(OWNER, button(session, "Connect 🇮🇩 KaseraPay")))
+    check("…with how to get the key and what a test key does", "pay.kasera.id" in session.last_text()
+          and "kp_test_" in session.last_text())
+    await dp.feed_update(bot, msg(OWNER, "kp_live_WRONGKEY00000000000"))
+    check("a wrong key is refused", "didn't accept" in session.last_text()
+          and (await repo.get_reseller(r.id)).kasera_key_enc is None)
+    await dp.feed_update(bot, msg(OWNER, gw.ks_key))
+    fresh = await repo.get_reseller(r.id)
+    check("the right key is checked without making a payment, stored encrypted, and the rate is asked",
+          fresh.kasera_key_enc and gw.ks_key not in fresh.kasera_key_enc and gw.ks == {}
+          and "How many rupiah is one dollar" in session.last_text() and payments.connected(fresh) == [])
+    await dp.feed_update(bot, msg(OWNER, "abc"))
+    check("a rate that is not a number is asked again", "from 1000 to 100000" in session.last_text())
+    await dp.feed_update(bot, msg(OWNER, "16.500"))
+    r = await repo.get_reseller(r.id)
+    check("the rate is saved and QRIS is on: from $0.07 to $60.60 at a time",
+          r.kasera_rate == D("16500") and payments.connected(r) == [payments.KASERA]
+          and payments.kasera_limits(r) == (D("0.07"), D("60.60")) and "Rp 16.500 = $1" in session.last_text(),
+          session.last_text()[:160])
+
+    # ── a customer adds $5 ──
+    await add(cust, "$5.00")
+    mem = await repo.get_or_create_member(r.id, cust, None, None)
+    p1 = (await repo.open_payments(mem.id))[0]
+    shot = photos(cust)
+    d1 = payments.details(p1)
+    check("a QR in the chat with the rupiah to pay and the dollars it adds",
+          len(shot) == 1 and "Rp 82.500" in shot[0].caption and "$5.00" in shot[0].caption
+          and re.search(r"within (59|60) minutes", shot[0].caption) and d1["idr"] == 82500 and d1["qr"].startswith("000201"),
+          str(shot[0].caption if shot else None)[:200])
+    check("the gateway was asked for exactly that: rupiah, QRIS only, one payment per request",
+          gw.ks_bodies[-1]["amount"] == 82500 and gw.ks_bodies[-1]["payment_methods"] == ["qris"]
+          and gw.ks_bodies[-1]["merchant_ref"] == f"s{r.id}-p{p1.id}" and list(gw.ks_idem) == [f"s{r.id}-p{p1.id}"])
+    check("the picture is a real PNG", payments.qr_png(d1["qr"])[:8] == b"\x89PNG\r\n\x1a\n")
+    await dp.feed_update(bot, tap(cust, Pay(a="chk", id=p1.id).pack()))
+    check("'I've paid' before it arrives: not yet", "Not received yet" in session.alerts()[-1]
+          and (await repo.get_member(mem.id)).balance == 0)
+    gw.ks[p1.invoice_id]["status"] = "succeeded"
+    await asyncio.gather(payments.poll_all(), payments.poll_all(),
+                         dp.feed_update(bot, tap(cust, Pay(a="chk", id=p1.id).pack())))
+    check("paid: $5.00 added exactly once, both are told",
+          (await repo.get_member(mem.id)).balance == D("5.00") and (await repo.get_payment(p1.id)).status == Payment.PAID
+          and any("Payment received" in x for x in to(cust)) and any("KaseraPay (QRIS)" in x for x in to(OWNER)))
+
+    # ── what must not credit ──
+    p2 = await payments.open_link(r, mem.id, payments.KASERA, D("10"))
+    gw.ks[p2.invoice_id].update(status="succeeded", amount=1000)
+    await payments.poll_all()
+    check("a payment the gateway reports with another amount is not credited",
+          (await repo.get_payment(p2.id)).status == Payment.PENDING and (await repo.get_member(mem.id)).balance == D("5.00"))
+    gw.ks[p2.invoice_id].update(status="expired", amount=165000)
+    await payments.poll_all()
+    check("expired at the gateway inside the grace time: kept open (it can still turn paid)",
+          (await repo.get_payment(p2.id)).status == Payment.PENDING)
+    gw.ks[p2.invoice_id]["status"] = "succeeded"
+    await payments.poll_all()
+    check("…and credited when it does", (await repo.get_member(mem.id)).balance == D("15.00"))
+    check("too small or too large for one QRIS payment is refused before the gateway is asked",
+          "from $0.07 to $60.60" in await refused(payments.open_link(r, mem.id, payments.KASERA, D("100")))
+          and "from $0.07" in await refused(payments.open_link(r, mem.id, payments.KASERA, D("0.05"))))
+    gw.refuse_create = True
+    n_owner = len(to(OWNER))
+    await add(cust, "$10.00")
+    gw.refuse_create = False
+    check("the gateway refuses (an unverified account's limit): the customer is told, the owner is told why",
+          "not available right now" in session.last_text()
+          and any("Unverified accounts" in x for x in to(OWNER)[n_owner:]), str(to(OWNER)[n_owner:])[:200])
+
+    # ── a test key: the flow works, no balance is added ──
+    await payments.connect(r.id, payments.KASERA, gw.ks_test_key)
+    r = await repo.get_reseller(r.id)
+    p3 = await payments.open_link(r, mem.id, payments.KASERA, D("7"))
+    gw.ks[p3.invoice_id]["status"] = "succeeded"
+    n_owner = len(to(OWNER))
+    await payments.poll_all()
+    check("a test key's payment is reported as working and adds nothing",
+          payments.details(p3)["test"] is True and (await repo.get_member(mem.id)).balance == D("15.00")
+          and (await repo.get_payment(p3.id)).status == Payment.EXPIRED
+          and any("Test payment worked" in x for x in to(OWNER)[n_owner:]))
+
+    # ── with other ways to pay, QRIS is one of the choices ──
+    await payments.connect(r.id, payments.KASERA, gw.ks_key)
+    await payments.set_builtin(r.id, True)
+    r = await repo.get_reseller(r.id)
+    payments._methods_cache = None
+    await add(9802, "$5.00")
+    check("QRIS is offered next to the coins", button(session, "QRIS") is not None and button(session, "USDT") is not None)
+    await add(9802, "$50.00")
+    await dp.feed_update(bot, tap(9802, button(session, "QRIS")))
+    check("…and tapping it sends the QR", len(photos(9802)) == 1 and "Rp 825.000" in photos(9802)[0].caption)
+    await repo.update_reseller(r.id, kasera_rate=D("25000"))
+    r = await repo.get_reseller(r.id)
+    await add(9802, "$5.00")                     # to the amount screen, then the $50 preset itself
+    await dp.feed_update(bot, tap(9802, Pay(a="amt", c=5000).pack()))
+    shown = [b_.text for row in (session.last_markup().inline_keyboard if session.last_markup() else []) for b_ in row]
+    check("…but not for an amount over Rp 1.000.000 at the shop's rate", button(session, "QRIS") is None
+          and button(session, "USDT") is not None, f"{shown} | {session.last_text()[:120]}")
+
+    # ── the owner removes it ──
+    await dp.feed_update(bot, msg(OWNER, "/admin"))
+    await dp.feed_update(bot, tap(OWNER, button(session, "Payments")))
+    await dp.feed_update(bot, tap(OWNER, button(session, "Remove KaseraPay")))
+    gone = await repo.get_reseller(r.id)
+    check("removed: the key is gone and QRIS is no longer offered", gone.kasera_key_enc is None
+          and payments.KASERA not in payments.connected(gone))
+    payments._methods_cache = None
+    payments.TRANSPORT = None
+
+
 async def test_paused_shop():
     print("a paused shop")
     from app.bots.reseller import build_router
@@ -2130,7 +2282,7 @@ async def main():
     test_prices()
     test_i18n()
     for fn in (test_buy_and_code, test_no_code_refund, test_failures, test_lost_reply, test_cancel,
-               test_races_and_limits, test_bot_flow, test_builder, test_provision, test_custom_prices, test_picker_pages, test_rank_order, test_dead_token, test_rejected_key, test_deposits, test_auto_payments, test_builtin_payments, test_owner_stats, test_paused_shop, test_review_money,
+               test_races_and_limits, test_bot_flow, test_builder, test_provision, test_custom_prices, test_picker_pages, test_rank_order, test_dead_token, test_rejected_key, test_deposits, test_auto_payments, test_builtin_payments, test_owner_stats, test_kasera_qris, test_paused_shop, test_review_money,
                test_review_sync, test_review_bots, test_review_runtime, test_cards_render):
         try:
             await fn()

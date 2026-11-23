@@ -9,7 +9,8 @@ from decimal import Decimal
 import httpx
 from aiogram import Bot
 from aiogram.client.session.base import BaseSession
-from aiogram.methods import AnswerCallbackQuery, DeleteMessage, EditMessageText, GetMe, SendMessage, SetMyCommands
+from aiogram.methods import (AnswerCallbackQuery, DeleteMessage, EditMessageText, GetMe, SendMessage, SendPhoto,
+                             SetMyCommands)
 from aiogram.types import Message, User
 
 UTC = dt.timezone.utc
@@ -329,6 +330,12 @@ class FakeSession(BaseSession):
                 "message_id": method.message_id if isinstance(method, EditMessageText) and method.message_id else self.msg_id,
                 "date": int(dt.datetime.now().timestamp()), "chat": {"id": chat_id, "type": "private"},
                 "text": method.text}, context={"bot": bot})
+        if isinstance(method, SendPhoto):
+            self.msg_id += 1
+            return Message.model_validate({
+                "message_id": self.msg_id, "date": int(dt.datetime.now().timestamp()),
+                "chat": {"id": method.chat_id, "type": "private"}, "caption": method.caption,
+                "photo": [{"file_id": "f", "file_unique_id": "u", "width": 8, "height": 8}]}, context={"bot": bot})
         if isinstance(method, (AnswerCallbackQuery, DeleteMessage, SetMyCommands)):
             return True
         return True
@@ -370,6 +377,11 @@ class FakeGateways:
         self.calls: list[tuple[str, str]] = []
         self.refuse_create = False
         self.next = 1
+        # KaseraPay (pay.kasera.id/v1): a live key and a test key of one account
+        self.ks_key, self.ks_test_key = "kp_live_GOODKEY1234567890", "kp_test_GOODKEY1234567890"
+        self.ks: dict[str, dict] = {}
+        self.ks_idem: dict[str, str] = {}
+        self.ks_bodies: list[dict] = []
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handle)
@@ -401,6 +413,33 @@ class FakeGateways:
                     return httpx.Response(404, json={"error": {"message": "not found"}, "status": 404})
                 return httpx.Response(200, json={"data": {"track_id": track, "status": inv["status"]},
                                                  "message": "ok", "error": {}, "status": 200})
+        if host == "pay.kasera.id":
+            auth = request.headers.get("authorization", "")
+            if auth not in (f"Bearer {self.ks_key}", f"Bearer {self.ks_test_key}"):
+                return httpx.Response(401, json={"error": {"code": "unauthorized", "message": "Invalid API key"}})
+            if request.method == "POST" and path == "/v1/transactions":
+                body = json.loads(request.content)
+                self.ks_bodies.append(body)
+                if self.refuse_create:
+                    return httpx.Response(429, json={"error": {"code": "unverified_count_cap",
+                                                               "message": "Unverified accounts can create 10 payments"}})
+                idem = request.headers.get("idempotency-key") or f"none-{self.next}"
+                if idem not in self.ks_idem:
+                    tid = f"payreq_{self.next}"
+                    self.next += 1
+                    until = dt.datetime.now(UTC) + dt.timedelta(minutes=body.get("expires_in_minutes", 60))
+                    self.ks[tid] = {"id": tid, "status": "pending", "amount": body["amount"], "currency": "IDR",
+                                    "livemode": auth.endswith(self.ks_key), "payment_method": "qris",
+                                    "payment": {"type": "qr", "qr_string": f"00020101021226670016ID.CO.QRIS.WWW{tid}"},
+                                    "expires_at": until.isoformat().replace("+00:00", "Z"), "paid_at": None,
+                                    "merchant_ref": body.get("merchant_ref")}
+                    self.ks_idem[idem] = tid
+                return httpx.Response(201, json=self.ks[self.ks_idem[idem]])
+            if request.method == "GET" and path.startswith("/v1/transactions/"):
+                t = self.ks.get(path.rsplit("/", 1)[1])
+                if t is None:
+                    return httpx.Response(404, json={"error": {"code": "not_found", "message": "No such payment"}})
+                return httpx.Response(200, json=t)
         if host == "pay.crypt.bot":
             if request.headers.get("crypto-pay-api-token") != self.cb_token:
                 return httpx.Response(401, json={"ok": False, "error": {"code": 401, "name": "UNAUTHORIZED"}})

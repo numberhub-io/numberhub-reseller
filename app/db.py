@@ -39,6 +39,8 @@ _ADDED_COLUMNS = (
     ("orders", "fail_reason", "VARCHAR(32)"),
     ("resellers", "daily_report", "INTEGER"),
     ("resellers", "report_day", "VARCHAR(10)"),
+    ("resellers", "kasera_key_enc", "TEXT"),
+    ("resellers", "kasera_rate", "NUMERIC(12, 2)"),
 )
 
 

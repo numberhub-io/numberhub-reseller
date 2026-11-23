@@ -4,3 +4,4 @@ SQLAlchemy[asyncio]>=2.0,<3
 aiosqlite>=0.20,<1
 pydantic-settings>=2.0,<3
 cryptography>=42
+segno>=1.6,<2

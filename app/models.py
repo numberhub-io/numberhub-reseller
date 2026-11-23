@@ -55,6 +55,10 @@ class Reseller(Base):
     # encrypted like the bot token. None = not connected.
     oxapay_key_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
     cryptobot_token_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # KaseraPay (Indonesia, QRIS), the owner's own account: its API key, and how many
+    # rupiah one dollar costs in this shop (balances are in dollars; the owner sets it).
+    kasera_key_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    kasera_rate: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     # Built-in USDT payments (app/payments.py, provider "numberhub"): the customer
     # pays to an address NumberHub opens with the shop's own API key, and the money
     # is added to the shop's NumberHub wallet. 1 = on, 0 = off, None = the

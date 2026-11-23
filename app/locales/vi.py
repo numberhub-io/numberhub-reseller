@@ -116,4 +116,7 @@ T = {
     'pay_address': '💳 <b>Thanh toán {amount}</b>\n\nGửi chính xác <code>{pay_amount}</code> {coin} qua mạng <b>{network}</b> đến địa chỉ này:\n<code>{address}</code>\n\n⏳ Có hiệu lực trong {minutes} phút. Số dư của bạn tự tăng vài phút sau khi mạng xác nhận, và bạn sẽ nhận được tin nhắn.\n\n⚠️ Chỉ dùng mạng này và thanh toán trong thời gian đó: tiền gửi qua mạng khác hoặc sau thời hạn sẽ bị mất.',
     'btn_pay_show': '📋 Xem địa chỉ ({amount})',
     'pay_open_hint_address': '⏳ Bạn có một khoản thanh toán <b>{amount}</b> đang mở: chạm bên dưới để xem lại địa chỉ, hoặc chọn số tiền khác.',
+    # QRIS through the owner's KaseraPay account (app/payments.py, provider kasera)
+    'btn_pay_qris': '🇮🇩 QRIS (Rupiah)',
+    'pay_qris': '💳 <b>Thanh toán {idr} bằng QRIS</b>\n\nQuét mã QR này bằng bất kỳ ứng dụng ngân hàng hoặc ví điện tử nào của Indonesia (GoPay, OVO, DANA, ShopeePay) và thanh toán trong {minutes} phút. <b>{amount}</b> sẽ tự cộng vào số dư của bạn ngay khi khoản thanh toán đến, và bạn sẽ nhận được tin nhắn.',
 }

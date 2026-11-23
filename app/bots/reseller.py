@@ -12,7 +12,7 @@ from aiogram import BaseMiddleware, F, Router
 from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app import payments, repo, selling
@@ -46,7 +46,8 @@ class AdminForm(StatesGroup):
     dep_info = State()         # the owner's payment details for deposits
     dep_min = State()
     dep_amount = State()       # approve a deposit with another amount (deposit id in state data)
-    pay_key = State()          # an OxaPay key / @CryptoBot token (provider in state data)
+    pay_key = State()          # an OxaPay key / @CryptoBot token / KaseraPay key (provider in state data)
+    kasera_rate = State()      # rupiah for one dollar in this shop
 
 
 class DepositForm(StatesGroup):
@@ -400,13 +401,32 @@ async def deposit_start(reseller: Reseller, member: Member, lang: str) -> tuple[
     return text, _cancel_member(lang), True
 
 
-GATEWAY = {"ox": payments.OXAPAY, "cb": payments.CRYPTOBOT}
+GATEWAY = {"ox": payments.OXAPAY, "cb": payments.CRYPTOBOT, "kq": payments.KASERA}
 SHORT = {v: k for k, v in GATEWAY.items()}
 # Built-in payments. Buttons made before every coin was offered carried these two
 # codes; they still work. Coin and network names are the same in every language:
 # they are what a wallet or an exchange shows.
 NETWORK = {"nb": "usdt_bsc", "nt": "usdt_tron"}
 COIN_ICON = {"USDT": "💵", "USDC": "💵", "DAI": "💵", "BTC": "₿"}
+
+
+def rupiah(n) -> str:
+    return "Rp " + f"{int(n):,}".replace(",", ".")
+
+
+async def send_qris(target, p, lang: str) -> None:
+    """A QRIS payment: the QR as a picture, the rupiah to pay and the dollars it adds."""
+    d = payments.details(p)
+    until = p.expires_at if p.expires_at is None or p.expires_at.tzinfo else p.expires_at.replace(tzinfo=dt.timezone.utc)
+    left = int((until - dt.datetime.now(dt.timezone.utc)).total_seconds() // 60) if until else payments.INVOICE_MINUTES
+    kb = InlineKeyboardBuilder()
+    kb.button(text=t(lang, "btn_pay_check"), callback_data=Pay(a="chk", id=p.id))
+    kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+    kb.adjust(1)
+    msg = target.message if isinstance(target, CallbackQuery) else target
+    await msg.answer_photo(BufferedInputFile(payments.qr_png(d.get("qr", "")), filename="qris.png"),
+                           caption=t(lang, "pay_qris", idr=rupiah(d.get("idr", 0)), amount=money(p.amount),
+                                     minutes=max(1, left)), reply_markup=kb.as_markup())
 
 
 def address_screen(p, lang: str):
@@ -443,7 +463,7 @@ async def pay_amount_screen(reseller: Reseller, member: Member, lang: str):
         kb.button(text=t(lang, "btn_pay_now", amount=money(open_[0].amount)), url=open_[0].pay_url)
         kb.button(text=t(lang, "btn_pay_check"), callback_data=Pay(a="chk", id=open_[0].id))
         sizes += [1, 1]
-    elif open_ and payments.details(open_[0]).get("address"):
+    elif open_ and (payments.details(open_[0]).get("address") or payments.details(open_[0]).get("qr")):
         # A built-in payment has an address instead of a link: one tap shows it again.
         text += "\n\n" + t(lang, "pay_open_hint_address", amount=money(open_[0].amount))
         kb.button(text=t(lang, "btn_pay_show", amount=money(open_[0].amount)), callback_data=Pay(a="show", id=open_[0].id))
@@ -732,7 +752,10 @@ def build_router(reseller_id: int) -> Router:
             kb.button(text=t(lang, "btn_pay_oxapay"), callback_data=Pay(a="via", g="ox", c=cents))
         if payments.CRYPTOBOT in gates:
             kb.button(text=t(lang, "btn_pay_cryptobot"), callback_data=Pay(a="via", g="cb", c=cents))
-        sizes = [1] * sum(1 for g in (payments.OXAPAY, payments.CRYPTOBOT) if g in gates)
+        qris = payments.KASERA in gates and payments.kasera_fits(reseller, amount)
+        if qris:
+            kb.button(text=t(lang, "btn_pay_qris"), callback_data=Pay(a="via", g="kq", c=cents))
+        sizes = [1] * (sum(1 for g in (payments.OXAPAY, payments.CRYPTOBOT) if g in gates) + (1 if qris else 0))
         if payments.NUMBERHUB in gates:
             # Every coin the shop can take, three to a row; the network comes next.
             names = payments.coins(await payments.methods(reseller), amount)     # only coins that take this amount
@@ -788,6 +811,9 @@ def build_router(reseller_id: int) -> Router:
         if provider == payments.NUMBERHUB:
             await _show(target, *address_screen(p, lang))
             return
+        if provider == payments.KASERA:
+            await send_qris(target, p, lang)
+            return
         kb = InlineKeyboardBuilder()
         kb.button(text=t(lang, "btn_pay_now", amount=money(p.amount)), url=p.pay_url)
         kb.button(text=t(lang, "btn_pay_check"), callback_data=Pay(a="chk", id=p.id))
@@ -823,10 +849,14 @@ def build_router(reseller_id: int) -> Router:
                 return
             still = p.expires_at is None or (p.expires_at if p.expires_at.tzinfo
                                              else p.expires_at.replace(tzinfo=dt.timezone.utc)) > dt.datetime.now(dt.timezone.utc)
-            if p.status != p.PENDING or not still or not payments.details(p).get("address"):
+            shown = payments.details(p)
+            if p.status != p.PENDING or not still or not (shown.get("address") or shown.get("qr")):
                 await c.answer(t(lang, "pay_already" if p.status == p.PAID else "pay_expired"), show_alert=True)
                 return
-            await _show(c, *address_screen(p, lang))
+            if shown.get("qr"):
+                await send_qris(c, p, lang)
+            else:
+                await _show(c, *address_screen(p, lang))
         elif a == "chk":
             p = await repo.get_payment(callback_data.id)
             if p is None or p.member_id != member.id:

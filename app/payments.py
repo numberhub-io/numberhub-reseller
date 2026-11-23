@@ -38,9 +38,10 @@ log = logging.getLogger(__name__)
 OXAPAY = "oxapay"
 CRYPTOBOT = "cryptobot"
 NUMBERHUB = "numberhub"
+KASERA = "kasera"
 # The gateways an owner connects with a key of their own.
-PROVIDERS = (OXAPAY, CRYPTOBOT)
-LABEL = {OXAPAY: "OxaPay", CRYPTOBOT: "@CryptoBot", NUMBERHUB: "Built-in crypto"}
+PROVIDERS = (OXAPAY, CRYPTOBOT, KASERA)
+LABEL = {OXAPAY: "OxaPay", CRYPTOBOT: "@CryptoBot", NUMBERHUB: "Built-in crypto", KASERA: "KaseraPay (QRIS)"}
 # Built-in payments: the coins and networks a customer can pay in. NumberHub lists
 # them (GET /topups/methods: every coin its account takes to a plain address); these
 # two are what an API without that list offers, and the fallback when it can't be read.
@@ -277,13 +278,127 @@ class CryptoBot:
         return str(me.get("name") or "Crypto Pay app")
 
 
+class Kasera:
+    """KaseraPay, Indonesia (pay.kasera.id/docs/api): POST /v1/transactions with
+    payment_methods ["qris"] answers the QRIS code as text (the bot draws it);
+    GET /v1/transactions/{id} its status; header Authorization: Bearer <key>.
+    Amounts are whole rupiah. A kp_test_ key makes test payments: they are reported
+    as working and never add balance."""
+    BASE = "https://pay.kasera.id/v1"
+    MIN_IDR, MAX_IDR = 1000, 1_000_000     # above 1,000,000 the gateway wants buyer and delivery details
+
+    def __init__(self, key: str):
+        self.key = key
+
+    @property
+    def test(self) -> bool:
+        return self.key.startswith("kp_test_")
+
+    async def _call(self, method: str, path: str, body: dict | None = None, idem: str | None = None) -> tuple[int, dict]:
+        headers = {"Authorization": f"Bearer {self.key}", "Accept": "application/json"}
+        if idem:
+            headers["Idempotency-Key"] = idem
+        async with _http() as c:
+            try:
+                r = await c.request(method, f"{self.BASE}{path}", json=body, headers=headers)
+            except httpx.HTTPError as exc:
+                raise PayError(f"KaseraPay could not be reached ({type(exc).__name__})") from exc
+        try:
+            data = r.json()
+        except ValueError:
+            data = {}
+        data = data if isinstance(data, dict) else {}
+        return r.status_code, (data["data"] if isinstance(data.get("data"), dict) else data)
+
+    @staticmethod
+    def _why(status: int, data: dict) -> str:
+        err = data.get("error")
+        msg = (err.get("message") or err.get("code")) if isinstance(err, dict) else (err or data.get("message"))
+        return f"KaseraPay: {msg}" if msg else f"KaseraPay answered HTTP {status}"
+
+    async def verify(self) -> str:
+        """Looks up a payment that does not exist: "not found" proves the key is
+        accepted, without using up one of the few payments an unverified account has."""
+        status, data = await self._call("GET", "/transactions/payreq_keycheck")
+        if status in (401, 403):
+            raise PayError("KaseraPay rejected this key")
+        if status >= 400 and status != 404:
+            raise PayError(self._why(status, data))
+        return "KaseraPay account" + (", TEST mode: payments add no balance" if self.test else "")
+
+    async def create_qris(self, idr: int, ref: str, description: str) -> tuple[str, str, dt.datetime]:
+        status, d = await self._call("POST", "/transactions", {
+            "amount": int(idr), "payment_methods": ["qris"], "merchant_ref": ref[:64], "external_id": ref[:64],
+            "description": description[:255], "expires_in_minutes": INVOICE_MINUTES}, idem=ref)
+        if status >= 400:
+            raise PayError(self._why(status, d))
+        qr = str(((d.get("payment") or {}) if isinstance(d.get("payment"), dict) else {}).get("qr_string") or "")
+        if not d.get("id") or not qr:
+            raise PayError("KaseraPay gave no QRIS code")
+        if int(d.get("amount") or 0) != int(idr):
+            raise PayError("KaseraPay answered with another amount than was asked")
+        until = _parse_iso(d.get("expires_at")) or _now() + dt.timedelta(minutes=INVOICE_MINUTES)
+        return str(d["id"]), qr, until
+
+    async def state(self, invoice_id: str) -> tuple[str, int, bool]:
+        """(paid | pending | expired, the rupiah it reports, a real payment or a test one)."""
+        status, d = await self._call("GET", f"/transactions/{invoice_id}")
+        if status >= 400:
+            raise PayError(self._why(status, d))
+        s = str(d.get("status") or "").lower()
+        state = "paid" if s == "succeeded" else "expired" if s in ("expired", "canceled", "failed") else "pending"
+        return state, int(d.get("amount") or 0), bool(d.get("livemode"))
+
+    async def status(self, invoice_id: str) -> str:
+        return (await self.state(invoice_id))[0]
+
+
 def client_for(provider: str, secret: str):
-    return OxaPay(secret) if provider == OXAPAY else CryptoBot(secret)
+    return {OXAPAY: OxaPay, CRYPTOBOT: CryptoBot, KASERA: Kasera}[provider](secret)
+
+
+def qr_png(text: str) -> bytes:
+    """The picture of a QR code (a QRIS payload) for a Telegram photo."""
+    import io as _io
+
+    import segno
+    buf = _io.BytesIO()
+    segno.make(text, error="m").save(buf, kind="png", scale=8, border=3)
+    return buf.getvalue()
+
+
+def kasera_rate(reseller: Reseller) -> Decimal | None:
+    """Rupiah for one dollar in this shop, as its owner set it."""
+    rate = getattr(reseller, "kasera_rate", None)
+    return Decimal(rate) if rate is not None and Decimal(rate) > 0 else None
+
+
+def kasera_limits(reseller: Reseller) -> tuple[Decimal, Decimal] | None:
+    """The smallest and largest dollar amount one QRIS payment can be at this shop's rate."""
+    rate = kasera_rate(reseller)
+    if rate is None:
+        return None
+    cent = Decimal("0.01")
+    low = (Decimal(Kasera.MIN_IDR) / rate).quantize(cent, rounding="ROUND_UP")
+    high = (Decimal(Kasera.MAX_IDR) / rate).quantize(cent, rounding="ROUND_DOWN")
+    return max(low, cent), high
+
+
+def kasera_fits(reseller: Reseller, amount: Decimal) -> bool:
+    lim = kasera_limits(reseller)
+    return lim is not None and lim[0] <= amount <= lim[1]
 
 
 # ─── what a shop has connected ───────────────────────────────────────────────
+_ENC_FIELD = {OXAPAY: "oxapay_key_enc", CRYPTOBOT: "cryptobot_token_enc", KASERA: "kasera_key_enc"}
+
+
 def _enc_field(provider: str) -> str:
-    return "oxapay_key_enc" if provider == OXAPAY else "cryptobot_token_enc"
+    return _ENC_FIELD[provider]
+
+
+def has_key(reseller: Reseller, provider: str) -> bool:
+    return bool(getattr(reseller, _enc_field(provider), None))
 
 
 def builtin_on(reseller: Reseller) -> bool:
@@ -294,8 +409,8 @@ def builtin_on(reseller: Reseller) -> bool:
 
 
 def own(reseller: Reseller) -> list[str]:
-    """The owner's own gateways that are connected."""
-    return [p for p in PROVIDERS if getattr(reseller, _enc_field(p), None)]
+    """The owner's own gateways that can take a payment (KaseraPay also needs its rupiah rate)."""
+    return [p for p in PROVIDERS if has_key(reseller, p) and (p != KASERA or kasera_rate(reseller) is not None)]
 
 
 def connected(reseller: Reseller) -> list[str]:
@@ -506,6 +621,33 @@ async def _builtin_state(reseller: Reseller, payment: Payment) -> tuple[str, Dec
     return "pending", None
 
 
+async def _open_kasera(reseller: Reseller, member_id: int, amount: Decimal) -> Payment:
+    """A QRIS payment in rupiah for a dollar amount, at the shop's own rate. The
+    dollars the customer gets are fixed now; the rupiah are what the QR asks for."""
+    key, rate = secret(reseller, KASERA), kasera_rate(reseller)
+    if not key or rate is None:
+        raise PayError("KaseraPay is not connected, or its rupiah rate is not set")
+    if not kasera_fits(reseller, amount):
+        low, high = kasera_limits(reseller)
+        raise PayError(f"one QRIS payment can be from ${low} to ${high} at your rate")
+    idr = int((amount * rate).to_integral_value(rounding="ROUND_UP"))
+    row = await repo.create_payment(reseller.id, member_id, KASERA, amount)
+    ref = f"s{reseller.id}-p{row.id}"
+    client = Kasera(key)
+    title = reseller.bot_title or reseller.bot_username or "shop"
+    try:
+        invoice_id, qr, until = await client.create_qris(idr, ref, f"Balance top-up {title}")
+    except PayError:
+        await repo.close_payment(row.id, Payment.FAILED)
+        raise
+    except Exception as exc:  # noqa: BLE001
+        await repo.close_payment(row.id, Payment.FAILED)
+        raise PayError("KaseraPay did not answer") from exc
+    await repo.attach_invoice(row.id, invoice_id, None, until, details=json.dumps(
+        {"qr": qr, "idr": idr, "rate": str(rate), "test": client.test}))
+    return await repo.get_payment(row.id)
+
+
 async def open_link(reseller: Reseller, member_id: int, provider: str, amount: Decimal,
                     method: str | None = None) -> Payment:
     """Create the payment row, then the gateway's invoice (or, built in, the
@@ -514,6 +656,8 @@ async def open_link(reseller: Reseller, member_id: int, provider: str, amount: D
         if not builtin_on(reseller):
             raise PayError("built-in payments are off")
         return await _open_builtin(reseller, member_id, amount, method)
+    if provider == KASERA:
+        return await _open_kasera(reseller, member_id, amount)
     key = secret(reseller, provider)
     if not key:
         raise PayError(f"{LABEL[provider]} is not connected")
@@ -565,7 +709,21 @@ async def check(payment: Payment, reseller: Reseller | None = None, bot=None) ->
                 return "expired"
             return "unknown"
         try:
-            state = await client_for(payment.provider, key).status(payment.invoice_id)
+            if payment.provider == KASERA:
+                state, idr, live = await Kasera(key).state(payment.invoice_id)
+                shown = details(payment)
+                if state == "paid" and idr != int(shown.get("idr") or -1):
+                    log.error("reseller %s: payment %s paid with another amount (%s)", reseller.id, payment.id, idr)
+                    return "unknown"
+                if state == "paid" and (shown.get("test") or not live):
+                    # A test key's payment: the flow works, and no balance is added.
+                    if await repo.close_payment(payment.id, Payment.EXPIRED):
+                        await _announce_test(bot, reseller, payment)
+                    return "test"
+                if state == "expired" and not late:
+                    return "pending"        # KaseraPay can still turn an expired payment paid
+            else:
+                state = await client_for(payment.provider, key).status(payment.invoice_id)
         except PayError as exc:
             log.warning("reseller %s: payment %s check failed: %s", reseller.id, payment.id, exc)
             return "unknown"
@@ -702,6 +860,21 @@ async def _announce_paid(bot, reseller: Reseller, p: Payment) -> None:
                f"💰 <b>Payment received:</b> +{money(p.credited)} from {who} via {LABEL[p.provider]}.\n"
                f"The money is in your {LABEL[p.provider]} balance; their shop balance is now "
                f"<b>{money(member.available)}</b>.")
+
+
+async def _announce_test(bot, reseller: Reseller, p: Payment) -> None:
+    from app.selling import send
+    from app.texts import money
+    bot = _bot(reseller.id, bot)
+    member = await repo.get_member(p.member_id)
+    if bot is None or member is None:
+        return
+    note = (f"✅ <b>Test payment worked</b> ({money(p.amount)} by QRIS, KaseraPay test mode). No balance was "
+            "added: connect your live key in ⚙️ Admin panel → 💳 Payments to take real payments.")
+    await send(bot, reseller.owner_id, note)
+    if member.telegram_id != reseller.owner_id:
+        await send(bot, member.telegram_id, "✅ Test payment received. This shop's QRIS is in test mode, so no "
+                                            "balance was added.")
 
 
 async def _announce_manual(bot, reseller: Reseller, p: Payment) -> None:
