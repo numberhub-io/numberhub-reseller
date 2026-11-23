@@ -1421,7 +1421,8 @@ async def test_builtin_payments():
     mk = session.last_markup()
     offered = [b.text.split()[-1] for row in mk.inline_keyboard for b in row][:-1]
     check("the customer picks a coin: every coin the shop can take, the most used first",
-          offered == ["USDT", "BTC", "ETH", "LTC", "USDC"] and "how do you want to pay" in session.last_text(), str(offered))
+          offered == ["USDT", "ETH", "LTC", "USDC"] and "how do you want to pay" in session.last_text(), str(offered))
+    check("…Bitcoin is not offered for $10: it cannot take less than $25", button(session, "BTC") is None)
     await dp.feed_update(bot, tap(cust, button(session, "USDT")))
     check("…then the network, when the coin has more than one", button(session, "BEP20") is not None
           and button(session, "TRC20") is not None and button(session, "BTC") is None)
@@ -1556,18 +1557,21 @@ async def test_builtin_payments():
     # ── another coin: Bitcoin has one network, so the address comes straight away ──
     mem4 = await repo.get_or_create_member(r.id, 9604, None, None)
     await to_amounts(9604)
-    await dp.feed_update(bot, tap(9604, button(session, "$20.00")))
+    await dp.feed_update(bot, tap(9604, button(session, "$50.00")))
+    check("for $50 Bitcoin is offered too", button(session, "BTC") is not None)
     await dp.feed_update(bot, tap(9604, button(session, "BTC")))
     pbtc = (await repo.open_payments(mem4.id))[0]
     tbtc = api.topups[int(pbtc.invoice_id)]
     text = session.last_text()
     check("Bitcoin: the address and the exact amount in BTC, no network question",
           "<code>0.00031</code> BTC on <b>Bitcoin</b>" in text and tbtc["address"] in text and tbtc["method"] == "btc"
-          and payments.details(pbtc)["pay_currency"] == "BTC" and "Pay $20.00" in text, text[:260])
+          and payments.details(pbtc)["pay_currency"] == "BTC" and "Pay $50.00" in text, text[:260])
+    check("…and a Bitcoin payment under its minimum is refused even if a button is forged",
+          "least for this coin" in await refused(payments.open_link(r, mem4.id, payments.NUMBERHUB, D("5"), "btc")))
     api.pay_topup(int(pbtc.invoice_id))
     await payments.poll_all()
-    check("…paid in full: the customer gets the 20.00 dollars, the owner is told it came in BTC",
-          (await repo.get_member(mem4.id)).balance == D("20.00") and any("in BTC" in x for x in to(OWNER)))
+    check("…paid in full: the customer gets the 50.00 dollars, the owner is told it came in BTC",
+          (await repo.get_member(mem4.id)).balance == D("50.00") and any("in BTC" in x for x in to(OWNER)))
     await to_amounts(9604)
     await dp.feed_update(bot, tap(9604, button(session, "$5.00")))
     await dp.feed_update(bot, tap(9604, button(session, "ETH")))
@@ -1635,7 +1639,7 @@ async def test_builtin_payments():
           "no longer covers" in why, why)
     cover = await payments.backing(r)
     check("…the cover is the wallet against what customers paid in and still hold",
-          cover is not None and cover[0] == api.wallet and cover[1] == D("59.00"), str(cover))
+          cover is not None and cover[0] == api.wallet and cover[1] == D("89.00"), str(cover))
     check("…and payments work again once the wallet covers it",
           not await refused(payments.open_link(r, mem2.id, payments.NUMBERHUB, D("5"), "usdt_tron")))
 

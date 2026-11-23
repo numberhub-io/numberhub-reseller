@@ -200,7 +200,8 @@ class FakeNumberHub:
             return self._open_topup(request)
         if request.method == "GET" and path == "/topups/methods" and self.has_methods_list:
             return self._json(200, {"methods": [
-                {"id": mid, "coin": coin, "network": net, "network_short": short, "partial_credit": coin in ("USDT", "USDC")}
+                {"id": mid, "coin": coin, "network": net, "network_short": short, "partial_credit": coin in ("USDT", "USDC"),
+                 "min_amount": "25.00" if mid == "btc" else "1.00"}
                 for mid, (net, short, coin) in self.NETWORKS.items()]})
         if request.method == "GET" and path.startswith("/topups/"):
             tid = path.split("/")[2]

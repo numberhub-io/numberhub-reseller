@@ -735,7 +735,7 @@ def build_router(reseller_id: int) -> Router:
         sizes = [1] * sum(1 for g in (payments.OXAPAY, payments.CRYPTOBOT) if g in gates)
         if payments.NUMBERHUB in gates:
             # Every coin the shop can take, three to a row; the network comes next.
-            names = payments.coins(await payments.methods(reseller))
+            names = payments.coins(await payments.methods(reseller), amount)     # only coins that take this amount
             for coin in names:
                 kb.button(text=f"{COIN_ICON.get(coin, '🪙')} {coin}", callback_data=Pay(a="coin", g=coin, c=cents))
             sizes += [3] * (len(names) // 3) + ([len(names) % 3] if len(names) % 3 else [])
@@ -745,7 +745,7 @@ def build_router(reseller_id: int) -> Router:
 
     async def _pick_network(target, reseller: Reseller, member: Member, lang: str, coin: str, amount: Decimal):
         """A coin was chosen: straight to the address when it has one network, else the networks."""
-        table = await payments.methods(reseller)
+        table = payments.for_amount(await payments.methods(reseller), amount)
         nets = [(mid, m) for mid, m in table.items() if m["coin"] == coin]
         if payments.NUMBERHUB not in payments.connected(reseller) or not nets:
             await _show(target, *await pay_amount_screen(reseller, member, lang))

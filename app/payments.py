@@ -45,8 +45,10 @@ LABEL = {OXAPAY: "OxaPay", CRYPTOBOT: "@CryptoBot", NUMBERHUB: "Built-in crypto"
 # them (GET /topups/methods: every coin its account takes to a plain address); these
 # two are what an API without that list offers, and the fallback when it can't be read.
 METHODS = {
-    "usdt_bsc": {"coin": "USDT", "short": "BEP20", "network": "BNB Smart Chain (BEP20)", "partial": True},
-    "usdt_tron": {"coin": "USDT", "short": "TRC20", "network": "Tron (TRC20)", "partial": True},
+    "usdt_bsc": {"coin": "USDT", "short": "BEP20", "network": "BNB Smart Chain (BEP20)", "partial": True,
+                 "min": Decimal("0")},
+    "usdt_tron": {"coin": "USDT", "short": "TRC20", "network": "Tron (TRC20)", "partial": True,
+                  "min": Decimal("0")},
 }
 # The order coins are offered in: what customers pay with most, first.
 COIN_ORDER = ("USDT", "BTC", "ETH", "LTC", "TRX", "BNB", "SOL", "USDC", "DOGE", "POL", "BCH", "XMR", "DAI", "SHIB")
@@ -68,7 +70,9 @@ async def methods(reseller: Reseller) -> dict[str, dict]:
         try:
             for m in await client.topup_methods():
                 found[str(m["id"])] = {"coin": str(m["coin"]).upper(), "short": str(m.get("network_short") or ""),
-                                       "network": str(m.get("network") or ""), "partial": bool(m.get("partial_credit"))}
+                                       "network": str(m.get("network") or ""), "partial": bool(m.get("partial_credit")),
+                                       # A coin's own minimum (Bitcoin cannot take a few dollars).
+                                       "min": dec(m.get("min_amount"))}
         except NumberHubError as exc:
             # 404 = an API from before the list existed: the two USDT networks. Any
             # other trouble: the same two for now, and ask again soon.
@@ -80,9 +84,17 @@ async def methods(reseller: Reseller) -> dict[str, dict]:
     return found
 
 
-def coins(table: dict[str, dict]) -> list[str]:
-    """The coins of a method table, most used first, unknown ones after in A to Z."""
-    have = {m["coin"] for m in table.values()}
+def for_amount(table: dict[str, dict], amount: Decimal | None) -> dict[str, dict]:
+    """The methods that can take this amount (every method when no amount is given)."""
+    if amount is None:
+        return table
+    return {mid: m for mid, m in table.items() if m.get("min", Decimal("0")) <= amount}
+
+
+def coins(table: dict[str, dict], amount: Decimal | None = None) -> list[str]:
+    """The coins of a method table that can take `amount`, most used first, unknown
+    ones after in A to Z."""
+    have = {m["coin"] for m in for_amount(table, amount).values()}
     return [c for c in COIN_ORDER if c in have] + sorted(have - set(COIN_ORDER))
 INVOICE_MINUTES = 60
 # A link is still checked this long after it expired: a payment sent just before
@@ -386,6 +398,8 @@ async def _open_builtin(reseller: Reseller, member_id: int, amount: Decimal, met
     table = await methods(reseller)
     if method not in table:
         raise PayError("unknown network")
+    if amount < table[method].get("min", Decimal("0")):
+        raise PayError(f"the least for this coin is ${table[method]['min']:.2f}")
     if reseller.status != Reseller.ACTIVE:
         # A paused, suspended or disconnected shop sells nothing: it must not take
         # a customer's money either.
