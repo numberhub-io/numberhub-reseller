@@ -1779,14 +1779,12 @@ async def test_kasera_qris():
     """A shop owner in Indonesia asked for it (support chat, 2026-11-23): customers pay
     by QRIS through the owner's own KaseraPay account and are credited by themselves."""
     print("QRIS through the owner's own KaseraPay account")
-    import datetime as dtm
     from aiogram.methods import SendMessage, SendPhoto
     from app import payments
     from app.bots.callbacks import Pay
     from app.bots.reseller import build_router
     from app.models import Payment
     from fakes import FakeGateways
-    from sqlalchemy import update
     gw = FakeGateways()
     payments.TRANSPORT = gw.transport()
     api = FakeNumberHub()
