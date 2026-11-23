@@ -1361,7 +1361,6 @@ async def test_builtin_payments():
     NumberHub wallet and the same amount on the customer's balance, exactly once."""
     print("built-in USDT payments (into the shop's NumberHub wallet)")
     import json
-    import re
     from aiogram.methods import SendMessage
     from app import payments
     from app.bots.callbacks import Pay
@@ -1371,6 +1370,7 @@ async def test_builtin_payments():
     from fakes import FakeGateways
     from sqlalchemy import func, select, update
     payments.TRANSPORT = FakeGateways().transport()     # leftovers of other tests never reach a real gateway
+    payments.ASK_EVERY_FRESH = payments.ASK_EVERY_OLD = payments.ASK_EVERY_LATE = 0.0   # no waiting between asks here
     api = FakeNumberHub(wallet="0.00")
     r = await make_reseller(api, bot_id=86099)
     session = FakeSession()
@@ -1426,11 +1426,11 @@ async def test_builtin_payments():
     text = session.last_text()
     check("an address, the exact USDT, the network and the time; no link",
           top["address"] in text and "10.20" in text and "BNB Smart Chain (BEP20)" in text
-          and re.search(r"Valid for (59|60) minutes", text) and "is lost" in text
+          and re.search(r"Valid for (179|180) minutes", text) and "is lost" in text
           and url_button(session, "Pay") is None and p1.pay_url is None and p1.provider == payments.NUMBERHUB,
           text[:300])
-    check("the deposit was opened for this customer alone, for an hour",
-          top["reference"] == f"s{r.id}-m{mem.id}-p{p1.id}" and top["lifetime"] == 60
+    check("the deposit was opened for this customer alone, for three hours",
+          top["reference"] == f"s{r.id}-m{mem.id}-p{p1.id}" and top["lifetime"] == 180
           and top["amount"] == D("10.00") and top["method"] == "usdt_bsc")
     check("the customer's Telegram id and name never leave the shop",
           str(cust) not in json.dumps(api.topup_bodies) and "user" not in json.dumps(api.topup_bodies).lower())
@@ -1488,6 +1488,8 @@ async def test_builtin_payments():
     await payments.poll_all()
     check("a payment row pointed at another paid deposit (the owner's own top-up) is never credited",
           (await repo.get_payment(pa.id)).status == Payment.PENDING and (await repo.get_member(mem.id)).balance == D("22.50"))
+    check("a built-in payment is never credited by its asked amount",
+          await repo.credit_payment(pa.id) is None and (await repo.get_payment(pa.id)).status == Payment.PENDING)
     api.topup_supports_reference = False
     why = await refused(payments.open_link(r, mem.id, payments.NUMBERHUB, D("9"), "usdt_bsc"))
     async with repo.session_factory() as s:
@@ -1521,8 +1523,54 @@ async def test_builtin_payments():
     p6 = await payments.open_link(r, mem2.id, payments.NUMBERHUB, D("6"), "usdt_tron")
     api.topups[int(p6.invoice_id)]["status"] = "expired"
     await payments.poll_all()
-    check("a deposit NumberHub reports expired is closed, nothing added",
-          (await repo.get_payment(p6.id)).status == Payment.EXPIRED and (await repo.get_member(mem2.id)).balance == D("5.00"))
+    check("NumberHub says expired while a late confirmation is still possible: kept open, nothing added",
+          (await repo.get_payment(p6.id)).status == Payment.PENDING and (await repo.get_member(mem2.id)).balance == D("5.00"))
+    long_ago = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=7)
+    async with repo.session_factory() as s:
+        await s.execute(update(Payment).where(Payment.id == p6.id).values(expires_at=long_ago))
+        await s.commit()
+    await payments.poll_all()
+    check("…and given up once the grace time is over", (await repo.get_payment(p6.id)).status == Payment.EXPIRED)
+    api.pay_topup(int(p6.invoice_id))            # confirmed late: the shop's wallet got it after all
+    n_late = await payments.sweep_expired(force=True)
+    await payments.sweep_expired(force=True)
+    check("a payment that arrives after it was given up is still added, once",
+          n_late == 1 and (await repo.get_payment(p6.id)).status == Payment.PAID
+          and (await repo.get_member(mem2.id)).balance == D("11.00"), f"{n_late}")
+    p8 = await payments.open_link(r, mem2.id, payments.NUMBERHUB, D("3"), "usdt_bsc")
+    async with repo.session_factory() as s:
+        await s.execute(update(Payment).where(Payment.id == p8.id).values(status=Payment.EXPIRED, expires_at=long_ago))
+        await s.commit()
+    api.pay_topup(int(p8.invoice_id))
+    await dp.feed_update(bot, tap(other, Pay(a="chk", id=p8.id).pack()))
+    check("…and the customer's own 'I've paid' finds it too",
+          (await repo.get_payment(p8.id)).status == Payment.PAID and (await repo.get_member(mem2.id)).balance == D("14.00"))
+
+    # ── taps sent together, quick re-asks, and a wallet that was spent ──
+    mem3 = await repo.get_or_create_member(r.id, 9603, None, None)
+    await dp.feed_update(bot, msg(9603, "/start"))
+    await asyncio.gather(*[dp.feed_update(bot, tap(9603, Pay(a="via", g="nb", c=500 + i).pack())) for i in range(6)])
+    n_open = len(await repo.open_payments(mem3.id))
+    check("six taps at once from one customer: three addresses, not six", n_open == payments.OPEN_PER_MEMBER, str(n_open))
+    pc = (await repo.open_payments(mem3.id))[0]
+    asks = lambda: sum(1 for m_, p_ in api.calls if m_ == "GET" and p_ == f"/topups/{pc.invoice_id}")  # noqa: E731
+    payments.ASK_EVERY_FRESH = 20.0
+    payments._last_ask.clear()
+    n0 = asks()
+    for _ in range(5):
+        await dp.feed_update(bot, tap(9603, Pay(a="chk", id=pc.id).pack()))
+    payments.ASK_EVERY_FRESH = 0.0
+    check("five quick 'I've paid' taps ask NumberHub once", asks() - n0 == 1, str(asks() - n0))
+    kept, api.wallet = api.wallet, D("1.00")
+    why = await refused(payments.open_link(r, mem2.id, payments.NUMBERHUB, D("5"), "usdt_tron"))
+    api.wallet = kept
+    check("a wallet that no longer covers what customers paid in: no new payment addresses, and the reason is the owner's to read",
+          "no longer covers" in why, why)
+    cover = await payments.backing(r)
+    check("…the cover is the wallet against what customers paid in and still hold",
+          cover is not None and cover[0] == api.wallet and cover[1] == D("36.50"), str(cover))
+    check("…and payments work again once the wallet covers it",
+          not await refused(payments.open_link(r, mem2.id, payments.NUMBERHUB, D("5"), "usdt_tron")))
 
     # ── the owner turns it off: an address already given still counts ──
     p7 = await payments.open_link(r, mem2.id, payments.NUMBERHUB, D("4"), "usdt_bsc")
@@ -1535,7 +1583,7 @@ async def test_builtin_payments():
     api.pay_topup(int(p7.invoice_id))
     await payments.poll_all()
     check("…but money sent to an address given before is still added",
-          (await repo.get_member(mem2.id)).balance == D("9.00") and (await repo.get_payment(p7.id)).status == Payment.PAID)
+          (await repo.get_member(mem2.id)).balance == D("18.00") and (await repo.get_payment(p7.id)).status == Payment.PAID)
 
     # ── the platform's default for shops whose owner has not chosen ──
     api2 = FakeNumberHub()
@@ -1549,6 +1597,7 @@ async def test_builtin_payments():
         settings.numberhub_pay_default = False
     check("the platform default applies only while the owner has not chosen", on_by_default and owner_said_no
           and not payments.builtin_on(await repo.get_reseller(r2.id)))
+    payments.ASK_EVERY_FRESH, payments.ASK_EVERY_OLD, payments.ASK_EVERY_LATE = 20.0, 60.0, 3600.0
     payments.TRANSPORT = None
 
 

@@ -625,20 +625,24 @@ async def close_payment(payment_id: int, status: str) -> bool:
         return res.rowcount == 1
 
 
-async def credit_payment(payment_id: int, amount: Decimal | None = None) -> Payment | None:
+async def credit_payment(payment_id: int, amount: Decimal | None = None, late: bool = False) -> Payment | None:
     """pending -> paid AND the member's balance + the amount, in ONE transaction.
     Only from pending, so the poller, the customer's check button and a restart
     racing each other credit it exactly once. None = it was not pending.
 
     `amount` is what really arrived when the gateway says so (a built-in payment
-    is credited what NumberHub added to the shop's wallet); None = the asked amount."""
+    is credited what NumberHub added to the shop's wallet); None = the asked amount.
+    `late` also takes a payment that was given up (expired): it was paid after all."""
     async with session_factory() as s:
         row = await s.get(Payment, payment_id)
         if row is None:
             return None
+        if row.provider == "numberhub" and (amount is None or Decimal(amount) <= 0):
+            return None        # a built-in payment is never credited by its asked amount
         credit = (Decimal(amount).quantize(Decimal("0.01")) if amount is not None and Decimal(amount) > 0
                   else Decimal(row.amount))
-        res = await s.execute(update(Payment).where(Payment.id == payment_id, Payment.status == Payment.PENDING)
+        allowed = [Payment.PENDING, Payment.EXPIRED] if late else [Payment.PENDING]
+        res = await s.execute(update(Payment).where(Payment.id == payment_id, Payment.status.in_(allowed))
                               .values(status=Payment.PAID, credited=credit, paid_at=_now()))
         if res.rowcount != 1:
             await s.rollback()
@@ -672,13 +676,42 @@ async def payments_today(member_id: int) -> int:
 
 
 async def payments_today_shop(reseller_id: int, provider: str) -> int:
-    """How many payments of one kind a whole shop opened in 24 h (the built-in
-    payments' ceiling, payments.PER_DAY_PER_SHOP)."""
+    """How many payment addresses a whole shop opened in 24 h that were not paid
+    (the built-in payments' ceiling, payments.PER_DAY_PER_SHOP). A refused attempt
+    opened nothing and a paid one is a customer, so neither counts."""
     since = _now() - dt.timedelta(hours=24)
     async with session_factory() as s:
         return int(await s.scalar(select(func.count(Payment.id)).where(
             Payment.reseller_id == reseller_id, Payment.provider == provider,
+            Payment.invoice_id.is_not(None), Payment.status != Payment.PAID,
             Payment.created_at >= since)) or 0)
+
+
+async def expired_builtin_payments(provider: str, days: int) -> list[Payment]:
+    """Payments of one kind that were given up in the last `days` (payments.sweep_expired)."""
+    since = _now() - dt.timedelta(days=days)
+    async with session_factory() as s:
+        return list((await s.execute(select(Payment).where(
+            Payment.provider == provider, Payment.status == Payment.EXPIRED,
+            Payment.invoice_id.is_not(None), Payment.created_at >= since)
+            .order_by(Payment.id.desc()).limit(2000))).scalars())
+
+
+async def builtin_unspent(reseller_id: int) -> Decimal:
+    """What a shop's customers paid in with built-in payments and still hold: for
+    each customer the smaller of their balance and everything they ever paid in
+    that way. The shop's NumberHub wallet has to cover it (payments.backing)."""
+    async with session_factory() as s:
+        paid = {mid: Decimal(str(total or 0)) for mid, total in (await s.execute(
+            select(Payment.member_id, func.coalesce(func.sum(Payment.credited), 0)).where(
+                Payment.reseller_id == reseller_id, Payment.provider == "numberhub",
+                Payment.status == Payment.PAID).group_by(Payment.member_id))).all()}
+        if not paid:
+            return Decimal("0.00")
+        rows = (await s.execute(select(Member.id, Member.balance).where(
+            Member.reseller_id == reseller_id, Member.id.in_(list(paid))))).all()
+    total = sum((max(Decimal("0"), min(Decimal(str(bal or 0)), paid[mid])) for mid, bal in rows), Decimal("0"))
+    return total.quantize(Decimal("0.01"))
 
 
 async def pending_payments(limit: int = 500) -> list[Payment]:

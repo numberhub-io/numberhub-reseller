@@ -121,7 +121,7 @@ Your commission is a percentage added on top of NumberHub's price for each count
 
 ⚙️ Admin panel → 💳 Payments → 💵 Turn on built-in USDT. That is the whole setup: no account to open, no key to paste.
 
-A customer taps 💳 Add balance, picks an amount and a network (USDT on BNB Smart Chain, BEP20, or on Tron, TRC20) and gets an address, the exact amount to send and 60 minutes to send it. A few minutes after the network confirms, the money is added to **your NumberHub wallet** and the same amount to the customer's balance in your shop, and both of you get a message. So your customers' payments are the money your shop buys numbers with: you do not have to fund the wallet yourself first. What you earn on each number stays in your NumberHub wallet.
+A customer taps 💳 Add balance, picks an amount and a network (USDT on BNB Smart Chain, BEP20, or on Tron, TRC20) and gets an address, the exact amount to send and 3 hours to send it. A few minutes after the network confirms, the money is added to **your NumberHub wallet** and the same amount to the customer's balance in your shop, and both of you get a message. So your customers' payments are the money your shop buys numbers with: you do not have to fund the wallet yourself first. What you earn on each number stays in your NumberHub wallet.
 
 How it stays safe:
 
@@ -129,7 +129,8 @@ How it stays safe:
 - The customer is credited exactly what reached your wallet. A short payment is credited as what arrived, never as the amount that was asked.
 - A payment is credited once, even when the background check and the customer's 🔄 I've paid: check button race.
 - A customer can have 3 addresses open and open 10 a day; a shop can open 300 a day. A shop that is paused, suspended or disconnected takes no payments.
-- Money sent on another network, or after the 60 minutes, cannot be recovered. The customer is told so on the payment screen.
+- Money sent on another network, or after the 3 hours, cannot be recovered. The customer is told so on the payment screen. A payment that was sent in time and confirmed late is still added: a payment that was given up is looked at again for 3 days.
+- Your customers' money is what your shop buys their numbers with. If your NumberHub wallet falls below what your customers paid in and have not spent yet, the shop stops giving out payment addresses and tells you, until the wallet covers it again.
 - Turning it off stops new addresses at once. An address a customer already has still works until it runs out, and a payment to it is still added.
 
 You can use it together with your own gateway and with manual deposits; the customer then picks how to pay. An operator can make it the default for shops whose owner has not chosen (`NUMBERHUB_PAY_DEFAULT`).

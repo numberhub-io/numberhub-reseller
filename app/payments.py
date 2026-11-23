@@ -31,7 +31,7 @@ import httpx
 from app import crypto, repo
 from app.config import settings
 from app.models import Payment, Reseller
-from app.numberhub import NumberHubError, TransportError
+from app.numberhub import NumberHubError, TransportError, dec
 
 log = logging.getLogger(__name__)
 
@@ -53,7 +53,35 @@ INVOICE_MINUTES = 60
 LATE_GRACE = dt.timedelta(hours=6)
 OPEN_PER_MEMBER = 3          # unpaid links one customer may have at once
 PER_DAY_PER_MEMBER = 10      # links one customer may open in 24 h
-PER_DAY_PER_SHOP = 300       # built-in payment addresses one shop may open in 24 h
+PER_DAY_PER_SHOP = 300       # built-in payment addresses left unpaid that one shop may open in 24 h
+# A built-in address lives 3 hours, not 60 minutes: a withdrawal from an exchange can
+# take most of an hour, and money that reaches an address after it ended is lost (the
+# gateway hands the address to someone else later).
+BUILTIN_MINUTES = 180
+# How often NumberHub is asked about one built-in payment (the customer's "I've paid"
+# button and the poller together). Every ask uses the shop's own API key, whose
+# request budget is also what its purchases run on.
+ASK_EVERY_FRESH = 20.0       # seconds, in a payment's first 20 minutes
+ASK_EVERY_OLD = 60.0         # after that, while it is open
+ASK_EVERY_LATE = 3600.0      # once it was given up (a late payment is still credited)
+LATE_CREDIT_DAYS = 3         # how long a given-up built-in payment is still looked at
+_last_ask: dict[int, float] = {}
+_member_locks: dict[int, asyncio.Lock] = {}
+_last_sweep = 0.0
+
+
+def member_lock(member_id: int) -> asyncio.Lock:
+    """One payment is opened at a time per customer, so taps sent together cannot
+    each see room under the limits."""
+    return _member_locks.setdefault(member_id, asyncio.Lock())
+
+
+def _ask_due(payment_id: int, every: float) -> bool:
+    now = time.monotonic()
+    if now - _last_ask.get(payment_id, -1e9) < every:
+        return False
+    _last_ask[payment_id] = now
+    return True
 MAX_AMOUNT = Decimal("1000")
 PRESETS = (Decimal("5"), Decimal("10"), Decimal("20"), Decimal("50"))
 # Tests swap in an httpx.MockTransport here.
@@ -331,10 +359,21 @@ async def _open_builtin(reseller: Reseller, member_id: int, amount: Decimal, met
         # Each address is a live deposit at the gateway: a script with many Telegram
         # accounts must not be able to open them without end.
         raise PayError("this shop opened too many payment addresses today")
+    cover = await backing(reseller)
+    if cover is None:
+        raise PayError("NumberHub could not be reached")
+    wallet, owed = cover
+    if wallet + Decimal("0.01") < owed:
+        # The customers' money is what the shop buys their numbers with. If the wallet
+        # was spent on something else, no more customers are asked to pay into it.
+        log.error("reseller %s: wallet %s no longer covers customers' built-in balances %s: no new payments",
+                  reseller.id, wallet, owed)
+        raise PayError(f"your NumberHub wallet (${wallet:.2f}) no longer covers what your customers paid in "
+                       f"and have not spent yet (${owed:.2f}). Top it up to take payments again")
     row = await repo.create_payment(reseller.id, member_id, NUMBERHUB, amount)
     ref = builtin_reference(row)
     try:
-        top = await client.open_topup(amount, method, ref, INVOICE_MINUTES)
+        top = await client.open_topup(amount, method, ref, BUILTIN_MINUTES)
     except NumberHubError as exc:
         await repo.close_payment(row.id, Payment.FAILED)
         raise PayError(_builtin_refusal(exc)) from exc
@@ -349,13 +388,27 @@ async def _open_builtin(reseller: Reseller, member_id: int, amount: Decimal, met
         log.error("reseller %s: deposit for payment %s came back without its reference or address",
                   reseller.id, row.id)
         raise PayError("this NumberHub API does not take per-customer deposits yet")
-    until = _parse_iso(top.get("expires_at")) or _now() + dt.timedelta(minutes=INVOICE_MINUTES)
+    until = _parse_iso(top.get("expires_at")) or _now() + dt.timedelta(minutes=BUILTIN_MINUTES)
     shown = {"method": method, "address": address, "pay_amount": pay_amount,
              "pay_currency": str(top.get("pay_currency") or "USDT"),
              "network": str(top.get("network") or METHODS[method]["network"]),
              "network_short": str(top.get("network_short") or METHODS[method]["short"])}
     await repo.attach_invoice(row.id, str(top["id"]), None, until, details=json.dumps(shown))
     return await repo.get_payment(row.id)
+
+
+async def backing(reseller: Reseller) -> tuple[Decimal, Decimal] | None:
+    """(what the shop's NumberHub wallet holds, what its customers paid in with
+    built-in payments and have not spent). None when the wallet can't be read."""
+    from app import selling
+    client = selling.client_for(reseller.id)
+    if client is None:
+        return None
+    try:
+        wallet = dec((await client.balance()).get("balance"))
+    except NumberHubError:
+        return None
+    return wallet, await repo.builtin_unspent(reseller.id)
 
 
 def _parse_iso(value) -> dt.datetime | None:
@@ -436,12 +489,17 @@ async def check(payment: Payment, reseller: Reseller | None = None, bot=None) ->
     if payment.provider == NUMBERHUB:
         # Asked even when the owner has since turned built-in payments off: the
         # customer may already have sent the money to the shop's wallet.
+        age = _now() - _aware(payment.created_at)
+        if not _ask_due(payment.id, ASK_EVERY_FRESH if age < dt.timedelta(minutes=20) else ASK_EVERY_OLD):
+            return "pending"
         state, credit = await _builtin_state(reseller, payment)
+        if state in ("unknown", "expired") and not late:
+            # Not final yet: a transfer sent just before the end is confirmed by the
+            # network afterwards, and NumberHub then turns the deposit paid.
+            return "unknown" if state == "unknown" else "pending"
         if state == "unknown":
-            if late:
-                await repo.close_payment(payment.id, Payment.EXPIRED)
-                return "expired"
-            return "unknown"
+            await repo.close_payment(payment.id, Payment.EXPIRED)
+            return "expired"
     else:
         key = secret(reseller, payment.provider)
         if not key:
@@ -473,6 +531,44 @@ async def check(payment: Payment, reseller: Reseller | None = None, bot=None) ->
         await repo.close_payment(payment.id, Payment.EXPIRED)
         return "expired"
     return "pending"
+
+
+async def check_late(payment: Payment, reseller: Reseller | None = None, bot=None) -> str:
+    """A built-in payment that was given up, asked about once more. If NumberHub
+    credited the shop's wallet after all (a slow network, or the gateway's support
+    releasing a late transfer), the customer gets it too, once."""
+    if payment.status != Payment.EXPIRED or payment.provider != NUMBERHUB or not payment.invoice_id:
+        return payment.status
+    reseller = reseller or await repo.get_reseller(payment.reseller_id)
+    if reseller is None or not _ask_due(payment.id, ASK_EVERY_LATE):
+        return "expired"
+    state, credit = await _builtin_state(reseller, payment)
+    if state != "paid":
+        return "expired"
+    done = await repo.credit_payment(payment.id, credit, late=True)
+    if done is None:
+        fresh = await repo.get_payment(payment.id)
+        return fresh.status if fresh else "expired"
+    log.warning("reseller %s: payment %s was paid after it was given up: credited %s", reseller.id, payment.id, credit)
+    await _announce_paid(bot, reseller, done)
+    return "paid"
+
+
+async def sweep_expired(force: bool = False) -> int:
+    """Every 10 minutes: the built-in payments given up in the last days, in case
+    one was paid late. Returns how many were credited."""
+    global _last_sweep
+    if not force and time.monotonic() - _last_sweep < 600:
+        return 0
+    _last_sweep = time.monotonic()
+    credited = 0
+    for row in await repo.expired_builtin_payments(NUMBERHUB, LATE_CREDIT_DAYS):
+        try:
+            if await check_late(row) == "paid":
+                credited += 1
+        except Exception:  # noqa: BLE001
+            log.exception("late check of payment %s crashed", row.id)
+    return credited
 
 
 def _aware(v: dt.datetime) -> dt.datetime:
@@ -541,4 +637,4 @@ async def poll_all(parallel: int = 6) -> int:
                 log.exception("payment %s check crashed", p.id)
 
     await asyncio.gather(*(one(p) for p in rows))
-    return credited
+    return credited + await sweep_expired()

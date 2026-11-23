@@ -412,7 +412,7 @@ def address_screen(p, lang: str):
     """A built-in payment: where to send, exactly how much, on which network, until when."""
     d = payments.details(p)
     until = p.expires_at if p.expires_at is None or p.expires_at.tzinfo else p.expires_at.replace(tzinfo=dt.timezone.utc)
-    left = int((until - dt.datetime.now(dt.timezone.utc)).total_seconds() // 60) if until else payments.INVOICE_MINUTES
+    left = int((until - dt.datetime.now(dt.timezone.utc)).total_seconds() // 60) if until else payments.BUILTIN_MINUTES
     kb = InlineKeyboardBuilder()
     kb.button(text=t(lang, "btn_pay_check"), callback_data=Pay(a="chk", id=p.id))
     kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
@@ -739,6 +739,12 @@ def build_router(reseller_id: int) -> Router:
 
     async def _make_link(target, reseller: Reseller, member: Member, lang: str, provider: str, amount: Decimal,
                          method: str | None = None):
+        # One at a time per customer: taps sent together must not each see room under the limits.
+        async with payments.member_lock(member.id):
+            await _make_link_locked(target, reseller, member, lang, provider, amount, method)
+
+    async def _make_link_locked(target, reseller: Reseller, member: Member, lang: str, provider: str,
+                                amount: Decimal, method: str | None = None):
         low, high = pay_limits(reseller)
         if not low <= amount <= high or provider not in payments.connected(reseller):
             await _show(target, *await pay_amount_screen(reseller, member, lang))
@@ -799,7 +805,12 @@ def build_router(reseller_id: int) -> Router:
             if p is None or p.member_id != member.id:
                 await c.answer(t(lang, "toast_stale"), show_alert=True)
                 return
-            state_ = await payments.check(p, reseller, c.bot) if p.status == p.PENDING else "already"
+            if p.status == p.PENDING:
+                state_ = await payments.check(p, reseller, c.bot)
+            elif p.status == p.EXPIRED and p.provider == payments.NUMBERHUB:
+                state_ = await payments.check_late(p, reseller, c.bot)     # paid after it was given up?
+            else:
+                state_ = "already"
             if state_ == "paid":
                 fresh = await repo.get_member(member.id) or member
                 p = await repo.get_payment(p.id)
