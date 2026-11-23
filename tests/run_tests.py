@@ -1546,6 +1546,37 @@ async def test_builtin_payments():
     check("…and the customer's own 'I've paid' finds it too",
           (await repo.get_payment(p8.id)).status == Payment.PAID and (await repo.get_member(mem2.id)).balance == D("14.00"))
 
+    # ── more arrives on a payment that was already credited ──
+    before_more = (await repo.get_member(mem2.id)).balance
+    top8 = api.topups[int(p8.invoice_id)]
+    top8["credited"] += D("2.50")                 # a second transfer to the same address: NumberHub added it
+    api.wallet += D("2.50")
+    fresh8 = await repo.get_payment(p8.id)
+    added = await payments.check_more(fresh8)
+    again = await payments.check_more(await repo.get_payment(p8.id))
+    await payments.sweep_expired(force=True)
+    check("more money on a credited payment reaches the customer too, once",
+          added == D("2.50") and again == 0 and (await repo.get_member(mem2.id)).balance == before_more + D("2.50")
+          and (await repo.get_payment(p8.id)).credited == D("5.50"), f"{added} {again}")
+    check("…the customer and the owner are told", any("+$2.50" in x or "$2.50" in x for x in to(other)[-2:])
+          and any("More arrived" in x for x in to(OWNER)))
+    check("…a stale amount is refused by the step that adds it",
+          await repo.credit_payment_more(p8.id, D("3.00"), D("9.00")) is None)
+
+    # ── a key from another NumberHub account while a customer's payment is recent ──
+    from app.bots import builder as _builder
+    keep_nh = _builder.NumberHub
+    elsewhere = FakeNumberHub(key="nh_live_another_account_0123456789")
+    recent = await repo.recent_builtin_topup(r.id)
+    _builder.NumberHub = lambda key: elsewhere.client(key)
+    _bal, why_key = await _builder._check_key(OWNER, elsewhere.key, None, recent)
+    _builder.NumberHub = lambda key: api.client(key)
+    bal_ok, why_ok = await _builder._check_key(OWNER, api.key, None, recent)
+    _builder.NumberHub = keep_nh
+    check("a key from another NumberHub account is refused while a customer's payment is recent",
+          recent is not None and _bal is None and "different NumberHub account" in (why_key or ""), str(why_key))
+    check("…a key from the same account is accepted", bal_ok is not None and why_ok is None, str(why_ok))
+
     # ── taps sent together, quick re-asks, and a wallet that was spent ──
     mem3 = await repo.get_or_create_member(r.id, 9603, None, None)
     await dp.feed_update(bot, msg(9603, "/start"))
@@ -1568,7 +1599,7 @@ async def test_builtin_payments():
           "no longer covers" in why, why)
     cover = await payments.backing(r)
     check("…the cover is the wallet against what customers paid in and still hold",
-          cover is not None and cover[0] == api.wallet and cover[1] == D("36.50"), str(cover))
+          cover is not None and cover[0] == api.wallet and cover[1] == D("39.00"), str(cover))
     check("…and payments work again once the wallet covers it",
           not await refused(payments.open_link(r, mem2.id, payments.NUMBERHUB, D("5"), "usdt_tron")))
 
@@ -1583,7 +1614,7 @@ async def test_builtin_payments():
     api.pay_topup(int(p7.invoice_id))
     await payments.poll_all()
     check("…but money sent to an address given before is still added",
-          (await repo.get_member(mem2.id)).balance == D("18.00") and (await repo.get_payment(p7.id)).status == Payment.PAID)
+          (await repo.get_member(mem2.id)).balance == D("20.50") and (await repo.get_payment(p7.id)).status == Payment.PAID)
 
     # ── the platform's default for shops whose owner has not chosen ──
     api2 = FakeNumberHub()

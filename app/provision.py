@@ -63,7 +63,7 @@ def _markup(value) -> Decimal | None:
     return v.quantize(Decimal("0.01"))
 
 
-async def _key_problem(key: str, open_nh_id: int | None) -> tuple[dict | None, str | None]:
+async def _key_problem(key: str, open_nh_id: int | None, topup_id: int | None = None) -> tuple[dict | None, str | None]:
     """The same checks as the builder's (wallet, catalog, orders, and the SAME
     account as the shop's open orders), as error codes."""
     cli = NumberHub(key)
@@ -73,13 +73,15 @@ async def _key_problem(key: str, open_nh_id: int | None) -> tuple[dict | None, s
         await cli.orders(limit=1)
         if open_nh_id is not None:
             await cli.number(open_nh_id)
+        if topup_id is not None:
+            await cli.topup(topup_id)      # a customer's recent payment lives on the same account too
         return bal, None
     except NumberHubError as exc:
         if exc.code == "insufficient_scope":
             return None, "key_scope"
         if exc.code == "ip_not_allowed":
             return None, "key_ip"
-        if exc.status == 404 and open_nh_id is not None:
+        if exc.status == 404 and (open_nh_id is not None or topup_id is not None):
             return None, "other_account"
         if exc.status in (401, 403):
             return None, "key_rejected"
@@ -121,7 +123,8 @@ async def create_shop(request: web.Request) -> web.Response:
             return _err("suspended", 409)
         if existing is None and len(await repo.list_resellers(owner_id=owner_id)) >= MAX_BOTS_PER_OWNER:
             return _err("too_many", 409, max=MAX_BOTS_PER_OWNER)
-        bal, problem = await _key_problem(key, await _an_open_order(existing.id) if existing else None)
+        bal, problem = await _key_problem(key, await _an_open_order(existing.id) if existing else None,
+                                          await repo.recent_builtin_topup(existing.id) if existing else None)
         if problem:
             return _err(problem, 502 if problem == "numberhub_unavailable" else 409)
         if existing is not None:

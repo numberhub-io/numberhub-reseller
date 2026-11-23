@@ -554,6 +554,41 @@ async def check_late(payment: Payment, reseller: Reseller | None = None, bot=Non
     return "paid"
 
 
+async def check_more(payment: Payment, reseller: Reseller | None = None, bot=None) -> Decimal:
+    """A built-in payment that was already credited: did more arrive on it? When a
+    customer sends a second transfer to the same address, NumberHub adds it to the
+    shop's wallet and raises the deposit's credited amount. The customer gets the
+    difference here, once. Returns what was added."""
+    zero = Decimal("0")
+    if payment.status != Payment.PAID or payment.provider != NUMBERHUB or not payment.invoice_id:
+        return zero
+    reseller = reseller or await repo.get_reseller(payment.reseller_id)
+    if reseller is None or not _ask_due(payment.id, ASK_EVERY_LATE):
+        return zero
+    state, credit = await _builtin_state(reseller, payment)
+    have = Decimal(payment.credited or 0)
+    if state != "paid" or credit is None or credit - have < Decimal("0.01"):
+        return zero
+    added = await repo.credit_payment_more(payment.id, have, credit)
+    if not added:
+        return zero
+    log.warning("reseller %s: payment %s received more after it was credited: +%s", reseller.id, payment.id, added)
+    from app.i18n import t
+    from app.selling import send
+    from app.texts import esc, money
+    bot = _bot(reseller.id, bot)
+    member = await repo.get_member(payment.member_id)
+    if bot is not None and member is not None:
+        await send(bot, member.telegram_id, t(member.language or "en", "pay_received", amount=money(added),
+                                              balance=money(member.available)))
+        who = f"<code>{member.telegram_id}</code>" + (f" @{esc(member.username)}" if member.username else "")
+        await send(bot, reseller.owner_id,
+                   f"💰 <b>More arrived on a payment:</b> +{money(added)} from {who} in USDT.{chr(10)}"
+                   f"It was added to your NumberHub wallet and to their shop balance, now "
+                   f"<b>{money(member.available)}</b>.")
+    return added
+
+
 async def sweep_expired(force: bool = False) -> int:
     """Every 10 minutes: the built-in payments given up in the last days, in case
     one was paid late. Returns how many were credited."""
@@ -568,6 +603,12 @@ async def sweep_expired(force: bool = False) -> int:
                 credited += 1
         except Exception:  # noqa: BLE001
             log.exception("late check of payment %s crashed", row.id)
+    for row in await repo.paid_builtin_payments(NUMBERHUB, LATE_CREDIT_DAYS):
+        try:
+            if await check_more(row) > 0:
+                credited += 1
+        except Exception:  # noqa: BLE001
+            log.exception("second look at payment %s crashed", row.id)
     return credited
 
 

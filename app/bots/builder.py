@@ -133,10 +133,12 @@ def _count_fail(user_id: int) -> None:
     _all_fails.append(now)
 
 
-async def _check_key(user_id: int, key: str, open_nh_id: int | None = None) -> tuple[dict | None, str | None]:
+async def _check_key(user_id: int, key: str, open_nh_id: int | None = None,
+                     topup_id: int | None = None) -> tuple[dict | None, str | None]:
     """Is this key usable for a shop? Checks every permission the shop needs
     that can be checked without buying (wallet, catalog, orders), and, when the
-    shop has open orders, that the key is on the SAME NumberHub account."""
+    shop has open orders or a recent customer payment, that the key is on the SAME
+    NumberHub account: the order, and the customer's money, live there."""
     if not KEY_RE.match(key):
         return None, "❌ That doesn't look like a NumberHub API key (it starts with <code>nh_</code>)."
     if _rationed(user_id):
@@ -148,6 +150,8 @@ async def _check_key(user_id: int, key: str, open_nh_id: int | None = None) -> t
         await cli.orders(limit=1)
         if open_nh_id is not None:
             await cli.number(open_nh_id)
+        if topup_id is not None:
+            await cli.topup(topup_id)
         return bal, None
     except NumberHubError as exc:
         if exc.status == 401:
@@ -159,10 +163,11 @@ async def _check_key(user_id: int, key: str, open_nh_id: int | None = None) -> t
                           "Create a key with all permissions: catalog, orders and wallet.")
         if exc.code == "ip_not_allowed":
             return None, "❌ This key only works from certain IP addresses. Remove the IP limit or create a new key."
-        if exc.status == 404 and open_nh_id is not None:
-            return None, ("❌ This key is from a different NumberHub account than the bot's open orders. "
-                          "Use a key from the same account, or send it again when those orders have "
-                          "finished (about 20 minutes).")
+        if exc.status == 404 and (open_nh_id is not None or topup_id is not None):
+            return None, ("❌ This key is from a different NumberHub account than the bot's open orders or its "
+                          "customers' recent payments. Use a key from the same account, or send it again when "
+                          "those orders have finished (about 20 minutes) and no customer payment is from the "
+                          "last 3 days.")
         if exc.status == 403:
             _count_fail(user_id)
             return None, "❌ NumberHub rejected this key. Create a new one in your account and try again."
@@ -344,7 +349,7 @@ async def got_key(m: Message, state: FSMContext):
     data = await state.get_data()
     rid = int(data.get("rid") or 0)
     open_nh = await _an_open_order(rid) if rid else None
-    bal, err = await _check_key(m.from_user.id, key, open_nh)
+    bal, err = await _check_key(m.from_user.id, key, open_nh, await repo.recent_builtin_topup(rid) if rid else None)
     if err:
         await m.answer(err, reply_markup=cancel_kb())
         return
@@ -460,7 +465,8 @@ async def got_newkey(m: Message, state: FSMContext):
         await state.clear()
         await m.answer(SUSPENDED_MSG, reply_markup=home_kb())
         return
-    bal, err = await _check_key(m.from_user.id, key, await _an_open_order(reseller.id))
+    bal, err = await _check_key(m.from_user.id, key, await _an_open_order(reseller.id),
+                                await repo.recent_builtin_topup(reseller.id))
     if err:
         await m.answer(err, reply_markup=cancel_kb())
         return

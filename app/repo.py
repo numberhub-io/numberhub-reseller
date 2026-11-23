@@ -697,6 +697,56 @@ async def expired_builtin_payments(provider: str, days: int) -> list[Payment]:
             .order_by(Payment.id.desc()).limit(2000))).scalars())
 
 
+async def paid_builtin_payments(provider: str, days: int) -> list[Payment]:
+    """Payments of one kind that were credited in the last `days` (payments.check_more)."""
+    since = _now() - dt.timedelta(days=days)
+    async with session_factory() as s:
+        return list((await s.execute(select(Payment).where(
+            Payment.provider == provider, Payment.status == Payment.PAID,
+            Payment.invoice_id.is_not(None), Payment.paid_at >= since)
+            .order_by(Payment.id.desc()).limit(2000))).scalars())
+
+
+async def credit_payment_more(payment_id: int, have: Decimal, now: Decimal) -> Decimal | None:
+    """A credited payment received more: raise its credited amount from `have` to
+    `now` AND add the difference to the member's balance, in ONE transaction. Only
+    while the payment still shows `have`, so it can be added once. Returns the
+    difference, or None."""
+    extra = (Decimal(now) - Decimal(have)).quantize(Decimal("0.01"))
+    if extra <= 0:
+        return None
+    async with session_factory() as s:
+        row = await s.get(Payment, payment_id)
+        if row is None:
+            return None
+        res = await s.execute(update(Payment).where(Payment.id == payment_id, Payment.status == Payment.PAID,
+                                                    Payment.credited == have).values(credited=now))
+        if res.rowcount != 1:
+            await s.rollback()
+            return None
+        res = await s.execute(update(Member).where(Member.id == row.member_id, Member.reseller_id == row.reseller_id)
+                              .values(balance=money2(Member.balance + extra)))
+        if res.rowcount != 1:
+            await s.rollback()
+            return None
+        s.add(MemberTx(reseller_id=row.reseller_id, member_id=row.member_id, kind="payment", amount=extra))
+        await s.commit()
+    return extra
+
+
+async def recent_builtin_topup(reseller_id: int, days: int = 3) -> int | None:
+    """The NumberHub deposit id of this shop's newest built-in payment that can
+    still matter (open, or looked at again for `days`): a replacement API key has
+    to be able to read it, i.e. be on the same NumberHub account."""
+    since = _now() - dt.timedelta(days=days)
+    async with session_factory() as s:
+        inv = await s.scalar(select(Payment.invoice_id).where(
+            Payment.reseller_id == reseller_id, Payment.provider == "numberhub",
+            Payment.invoice_id.is_not(None), Payment.created_at >= since)
+            .order_by(Payment.id.desc()).limit(1))
+    return int(inv) if inv and str(inv).isdigit() else None
+
+
 async def builtin_unspent(reseller_id: int) -> Decimal:
     """What a shop's customers paid in with built-in payments and still hold: for
     each customer the smaller of their balance and everything they ever paid in
