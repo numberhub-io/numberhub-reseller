@@ -81,6 +81,22 @@ async def payments_loop() -> None:
         await asyncio.sleep(20)
 
 
+async def reports_loop() -> None:
+    """The owners' morning reports (app/reports.py), looked at every ten minutes."""
+    from app import reports
+    await asyncio.sleep(30)
+    while True:
+        try:
+            await reports.daily_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            if _cancelling():
+                raise
+            log.exception("morning reports failed")
+        await asyncio.sleep(600)
+
+
 async def warm_loop() -> None:
     """The popular apps' "from" prices, refreshed in the background."""
     await asyncio.sleep(3)
@@ -131,7 +147,8 @@ async def main() -> int:
     await runtime.start_all()
     provisioning = await provision.start_server()
     loops = [asyncio.create_task(sync_loop()), asyncio.create_task(sweep_loop()),
-             asyncio.create_task(warm_loop()), asyncio.create_task(payments_loop())]
+             asyncio.create_task(warm_loop()), asyncio.create_task(payments_loop()),
+             asyncio.create_task(reports_loop())]
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):

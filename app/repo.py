@@ -7,7 +7,7 @@ import datetime as dt
 import json
 from decimal import Decimal
 
-from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update, case
 from sqlalchemy.exc import IntegrityError
 
 from app.db import session_factory
@@ -65,7 +65,7 @@ async def list_resellers(status: str | None = None, owner_id: int | None = None)
 async def update_reseller(reseller_id: int, **values) -> None:
     allowed = {"markup_pct", "welcome_text", "support_contact", "status", "bot_username", "bot_title",
                "bot_token_enc", "api_key_enc", "api_key_hint", "max_profit", "deposit_info", "deposit_min",
-               "oxapay_key_enc", "cryptobot_token_enc", "nh_pay"}
+               "oxapay_key_enc", "cryptobot_token_enc", "nh_pay", "daily_report"}
     values = {k: v for k, v in values.items() if k in allowed}
     if values:
         async with session_factory() as s:
@@ -355,12 +355,14 @@ async def set_card(order_id: int, chat_id: int, message_id: int) -> None:
         await s.commit()
 
 
-async def fail_order(order_id: int) -> bool:
-    """The purchase never happened: FAILED, and the member's hold is released."""
+async def fail_order(order_id: int, reason: str | None = None) -> bool:
+    """The purchase never happened: FAILED, and the member's hold is released.
+    `reason` is kept for the owner's statistics (why purchases fail)."""
     async with session_factory() as s:
         claim = await s.execute(update(Order).where(Order.id == order_id, Order.status == Order.BUYING,
                                                     Order.settled == Order.UNSETTLED)
-                                .values(status=Order.FAILED, settled=Order.RELEASED, updated_at=_now()))
+                                .values(status=Order.FAILED, settled=Order.RELEASED, updated_at=_now(),
+                                        fail_reason=(str(reason)[:32] if reason else None)))
         if claim.rowcount != 1:
             await s.rollback()
             return False
@@ -471,6 +473,62 @@ async def stats(reseller_id: int, days: int) -> dict:
                                    .where(Member.reseller_id == reseller_id))).scalar_one()
         return {"orders": int(n), "sales": Decimal(str(sales or 0)).quantize(Decimal("0.01")),
                 "cost": Decimal(str(cost or 0)).quantize(Decimal("0.01")), "members": int(members)}
+
+
+async def shop_report(reseller_id: int, days: int) -> dict:
+    """What the owner's statistics screen and morning report show for one shop."""
+    since = _now() - dt.timedelta(days=days)
+    dec = lambda v: Decimal(str(v or 0)).quantize(Decimal("0.01"))      # noqa: E731
+    mine, recent = Order.reseller_id == reseller_id, Order.created_at >= since
+    charged = Order.settled == Order.CHARGED
+    async with session_factory() as s:
+        outcomes = {st: int(n) for st, n in (await s.execute(
+            select(Order.status, func.count()).where(mine, recent).group_by(Order.status))).all()}
+        reasons = [(str(why or "unknown"), int(n)) for why, n in (await s.execute(
+            select(Order.fail_reason, func.count()).where(mine, recent, Order.status == Order.FAILED)
+            .group_by(Order.fail_reason).order_by(func.count().desc()))).all()]
+        codes, sales, cost = (await s.execute(
+            select(func.count(), func.coalesce(func.sum(Order.member_price), 0), func.coalesce(func.sum(Order.nh_price), 0))
+            .where(mine, recent, charged))).one()
+        apps = [(str(name or code), int(given or 0), int(got or 0), dec(sold), dec(sold) - dec(paid))
+                for code, name, given, got, sold, paid in (await s.execute(
+                    select(Order.service, func.max(Order.service_name),
+                           func.sum(case((Order.nh_id.is_not(None), 1), else_=0)),
+                           func.sum(case((charged, 1), else_=0)),
+                           func.coalesce(func.sum(case((charged, Order.member_price), else_=0)), 0),
+                           func.coalesce(func.sum(case((charged, Order.nh_price), else_=0)), 0))
+                    .where(mine, recent).group_by(Order.service)
+                    .order_by(func.sum(case((charged, Order.member_price), else_=0)).desc(), func.count().desc())
+                    .limit(6))).all()]
+        new_members = int(await s.scalar(select(func.count()).select_from(Member).where(
+            Member.reseller_id == reseller_id, Member.created_at >= since)) or 0)
+        seen = int(await s.scalar(select(func.count()).select_from(Member).where(
+            Member.reseller_id == reseller_id, Member.last_seen_at >= since)) or 0)
+        buyers = int(await s.scalar(select(func.count(func.distinct(Order.member_id))).where(mine, recent, charged)) or 0)
+        members, balances = (await s.execute(select(func.count(), func.coalesce(func.sum(Member.balance), 0))
+                                             .where(Member.reseller_id == reseller_id))).one()
+        pays = [(str(prov), int(opened or 0), int(paid or 0), dec(total)) for prov, opened, paid, total in (await s.execute(
+            select(Payment.provider, func.sum(case((Payment.invoice_id.is_not(None), 1), else_=0)),
+                   func.sum(case((Payment.status == Payment.PAID, 1), else_=0)),
+                   func.coalesce(func.sum(case((Payment.status == Payment.PAID, Payment.credited), else_=0)), 0))
+            .where(Payment.reseller_id == reseller_id, Payment.created_at >= since).group_by(Payment.provider))).all()]
+        dep_n, dep_sum = (await s.execute(
+            select(func.count(), func.coalesce(func.sum(Deposit.credited), 0))
+            .where(Deposit.reseller_id == reseller_id, Deposit.status == "approved", Deposit.created_at >= since))).one()
+    return {"days": days, "outcomes": outcomes, "orders": sum(outcomes.values()), "reasons": reasons,
+            "codes": int(codes), "sales": dec(sales), "profit": dec(sales) - dec(cost), "apps": apps,
+            "new_members": new_members, "seen": seen, "buyers": buyers, "members": int(members),
+            "balances": dec(balances), "payments": pays, "deposits": (int(dep_n), dec(dep_sum))}
+
+
+async def claim_report_day(reseller_id: int, day: str) -> bool:
+    """Win the right to send this shop's morning report for `day` (once)."""
+    async with session_factory() as s:
+        res = await s.execute(update(Reseller).where(
+            Reseller.id == reseller_id, or_(Reseller.report_day.is_(None), Reseller.report_day != day))
+            .values(report_day=day))
+        await s.commit()
+        return res.rowcount == 1
 
 
 # ─── custom prices ───────────────────────────────────────────────────────────

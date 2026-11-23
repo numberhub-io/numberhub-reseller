@@ -102,6 +102,7 @@ Open your own shop bot and send `/admin`, or tap ⚙️ Admin panel in the menu 
 
 | Button | What it does |
 |---|---|
+| 📊 Statistics | The last 30 days: sales and profit, numbers given against codes delivered, why purchases did not go through, your best apps, customers, payments. Also the switch for the morning report: yesterday in one message, sent only on days your shop was used |
 | ➕ Add balance | Send `customer-ID amount`, for example `123456789 5`, or use `@username` instead of the ID |
 | ➖ Remove balance | The same format. Money reserved by an open order cannot be removed |
 | 👥 Customers | The latest 25 customers with their IDs and balances |

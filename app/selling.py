@@ -400,7 +400,7 @@ async def _buy(reseller: Reseller, member: Member, service: str, country: str,
             raise SellError("processing")
         except NumberHubError as exc:
             # NumberHub's purchase handler said no: nothing was bought.
-            await repo.fail_order(order.id)
+            await repo.fail_order(order.id, exc.code)
             if exc.code == "price_exceeded":
                 learn_ceiling(reseller.id, service, country, exc.data.get("price"))
                 # The member is shown THIS route's price at NumberHub's real price
@@ -504,7 +504,7 @@ async def recover_buying() -> None:
         if _age_sec(order) > BUYING_GIVE_UP_SEC:
             # Past NumberHub's key retention a replay would be a NEW purchase.
             # Any number from back then has long expired: give the hold back.
-            if await repo.fail_order(order.id):
+            if await repo.fail_order(order.id, "no_answer"):
                 log.warning("order %s: no answer from NumberHub for 20 h; member hold released", order.id)
             continue
         reseller = await repo.get_reseller(order.reseller_id)
@@ -525,7 +525,7 @@ async def recover_buying() -> None:
             # Only the purchase handler's own answer proves there is no order.
             # 429, 401/403 and the idempotency gate say nothing about it.
             if authoritative(exc):
-                await repo.fail_order(order.id)
+                await repo.fail_order(order.id, exc.code)
             continue
         finally:
             _inflight.discard(order.id)

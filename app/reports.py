@@ -1,0 +1,106 @@
+"""Statistics for the shop owner: the 📊 screen in the admin panel and a report every
+morning, in the owner's own bot. Counts, sums and app names only."""
+from __future__ import annotations
+
+import datetime as dt
+import logging
+from decimal import Decimal
+
+from app import repo
+from app.models import Reseller
+from app.texts import esc, money
+
+log = logging.getLogger(__name__)
+REPORT_HOUR_UTC = 5
+# NumberHub's answers in words an owner can act on.
+WHY = {
+    "insufficient_funds": "your NumberHub wallet was empty",
+    "sold_out": "no number in stock", "purchase_failed": "no number in stock",
+    "price_exceeded": "the price moved while they were buying",
+    "duplicate_order": "too many open orders for that app and country",
+    "spend_limit_reached": "your API key's daily limit was reached",
+    "no_answer": "NumberHub did not answer", "unknown": "not recorded",
+}
+PROVIDER = {"numberhub": "Built-in crypto", "oxapay": "Your OxaPay", "cryptobot": "Your @CryptoBot"}
+
+
+def pct(part: int, whole: int) -> str:
+    return f"{round(100 * part / whole)}%" if whole else "–"
+
+
+def report_on(reseller: Reseller) -> bool:
+    return getattr(reseller, "daily_report", None) != 0
+
+
+async def stats_text(reseller: Reseller, days: int = 30) -> str:
+    r = await repo.shop_report(reseller.id, days)
+    o = r["outcomes"]
+    given = r["orders"] - o.get("failed", 0)
+    lines = [f"📊 <b>Statistics</b> · last {days} days", "",
+             f"Sold <b>{money(r['sales'])}</b> · your profit ≈ <b>{money(r['profit'])}</b>",
+             f"Numbers given: <b>{given}</b> · codes delivered: <b>{r['codes']}</b> ({pct(r['codes'], given)})",
+             f"No code (not charged): {o.get('canceled', 0) + o.get('expired', 0)} · purchase did not go through: {o.get('failed', 0)}"]
+    if r["reasons"]:
+        lines.append("Why purchases did not go through: " + " · ".join(
+            f"{esc(WHY.get(why, why))} ×{n}" for why, n in r["reasons"]))
+    if r["apps"]:
+        lines += ["", "<b>Best apps</b> (codes of numbers given · sold · profit)"]
+        for name, got_n, codes, sold, profit in r["apps"]:
+            lines.append(f"{esc(name)}: {codes} of {got_n} ({pct(codes, got_n)}) · {money(sold)} · {money(profit)}")
+    lines += ["", "<b>Customers</b>",
+              f"All: {r['members']} · new: {r['new_members']} · opened the bot: {r['seen']} · bought: {r['buyers']}",
+              f"On their balances now: {money(r['balances'])}"]
+    paid_any = [p for p in r["payments"] if p[1]]
+    if paid_any or r["deposits"][0]:
+        lines += ["", "<b>Payments</b> (paid of opened · amount)"]
+        for prov, opened, paid, total in paid_any:
+            lines.append(f"{PROVIDER.get(prov, esc(prov))}: {paid} of {opened} ({pct(paid, opened)}) · {money(total)}")
+        if r["deposits"][0]:
+            lines.append(f"Approved by you: {r['deposits'][0]} · {money(r['deposits'][1])}")
+    lines += ["", "🔔 Morning report: <b>" + ("on" if report_on(reseller) else "off") + "</b> "
+              "(yesterday's sales in one message, only on days your shop was used)"]
+    return "\n".join(lines)
+
+
+async def daily_text(reseller: Reseller) -> str | None:
+    """The last 24 hours for one shop, or None when nothing happened in it."""
+    r = await repo.shop_report(reseller.id, 1)
+    paid = sum(p[2] for p in r["payments"])
+    if not r["orders"] and not paid and not r["new_members"]:
+        return None
+    o = r["outcomes"]
+    lines = [f"🌅 <b>Your shop, the last 24 hours</b> · @{esc(reseller.bot_username or '')}",
+             f"Sold <b>{money(r['sales'])}</b> · profit ≈ <b>{money(r['profit'])}</b> · {r['codes']} codes",
+             f"New customers: {r['new_members']} · bought: {r['buyers']}"]
+    if paid:
+        total = sum((p[3] for p in r["payments"]), Decimal("0"))
+        lines.append(f"Payments received: {paid} · {money(total)}")
+    if o.get("failed"):
+        lines.append("⚠️ Purchases that did not go through: " + " · ".join(
+            f"{esc(WHY.get(why, why))} ×{n}" for why, n in r["reasons"]))
+    lines.append("More in ⚙️ Admin panel → 📊 Statistics, where this report can be switched off.")
+    return "\n".join(lines)
+
+
+async def daily_once(now: dt.datetime | None = None) -> int:
+    """Send the morning report to every owner it is due for. Returns how many went out."""
+    from app import runtime
+    from app.selling import send
+    now = now or dt.datetime.now(dt.timezone.utc)
+    if now.hour < REPORT_HOUR_UTC:
+        return 0
+    day, sent = now.strftime("%Y-%m-%d"), 0
+    for reseller in await repo.list_resellers(status=Reseller.ACTIVE):
+        if not report_on(reseller) or reseller.report_day == day:
+            continue
+        try:
+            if not await repo.claim_report_day(reseller.id, day):
+                continue
+            text = await daily_text(reseller)
+            bot = runtime.bot_for(reseller.id)
+            if text and bot is not None:
+                await send(bot, reseller.owner_id, text)
+                sent += 1
+        except Exception:  # noqa: BLE001 — one shop's trouble never stops the rest
+            log.exception("morning report for reseller %s failed", reseller.id)
+    return sent

@@ -36,6 +36,9 @@ _ADDED_COLUMNS = (
     ("resellers", "cryptobot_token_enc", "TEXT"),
     ("resellers", "nh_pay", "INTEGER"),
     ("payments", "details", "TEXT"),
+    ("orders", "fail_reason", "VARCHAR(32)"),
+    ("resellers", "daily_report", "INTEGER"),
+    ("resellers", "report_day", "VARCHAR(10)"),
 )
 
 

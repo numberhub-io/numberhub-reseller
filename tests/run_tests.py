@@ -1669,6 +1669,108 @@ async def test_builtin_payments():
     payments.TRANSPORT = None
 
 
+async def test_owner_stats():
+    """Owner 2026-11-23 (#122): statistics in the bot for the people who run it. The shop
+    owner gets the last 30 days on one screen, why purchases did not go through, and a
+    report every morning, only on days the shop was used."""
+    print("statistics for the shop owner, and the morning report")
+    import datetime as dtm
+    from aiogram.methods import SendMessage
+    from app import reports
+    from app.bots.reseller import build_router
+    from sqlalchemy import select
+    api = FakeNumberHub(wallet="50.00")
+    r = await make_reseller(api, bot_id=86201)
+    session = FakeSession()
+    bot = fake_bot(session)
+    runtime._bots[r.id] = bot
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(build_router(r.id))
+    to = lambda uid: [m.text or "" for m in session.requests if isinstance(m, SendMessage) and m.chat_id == uid]  # noqa: E731
+    a = await member(r, 9701, "5")
+    b = await member(r, 9702, "5")
+
+    # two codes, one cancelled, and two purchases NumberHub refuses
+    o1 = await selling.buy(r, a, "wa", "187", None)
+    api.set_status(o1.nh_id, "received", "111222")
+    o2 = await selling.buy(r, b, "wa", "187", None)
+    api.set_status(o2.nh_id, "received", "333444")
+    o3 = await selling.buy(r, a, "tg", "187", None)
+    api.set_status(o3.nh_id, "canceled")
+    await selling.sync_reseller(r)
+    await selling.settle_sweep()
+    for _ in range(2):
+        api.fail_next_buy = "insufficient_funds"
+        try:
+            await selling.buy(r, await repo.get_member(b.id), "wa", "6", None)
+        except SellError:
+            pass
+    async with repo.session_factory() as s:
+        rows = list((await s.execute(select(Order).where(Order.reseller_id == r.id, Order.status == Order.FAILED))).scalars())
+    check("a purchase NumberHub refuses keeps NumberHub's reason", len(rows) == 2
+          and all(o.fail_reason == "insufficient_funds" for o in rows), str([o.fail_reason for o in rows]))
+    pay = await repo.create_payment(r.id, a.id, "numberhub", D("10"))
+    await repo.attach_invoice(pay.id, "9001", None, dtm.datetime.now(dtm.timezone.utc) + dtm.timedelta(hours=1), details="{}")
+    await repo.credit_payment(pay.id, D("10"))
+    lost = await repo.create_payment(r.id, b.id, "numberhub", D("5"))
+    await repo.attach_invoice(lost.id, "9002", None, dtm.datetime.now(dtm.timezone.utc) + dtm.timedelta(hours=1), details="{}")
+
+    rep = await repo.shop_report(r.id, 30)
+    check("the figures: orders by outcome, codes, sales and profit",
+          rep["orders"] == 5 and rep["codes"] == 2 and rep["outcomes"].get("failed") == 2
+          and rep["outcomes"].get("canceled") == 1 and rep["sales"] == D("0.78") and rep["profit"] == D("0.18"), str(rep)[:300])
+    check("…why, best apps, customers and payments",
+          rep["reasons"] == [("insufficient_funds", 2)] and rep["apps"][0][:3] == ("WhatsApp", 2, 2)
+          and rep["new_members"] == 2 and rep["buyers"] == 2
+          and rep["payments"] == [("numberhub", 2, 1, D("10.00"))], f"{rep['reasons']} {rep['apps']} {rep['payments']}")
+
+    await dp.feed_update(bot, msg(OWNER, "/admin"))
+    check("the admin panel has 📊 Statistics", button(session, "Statistics") is not None)
+    await dp.feed_update(bot, tap(OWNER, button(session, "Statistics")))
+    text = session.last_text()
+    check("the screen: sales, profit, numbers given against codes delivered",
+          "Sold <b>$0.78</b>" in text and "profit ≈ <b>$0.18</b>" in text
+          and "Numbers given: <b>3</b> · codes delivered: <b>2</b> (67%)" in text, text[:300])
+    check("…why purchases did not go through, in words the owner can act on",
+          "your NumberHub wallet was empty ×2" in text and "purchase did not go through: 2" in text)
+    check("…best apps with their delivery rate, customers, payments",
+          "WhatsApp: 2 of 2 (100%) · $0.78 · $0.18" in text and "Telegram: 0 of 1 (0%)" in text and "bought: 2" in text
+          and "Built-in crypto: 1 of 2 (50%) · $10.00" in text, text[300:900])
+    check("…the morning report is on, with its switch", "Morning report: <b>on</b>" in text
+          and button(session, "Morning report off") is not None)
+
+    now = dtm.datetime.now(dtm.timezone.utc)
+    early, morning = now.replace(hour=2, minute=0), now.replace(hour=6, minute=0)
+    n_before = len(to(OWNER))
+    check("no report before the morning hour", await reports.daily_once(early) == 0 and len(to(OWNER)) == n_before)
+    sent = await reports.daily_once(morning)
+    msgs = to(OWNER)[n_before:]
+    check("then one message to the owner: the last 24 hours of their shop", sent >= 1 and len(msgs) == 1
+          and "the last 24 hours" in msgs[0] and "Sold <b>$0.78</b>" in msgs[0] and "2 codes" in msgs[0]
+          and "your NumberHub wallet was empty ×2" in msgs[0] and "Payments received: 1 · $10.00" in msgs[0], str(msgs)[:400])
+    await reports.daily_once(morning)
+    check("not again the same day", len(to(OWNER)) == n_before + 1)
+    await dp.feed_update(bot, msg(OWNER, "/admin"))
+    await dp.feed_update(bot, tap(OWNER, button(session, "Statistics")))
+    await dp.feed_update(bot, tap(OWNER, button(session, "Morning report off")))
+    fresh = await repo.get_reseller(r.id)
+    check("the owner switches it off with one tap", fresh.daily_report == 0 and "Morning report: <b>off</b>" in session.last_text()
+          and button(session, "Morning report on") is not None)
+    n_off = len(to(OWNER))
+    await reports.daily_once(morning + dtm.timedelta(days=1))
+    check("…and gets none the next day", len(to(OWNER)) == n_off)
+
+    quiet_api = FakeNumberHub()
+    quiet = await make_reseller(quiet_api, bot_id=86202)
+    qs = FakeSession()
+    runtime._bots[quiet.id] = fake_bot(qs)
+    await reports.daily_once(morning + dtm.timedelta(days=2))
+    check("a shop nobody used gets no report", not [m for m in qs.requests if isinstance(m, SendMessage)]
+          and await reports.daily_text(quiet) is None)
+    idle = await reports.stats_text(quiet, 30)
+    check("…and its statistics screen opens with zeros", "Sold <b>$0.00</b>" in idle and "(–)" in idle)
+
+
 async def test_paused_shop():
     print("a paused shop")
     from app.bots.reseller import build_router
@@ -2024,7 +2126,7 @@ async def main():
     test_prices()
     test_i18n()
     for fn in (test_buy_and_code, test_no_code_refund, test_failures, test_lost_reply, test_cancel,
-               test_races_and_limits, test_bot_flow, test_builder, test_provision, test_custom_prices, test_picker_pages, test_rank_order, test_dead_token, test_rejected_key, test_deposits, test_auto_payments, test_builtin_payments, test_paused_shop, test_review_money,
+               test_races_and_limits, test_bot_flow, test_builder, test_provision, test_custom_prices, test_picker_pages, test_rank_order, test_dead_token, test_rejected_key, test_deposits, test_auto_payments, test_builtin_payments, test_owner_stats, test_paused_shop, test_review_money,
                test_review_sync, test_review_bots, test_review_runtime, test_cards_render):
         try:
             await fn()

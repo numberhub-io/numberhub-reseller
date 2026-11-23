@@ -71,7 +71,8 @@ async def dashboard(reseller: Reseller):
         extras.append(f"💳 Automatic payments: <b>{' + '.join(payments.LABEL[g] for g in gates)}</b>"
                       + (f" · {n_paid} paid, {money(total)} in 30 days" if n_paid else ""))
     else:
-        extras.append("💳 Automatic payments: <b>off</b> (connect OxaPay or @CryptoBot in 💳 Payments)")
+        extras.append("💳 Automatic payments: <b>off</b> (turn on built-in crypto, or connect your own "
+                      "OxaPay or @CryptoBot, in 💳 Payments)")
 
     text = "\n".join([
         f"⚙️ <b>Admin panel</b> · @{esc(reseller.bot_username)}",
@@ -85,11 +86,12 @@ async def dashboard(reseller: Reseller):
         f"🏦 NumberHub wallet: {wallet}",
         f"🔗 Share your bot: <code>t.me/{esc(reseller.bot_username)}</code>",
         "",
-        "<i>Customers pay you by crypto through your own OxaPay or @CryptoBot and their balance goes up "
-        "by itself (💳 Payments), or they pay you your way and you add it here. Each number is paid from "
-        "your NumberHub wallet only when its code arrives.</i>",
+        "<i>Customers add balance by themselves in crypto (💳 Payments): built in, it lands in your "
+        "NumberHub wallet; or through your own OxaPay or @CryptoBot; or they pay you your way and you add "
+        "it here. Each number is paid from your NumberHub wallet only when its code arrives.</i>",
     ])
     kb = InlineKeyboardBuilder()
+    kb.button(text="📊 Statistics", callback_data=Adm(a="stats"))
     kb.button(text="➕ Add balance", callback_data=Adm(a="add"))
     kb.button(text="➖ Remove balance", callback_data=Adm(a="remove"))
     kb.button(text="👥 Customers", callback_data=Adm(a="members"))
@@ -102,8 +104,19 @@ async def dashboard(reseller: Reseller):
     kb.button(text="🚫 Block / unblock", callback_data=Adm(a="block"))
     kb.button(text="🔄 Refresh", callback_data=Adm(a="home"))
     kb.button(text="🏠 Menu", callback_data=Nav(to="menu"))
-    kb.adjust(2, 2, 2, 2, 2, 2)
+    kb.adjust(1, 2, 2, 2, 2, 2, 2)
     return text, kb.as_markup()
+
+
+async def stats_screen(reseller: Reseller):
+    from app import reports
+    kb = InlineKeyboardBuilder()
+    on = reports.report_on(reseller)
+    kb.button(text="🔕 Morning report off" if on else "🔔 Morning report on",
+              callback_data=Adm(a="report", arg="off" if on else "on"))
+    kb.button(text="⬅️ Admin panel", callback_data=Adm(a="home"))
+    kb.adjust(1)
+    return await reports.stats_text(reseller, 30), kb.as_markup()
 
 
 MAX_RULES = 200
@@ -473,6 +486,11 @@ def register(r: Router) -> None:
         await state.clear()
         if a == "home":
             await show(c, *await dashboard(reseller))
+        elif a == "stats":
+            await show(c, *await stats_screen(reseller))
+        elif a == "report" and callback_data.arg in ("on", "off"):
+            await repo.update_reseller(reseller.id, daily_report=1 if callback_data.arg == "on" else 0)
+            await show(c, *await stats_screen(await repo.get_reseller(reseller.id)))
         elif a == "members":
             rows = await repo.list_members(reseller.id, limit=25)
             lines = ["👥 <b>Customers</b> (latest 25)", ""]

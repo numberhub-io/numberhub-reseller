@@ -60,6 +60,10 @@ class Reseller(Base):
     # is added to the shop's NumberHub wallet. 1 = on, 0 = off, None = the
     # platform's default (settings.numberhub_pay_default).
     nh_pay: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # The morning report to the owner (app/reports.py): 0 = off, anything else on.
+    # report_day = the UTC day it was last sent for, so it goes out once a day.
+    daily_report: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    report_day: Mapped[str | None] = mapped_column(String(10), nullable=True)
     welcome_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     support_contact: Mapped[str | None] = mapped_column(String(128), nullable=True)
     status: Mapped[str] = mapped_column(String(16), default=ACTIVE, index=True)
@@ -127,6 +131,9 @@ class Order(Base):
     reseller_id: Mapped[int] = mapped_column(ForeignKey("resellers.id", ondelete="CASCADE"), index=True)
     member_id: Mapped[int] = mapped_column(ForeignKey("members.id", ondelete="CASCADE"), index=True)
     nh_id: Mapped[int | None] = mapped_column(nullable=True)
+    # Why a purchase did not happen (NumberHub's own answer: insufficient_funds,
+    # sold_out, price_exceeded, ...), for the owner's statistics. None otherwise.
+    fail_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
     service: Mapped[str] = mapped_column(String(16))
     service_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     country: Mapped[str] = mapped_column(String(16))
