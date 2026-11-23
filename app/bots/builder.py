@@ -414,7 +414,13 @@ async def finish_create(m: Message, owner, state: FSMContext, markup: Decimal, e
             "contact and welcome text, and message all customers.\n"
             "• Keep your NumberHub wallet topped up — each number is paid from it when its code arrives.")
     if edit:
-        await m.edit_text(text, reply_markup=kb.as_markup(), disable_web_page_preview=True)
+        try:
+            await m.edit_text(text, reply_markup=kb.as_markup(), disable_web_page_preview=True)
+        except Exception as exc:  # noqa: BLE001
+            # The tapped message can no longer be edited (too old for Telegram, which
+            # then sends it without its content): the shop exists, so say so anyway.
+            if "not modified" not in str(exc):
+                await m.answer(text, reply_markup=kb.as_markup(), disable_web_page_preview=True)
     else:
         await m.answer(text, reply_markup=kb.as_markup(), disable_web_page_preview=True)
     log.info("reseller %s created by %s (@%s, commission %s%%)", reseller.id, owner.id, reseller.bot_username, markup)
