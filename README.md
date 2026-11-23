@@ -117,16 +117,16 @@ Open your own shop bot and send `/admin`, or tap ⚙️ Admin panel in the menu 
 
 Your commission is a percentage added on top of NumberHub's price for each country. With a 30% commission, a number NumberHub prices at $0.25 costs your customer $0.33 (rounded up to the cent) and you keep $0.08. The bot uses NumberHub's highest price for that route (`price_max`) as the base, so NumberHub can never charge you more for a sale than the customer paid.
 
-### Built-in payments (USDT, nothing to set up)
+### Built-in payments (crypto, nothing to set up)
 
-⚙️ Admin panel → 💳 Payments → 💵 Turn on built-in USDT. That is the whole setup: no account to open, no key to paste.
+⚙️ Admin panel → 💳 Payments → 💵 Turn on built-in crypto. That is the whole setup: no account to open, no key to paste.
 
-A customer taps 💳 Add balance, picks an amount and a network (USDT on BNB Smart Chain, BEP20, or on Tron, TRC20) and gets an address, the exact amount to send and 3 hours to send it. A few minutes after the network confirms, the money is added to **your NumberHub wallet** and the same amount to the customer's balance in your shop, and both of you get a message. So your customers' payments are the money your shop buys numbers with: you do not have to fund the wallet yourself first. What you earn on each number stays in your NumberHub wallet.
+A customer taps 💳 Add balance, picks an amount, a coin and, where a coin has several, its network, and gets an address, the exact amount to send in that coin and 3 hours to send it. The coins are the ones NumberHub's API lists (`GET /topups/methods`): USDT and USDC on five networks, BTC, ETH, LTC, TRX, BNB, SOL, POL, DOGE, BCH, XMR, DAI and SHIB. Coins that need a memo next to the address are not offered. A few minutes after the network confirms, the money is added to **your NumberHub wallet** and the same amount to the customer's balance in your shop, and both of you get a message. So your customers' payments are the money your shop buys numbers with: you do not have to fund the wallet yourself first. What you earn on each number stays in your NumberHub wallet.
 
 How it stays safe:
 
 - Every customer gets an address of their own, opened for that one payment. Two customers who ask for the same amount never share one.
-- The customer is credited exactly what reached your wallet. A short payment is credited as what arrived, never as the amount that was asked.
+- The customer is credited exactly what reached your wallet. With USDT and USDC a short payment is credited as what arrived, never as the amount that was asked; every other coin has to arrive in full to be credited at all, because its dollar value cannot be checked transfer by transfer.
 - A payment is credited once, even when the background check and the customer's 🔄 I've paid: check button race.
 - A customer can have 3 addresses open and open 10 a day; a shop can open 300 a day. A shop that is paused, suspended or disconnected takes no payments.
 - Money sent on another network, or after the 3 hours, cannot be recovered. The customer is told so on the payment screen. A payment that was sent in time and confirmed late is still added: a payment that was given up is looked at again for 3 days.

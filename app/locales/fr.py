@@ -113,7 +113,7 @@ T = {
     'pay_unavailable': '⚠️ Les paiements ne sont pas disponibles pour le moment. Réessayez plus tard, ou contactez {support}.',
     'pay_open_hint': '⏳ Vous avez un lien de paiement ouvert de <b>{amount}</b> : touchez-le ci-dessous pour payer, ou choisissez un autre montant.',
     # built-in USDT payments: an address instead of a link (app/payments.py, provider numberhub)
-    'pay_address': "💳 <b>Payer {amount}</b>\n\nEnvoyez exactement <code>{pay_amount}</code> USDT sur le réseau <b>{network}</b> à cette adresse :\n<code>{address}</code>\n\n⏳ Valable {minutes} minutes. Votre solde augmente tout seul quelques minutes après la confirmation du réseau, et vous recevrez un message.\n\n⚠️ Utilisez uniquement ce réseau et payez dans ce délai : l'argent envoyé sur un autre réseau ou après le délai est perdu.",
+    'pay_address': "💳 <b>Payer {amount}</b>\n\nEnvoyez exactement <code>{pay_amount}</code> {coin} sur le réseau <b>{network}</b> à cette adresse :\n<code>{address}</code>\n\n⏳ Valable {minutes} minutes. Votre solde augmente tout seul quelques minutes après la confirmation du réseau, et vous recevrez un message.\n\n⚠️ Utilisez uniquement ce réseau et payez dans ce délai : l'argent envoyé sur un autre réseau ou après le délai est perdu.",
     'btn_pay_show': "📋 Afficher l'adresse ({amount})",
     'pay_open_hint_address': '⏳ Vous avez un paiement de <b>{amount}</b> en cours : touchez ci-dessous pour revoir son adresse, ou choisissez un autre montant.',
 }

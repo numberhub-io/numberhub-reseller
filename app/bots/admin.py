@@ -210,9 +210,10 @@ async def deposits_screen(reseller: Reseller, note: str = ""):
     lines = ([note, ""] if note else []) + [
         "💳 <b>Payments</b>",
         "",
-        "<b>💵 Built-in USDT</b> " + ("✅ on" if builtin else "⏸ off"),
-        "Nothing to set up. A customer taps 💳 Add balance, picks an amount and gets an address to send "
-        "USDT to (BEP20 or TRC20). When it arrives, the money is added to <b>your NumberHub wallet</b> and "
+        "<b>💵 Built-in crypto</b> " + ("✅ on" if builtin else "⏸ off"),
+        "Nothing to set up. A customer taps 💳 Add balance, picks an amount and a coin (USDT, BTC, ETH, LTC, "
+        "TRX, BNB, SOL, USDC and more) and gets an address and the exact amount to send. When it arrives, "
+        "the money is added in dollars to <b>your NumberHub wallet</b> and "
         "the same amount to their balance here, so your customers' payments are what your shop sells with. "
         "What you earn stays in your NumberHub wallet.",
         "",
@@ -248,7 +249,7 @@ async def deposits_screen(reseller: Reseller, note: str = ""):
     lines += ["", f"<b>Waiting for you:</b> {len(rows)}" if rows else "No manual deposit waiting."]
     kb = InlineKeyboardBuilder()
     sizes = [1]
-    kb.button(text="⏸ Turn off built-in USDT" if builtin else "💵 Turn on built-in USDT",
+    kb.button(text="⏸ Turn off built-in crypto" if builtin else "💵 Turn on built-in crypto",
               callback_data=Adm(a="nhpay", arg="off" if builtin else "on"))
     for g, label in ((payments.OXAPAY, "🪙 OxaPay"), (payments.CRYPTOBOT, "🤖 @CryptoBot")):
         if g in gates:
@@ -499,9 +500,9 @@ def register(r: Router) -> None:
             await payments.set_builtin(reseller.id, turn_on)
             await show(c, *await deposits_screen(
                 await repo.get_reseller(reseller.id),
-                "✅ Built-in USDT payments are on. Your customers can add balance by themselves now, and "
+                "✅ Built-in crypto payments are on. Your customers can add balance by themselves now, and "
                 "each payment lands in your NumberHub wallet." if turn_on else
-                "⏸ Built-in USDT payments are off. An address a customer already has still works until it "
+                "⏸ Built-in crypto payments are off. An address a customer already has still works until it "
                 "runs out, and a payment to it is still added."))
         elif a == "pay_off" and callback_data.arg in payments.PROVIDERS:
             await payments.disconnect(reseller.id, callback_data.arg)

@@ -113,7 +113,7 @@ T = {
     'pay_unavailable': '⚠️ Ödemeler şu anda kullanılamıyor. Daha sonra tekrar deneyin veya {support} ile iletişime geçin.',
     'pay_open_hint': '⏳ <b>{amount}</b> tutarında açık bir ödeme bağlantınız var: ödemek için aşağıda ona dokunun veya başka bir tutar seçin.',
     # built-in USDT payments: an address instead of a link (app/payments.py, provider numberhub)
-    'pay_address': "💳 <b>{amount} öde</b>\n\n<b>{network}</b> ağında tam olarak <code>{pay_amount}</code> USDT'yi şu adrese gönderin:\n<code>{address}</code>\n\n⏳ {minutes} dakika geçerlidir. Ağ onayladıktan birkaç dakika sonra bakiyeniz kendiliğinden artar ve bir mesaj alırsınız.\n\n⚠️ Yalnızca bu ağı kullanın ve bu süre içinde ödeyin: başka bir ağdan ya da süre dolduktan sonra gönderilen para kaybolur.",
+    'pay_address': "💳 <b>{amount} öde</b>\n\n<b>{network}</b> ağında tam olarak <code>{pay_amount}</code> {coin}'yi şu adrese gönderin:\n<code>{address}</code>\n\n⏳ {minutes} dakika geçerlidir. Ağ onayladıktan birkaç dakika sonra bakiyeniz kendiliğinden artar ve bir mesaj alırsınız.\n\n⚠️ Yalnızca bu ağı kullanın ve bu süre içinde ödeyin: başka bir ağdan ya da süre dolduktan sonra gönderilen para kaybolur.",
     'btn_pay_show': '📋 Adresi göster ({amount})',
     'pay_open_hint_address': '⏳ <b>{amount}</b> tutarında açık bir ödemeniz var: adresini tekrar görmek için aşağıya dokunun ya da başka bir tutar seçin.',
 }

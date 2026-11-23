@@ -40,13 +40,50 @@ CRYPTOBOT = "cryptobot"
 NUMBERHUB = "numberhub"
 # The gateways an owner connects with a key of their own.
 PROVIDERS = (OXAPAY, CRYPTOBOT)
-LABEL = {OXAPAY: "OxaPay", CRYPTOBOT: "@CryptoBot", NUMBERHUB: "Built-in USDT"}
-# Built-in payments: the networks a customer can send USDT on (NumberHub's
-# `method` values) and what the customer is shown for each.
+LABEL = {OXAPAY: "OxaPay", CRYPTOBOT: "@CryptoBot", NUMBERHUB: "Built-in crypto"}
+# Built-in payments: the coins and networks a customer can pay in. NumberHub lists
+# them (GET /topups/methods: every coin its account takes to a plain address); these
+# two are what an API without that list offers, and the fallback when it can't be read.
 METHODS = {
-    "usdt_bsc": {"short": "BEP20", "network": "BNB Smart Chain (BEP20)"},
-    "usdt_tron": {"short": "TRC20", "network": "Tron (TRC20)"},
+    "usdt_bsc": {"coin": "USDT", "short": "BEP20", "network": "BNB Smart Chain (BEP20)", "partial": True},
+    "usdt_tron": {"coin": "USDT", "short": "TRC20", "network": "Tron (TRC20)", "partial": True},
 }
+# The order coins are offered in: what customers pay with most, first.
+COIN_ORDER = ("USDT", "BTC", "ETH", "LTC", "TRX", "BNB", "SOL", "USDC", "DOGE", "POL", "BCH", "XMR", "DAI", "SHIB")
+METHODS_TTL = 600.0
+_methods_cache: tuple[float, dict[str, dict]] | None = None
+
+
+async def methods(reseller: Reseller) -> dict[str, dict]:
+    """{method id: {coin, short, network, partial}} for this shop's customers, read
+    from NumberHub and kept 10 minutes (the list is the same for every shop)."""
+    global _methods_cache
+    now = time.monotonic()
+    if _methods_cache is not None and now - _methods_cache[0] < METHODS_TTL:
+        return _methods_cache[1]
+    from app import selling
+    client = selling.client_for(reseller.id)
+    found: dict[str, dict] = {}
+    if client is not None:
+        try:
+            for m in await client.topup_methods():
+                found[str(m["id"])] = {"coin": str(m["coin"]).upper(), "short": str(m.get("network_short") or ""),
+                                       "network": str(m.get("network") or ""), "partial": bool(m.get("partial_credit"))}
+        except NumberHubError as exc:
+            # 404 = an API from before the list existed: the two USDT networks. Any
+            # other trouble: the same two for now, and ask again soon.
+            if exc.status != 404:
+                return dict(METHODS)
+    if not found:
+        found = dict(METHODS)
+    _methods_cache = (now, found)
+    return found
+
+
+def coins(table: dict[str, dict]) -> list[str]:
+    """The coins of a method table, most used first, unknown ones after in A to Z."""
+    have = {m["coin"] for m in table.values()}
+    return [c for c in COIN_ORDER if c in have] + sorted(have - set(COIN_ORDER))
 INVOICE_MINUTES = 60
 # A link is still checked this long after it expired: a payment sent just before
 # the end can confirm on-chain a little later.
@@ -346,7 +383,8 @@ async def _open_builtin(reseller: Reseller, member_id: int, amount: Decimal, met
     must repeat it: an API that ignored it could hand two customers one address,
     and one payment can only be credited to one of them."""
     from app import selling
-    if method not in METHODS:
+    table = await methods(reseller)
+    if method not in table:
         raise PayError("unknown network")
     if reseller.status != Reseller.ACTIVE:
         # A paused, suspended or disconnected shop sells nothing: it must not take
@@ -389,10 +427,14 @@ async def _open_builtin(reseller: Reseller, member_id: int, amount: Decimal, met
                   reseller.id, row.id)
         raise PayError("this NumberHub API does not take per-customer deposits yet")
     until = _parse_iso(top.get("expires_at")) or _now() + dt.timedelta(minutes=BUILTIN_MINUTES)
+    if str(top.get("pay_currency") or "").upper() != table[method]["coin"]:
+        await repo.close_payment(row.id, Payment.FAILED)
+        log.error("reseller %s: deposit for payment %s came back in another coin", reseller.id, row.id)
+        raise PayError("NumberHub answered with another coin than was asked for")
     shown = {"method": method, "address": address, "pay_amount": pay_amount,
-             "pay_currency": str(top.get("pay_currency") or "USDT"),
-             "network": str(top.get("network") or METHODS[method]["network"]),
-             "network_short": str(top.get("network_short") or METHODS[method]["short"])}
+             "pay_currency": table[method]["coin"],
+             "network": str(top.get("network") or table[method]["network"]),
+             "network_short": str(top.get("network_short") or table[method]["short"])}
     await repo.attach_invoice(row.id, str(top["id"]), None, until, details=json.dumps(shown))
     return await repo.get_payment(row.id)
 
@@ -583,7 +625,8 @@ async def check_more(payment: Payment, reseller: Reseller | None = None, bot=Non
                                               balance=money(member.available)))
         who = f"<code>{member.telegram_id}</code>" + (f" @{esc(member.username)}" if member.username else "")
         await send(bot, reseller.owner_id,
-                   f"💰 <b>More arrived on a payment:</b> +{money(added)} from {who} in USDT.{chr(10)}"
+                   f"💰 <b>More arrived on a payment:</b> +{money(added)} from {who} in "
+                   f"{esc(details(payment).get('pay_currency') or 'crypto')}.{chr(10)}"
                    f"It was added to your NumberHub wallet and to their shop balance, now "
                    f"<b>{money(member.available)}</b>.")
     return added
@@ -635,8 +678,9 @@ async def _announce_paid(bot, reseller: Reseller, p: Payment) -> None:
                                           balance=money(member.available)))
     who = f"<code>{member.telegram_id}</code>" + (f" @{esc(member.username)}" if member.username else "")
     if p.provider == NUMBERHUB:
+        coin = esc(details(p).get("pay_currency") or "crypto")
         await send(bot, reseller.owner_id,
-                   f"💰 <b>Payment received:</b> +{money(p.credited)} from {who} in USDT.\n"
+                   f"💰 <b>Payment received:</b> +{money(p.credited)} from {who} in {coin}.\n"
                    f"The money was added to your NumberHub wallet, so your shop can sell with it; their "
                    f"shop balance is now <b>{money(member.available)}</b>.")
         return

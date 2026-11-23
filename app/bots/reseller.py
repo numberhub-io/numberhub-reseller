@@ -402,10 +402,11 @@ async def deposit_start(reseller: Reseller, member: Member, lang: str) -> tuple[
 
 GATEWAY = {"ox": payments.OXAPAY, "cb": payments.CRYPTOBOT}
 SHORT = {v: k for k, v in GATEWAY.items()}
-# Built-in USDT payments: the button's code -> the network (payments.METHODS). The
-# labels are the same in every language: they are what a wallet or exchange shows.
+# Built-in payments. Buttons made before every coin was offered carried these two
+# codes; they still work. Coin and network names are the same in every language:
+# they are what a wallet or an exchange shows.
 NETWORK = {"nb": "usdt_bsc", "nt": "usdt_tron"}
-NETWORK_LABEL = {"nb": "💵 USDT · BEP20 (BNB Smart Chain)", "nt": "💵 USDT · TRC20 (Tron)"}
+COIN_ICON = {"USDT": "💵", "USDC": "💵", "DAI": "💵", "BTC": "₿"}
 
 
 def address_screen(p, lang: str):
@@ -418,6 +419,7 @@ def address_screen(p, lang: str):
     kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
     kb.adjust(1)
     return t(lang, "pay_address", amount=money(p.amount), pay_amount=esc(d.get("pay_amount", "")),
+             coin=esc(d.get("pay_currency") or "USDT"),
              network=esc(d.get("network", "")), address=esc(d.get("address", "")),
              minutes=max(1, left)), kb.as_markup()
 
@@ -730,9 +732,31 @@ def build_router(reseller_id: int) -> Router:
             kb.button(text=t(lang, "btn_pay_oxapay"), callback_data=Pay(a="via", g="ox", c=cents))
         if payments.CRYPTOBOT in gates:
             kb.button(text=t(lang, "btn_pay_cryptobot"), callback_data=Pay(a="via", g="cb", c=cents))
+        sizes = [1] * sum(1 for g in (payments.OXAPAY, payments.CRYPTOBOT) if g in gates)
         if payments.NUMBERHUB in gates:
-            for code, label in NETWORK_LABEL.items():
-                kb.button(text=label, callback_data=Pay(a="via", g=code, c=cents))
+            # Every coin the shop can take, three to a row; the network comes next.
+            names = payments.coins(await payments.methods(reseller))
+            for coin in names:
+                kb.button(text=f"{COIN_ICON.get(coin, '🪙')} {coin}", callback_data=Pay(a="coin", g=coin, c=cents))
+            sizes += [3] * (len(names) // 3) + ([len(names) % 3] if len(names) % 3 else [])
+        kb.button(text=t(lang, "btn_cancel"), callback_data=Nav(to="menu"))
+        kb.adjust(*sizes, 1)
+        await _show(target, t(lang, "pay_choose_method", amount=money(amount)), kb.as_markup())
+
+    async def _pick_network(target, reseller: Reseller, member: Member, lang: str, coin: str, amount: Decimal):
+        """A coin was chosen: straight to the address when it has one network, else the networks."""
+        table = await payments.methods(reseller)
+        nets = [(mid, m) for mid, m in table.items() if m["coin"] == coin]
+        if payments.NUMBERHUB not in payments.connected(reseller) or not nets:
+            await _show(target, *await pay_amount_screen(reseller, member, lang))
+            return
+        if len(nets) == 1:
+            await _make_link(target, reseller, member, lang, payments.NUMBERHUB, amount, nets[0][0])
+            return
+        kb = InlineKeyboardBuilder()
+        for mid, m in nets:
+            kb.button(text=f"{COIN_ICON.get(coin, '🪙')} {coin} · {m['network']}",
+                      callback_data=Pay(a="via", g=mid, c=int(amount * 100)))
         kb.button(text=t(lang, "btn_cancel"), callback_data=Nav(to="menu"))
         kb.adjust(1)
         await _show(target, t(lang, "pay_choose_method", amount=money(amount)), kb.as_markup())
@@ -786,9 +810,12 @@ def build_router(reseller_id: int) -> Router:
             await _after_amount(c, reseller, member, lang, Decimal(callback_data.c) / 100)
         elif a == "via" and callback_data.g in GATEWAY:
             await _make_link(c, reseller, member, lang, GATEWAY[callback_data.g], Decimal(callback_data.c) / 100)
-        elif a == "via" and callback_data.g in NETWORK:
+        elif a == "coin":
+            await _pick_network(c, reseller, member, lang, callback_data.g.upper(), Decimal(callback_data.c) / 100)
+        elif a == "via":
+            # A network of a built-in coin (or one of the two codes old buttons carry).
             await _make_link(c, reseller, member, lang, payments.NUMBERHUB, Decimal(callback_data.c) / 100,
-                             NETWORK[callback_data.g])
+                             NETWORK.get(callback_data.g, callback_data.g))
         elif a == "show":
             p = await repo.get_payment(callback_data.id)
             if p is None or p.member_id != member.id:

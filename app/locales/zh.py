@@ -113,7 +113,7 @@ T = {
     'pay_unavailable': '⚠️ 目前无法付款。请稍后再试，或联系 {support}。',
     'pay_open_hint': '⏳ 您有一个 <b>{amount}</b> 的付款链接尚未支付：点击下方即可支付，或选择其他金额。',
     # built-in USDT payments: an address instead of a link (app/payments.py, provider numberhub)
-    'pay_address': '💳 <b>支付 {amount}</b>\n\n请通过 <b>{network}</b> 网络向以下地址准确发送 <code>{pay_amount}</code> USDT：\n<code>{address}</code>\n\n⏳ {minutes} 分钟内有效。网络确认后几分钟，余额会自动增加，您会收到一条消息。\n\n⚠️ 只能使用该网络，并在有效期内付款：通过其他网络或超过有效期发送的资金将无法找回。',
+    'pay_address': '💳 <b>支付 {amount}</b>\n\n请通过 <b>{network}</b> 网络向以下地址准确发送 <code>{pay_amount}</code> {coin}：\n<code>{address}</code>\n\n⏳ {minutes} 分钟内有效。网络确认后几分钟，余额会自动增加，您会收到一条消息。\n\n⚠️ 只能使用该网络，并在有效期内付款：通过其他网络或超过有效期发送的资金将无法找回。',
     'btn_pay_show': '📋 查看地址（{amount}）',
     'pay_open_hint_address': '⏳ 您有一笔 <b>{amount}</b> 的付款尚未完成：点击下方再次查看地址，或选择其他金额。',
 }

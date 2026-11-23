@@ -186,6 +186,13 @@ class NumberHub:
         assert last is not None
         raise last
 
+    async def topup_methods(self) -> list[dict]:
+        """Every coin and network a deposit can be opened in: [{id, coin, network,
+        network_short, partial_credit}]."""
+        data = await self._req("GET", "/topups/methods")
+        rows = data.get("methods")
+        return [m for m in rows if isinstance(m, dict) and m.get("id") and m.get("coin")] if isinstance(rows, list) else []
+
     async def topup(self, topup_id: int) -> dict:
         data = await self._req("GET", f"/topups/{int(topup_id)}")
         return data["topup"] if isinstance(data.get("topup"), dict) else {}

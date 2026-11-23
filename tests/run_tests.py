@@ -1371,6 +1371,7 @@ async def test_builtin_payments():
     from sqlalchemy import func, select, update
     payments.TRANSPORT = FakeGateways().transport()     # leftovers of other tests never reach a real gateway
     payments.ASK_EVERY_FRESH = payments.ASK_EVERY_OLD = payments.ASK_EVERY_LATE = 0.0   # no waiting between asks here
+    payments._methods_cache = None
     api = FakeNumberHub(wallet="0.00")
     r = await make_reseller(api, bot_id=86099)
     session = FakeSession()
@@ -1404,28 +1405,33 @@ async def test_builtin_payments():
     # ── the owner turns it on with one tap ──
     await dp.feed_update(bot, msg(OWNER, "/admin"))
     await dp.feed_update(bot, tap(OWNER, button(session, "Payments")))
-    check("💳 Payments explains built-in USDT and offers the switch",
-          "Built-in USDT" in session.last_text() and "your NumberHub wallet" in session.last_text()
-          and button(session, "Turn on built-in USDT") is not None)
-    await dp.feed_update(bot, tap(OWNER, button(session, "Turn on built-in USDT")))
+    check("💳 Payments explains built-in crypto and offers the switch",
+          "Built-in crypto" in session.last_text() and "your NumberHub wallet" in session.last_text()
+          and "BTC" in session.last_text() and button(session, "Turn on built-in crypto") is not None)
+    await dp.feed_update(bot, tap(OWNER, button(session, "Turn on built-in crypto")))
     r = await repo.get_reseller(r.id)
     check("one tap turns it on, nothing to connect", r.nh_pay == 1 and payments.connected(r) == [payments.NUMBERHUB]
-          and button(session, "Turn off built-in USDT") is not None and "are on" in session.last_text())
+          and button(session, "Turn off built-in crypto") is not None and "are on" in session.last_text())
     await dp.feed_update(bot, msg(OWNER, "/admin"))
-    check("the dashboard names it", "Built-in USDT" in session.last_text())
+    check("the dashboard names it", "Built-in crypto" in session.last_text())
 
     # ── a customer pays $10 on BEP20 ──
     await to_amounts(cust)
     await dp.feed_update(bot, tap(cust, button(session, "$10.00")))
-    check("the customer picks the network", button(session, "BEP20") is not None
-          and button(session, "TRC20") is not None and "how do you want to pay" in session.last_text())
+    mk = session.last_markup()
+    offered = [b.text.split()[-1] for row in mk.inline_keyboard for b in row][:-1]
+    check("the customer picks a coin: every coin the shop can take, the most used first",
+          offered == ["USDT", "BTC", "ETH", "LTC", "USDC"] and "how do you want to pay" in session.last_text(), str(offered))
+    await dp.feed_update(bot, tap(cust, button(session, "USDT")))
+    check("…then the network, when the coin has more than one", button(session, "BEP20") is not None
+          and button(session, "TRC20") is not None and button(session, "BTC") is None)
     await dp.feed_update(bot, tap(cust, button(session, "BEP20")))
     mem = await repo.get_or_create_member(r.id, cust, None, None)
     p1 = (await repo.open_payments(mem.id))[0]
     top = api.topups[int(p1.invoice_id)]
     text = session.last_text()
     check("an address, the exact USDT, the network and the time; no link",
-          top["address"] in text and "10.20" in text and "BNB Smart Chain (BEP20)" in text
+          top["address"] in text and "<code>10.20</code> USDT on" in text and "BNB Smart Chain (BEP20)" in text
           and re.search(r"Valid for (179|180) minutes", text) and "is lost" in text
           and url_button(session, "Pay") is None and p1.pay_url is None and p1.provider == payments.NUMBERHUB,
           text[:300])
@@ -1505,6 +1511,7 @@ async def test_builtin_payments():
     api.fail_next_topup = "too_many_open_topups"
     await to_amounts(cust)
     await dp.feed_update(bot, tap(cust, button(session, "$5.00")))
+    await dp.feed_update(bot, tap(cust, button(session, "USDT")))
     await dp.feed_update(bot, tap(cust, button(session, "BEP20")))
     check("NumberHub refuses: the customer is told to try later, the owner is told why",
           "not available right now" in session.last_text()
@@ -1518,7 +1525,7 @@ async def test_builtin_payments():
     why = await refused(payments.open_link(r, mem2.id, payments.NUMBERHUB, D("5"), "usdt_tron"))
     payments.PER_DAY_PER_SHOP = before
     check("the shop's daily ceiling stops new addresses", "too many payment addresses" in why, why)
-    why = await refused(payments.open_link(r, mem2.id, payments.NUMBERHUB, D("5"), "btc"))
+    why = await refused(payments.open_link(r, mem2.id, payments.NUMBERHUB, D("5"), "xrp"))
     check("an unknown network is refused before anything is opened", "unknown network" in why, why)
     p6 = await payments.open_link(r, mem2.id, payments.NUMBERHUB, D("6"), "usdt_tron")
     api.topups[int(p6.invoice_id)]["status"] = "expired"
@@ -1545,6 +1552,35 @@ async def test_builtin_payments():
     await dp.feed_update(bot, tap(other, Pay(a="chk", id=p8.id).pack()))
     check("…and the customer's own 'I've paid' finds it too",
           (await repo.get_payment(p8.id)).status == Payment.PAID and (await repo.get_member(mem2.id)).balance == D("14.00"))
+
+    # ── another coin: Bitcoin has one network, so the address comes straight away ──
+    mem4 = await repo.get_or_create_member(r.id, 9604, None, None)
+    await to_amounts(9604)
+    await dp.feed_update(bot, tap(9604, button(session, "$20.00")))
+    await dp.feed_update(bot, tap(9604, button(session, "BTC")))
+    pbtc = (await repo.open_payments(mem4.id))[0]
+    tbtc = api.topups[int(pbtc.invoice_id)]
+    text = session.last_text()
+    check("Bitcoin: the address and the exact amount in BTC, no network question",
+          "<code>0.00031</code> BTC on <b>Bitcoin</b>" in text and tbtc["address"] in text and tbtc["method"] == "btc"
+          and payments.details(pbtc)["pay_currency"] == "BTC" and "Pay $20.00" in text, text[:260])
+    api.pay_topup(int(pbtc.invoice_id))
+    await payments.poll_all()
+    check("…paid in full: the customer gets the 20.00 dollars, the owner is told it came in BTC",
+          (await repo.get_member(mem4.id)).balance == D("20.00") and any("in BTC" in x for x in to(OWNER)))
+    await to_amounts(9604)
+    await dp.feed_update(bot, tap(9604, button(session, "$5.00")))
+    await dp.feed_update(bot, tap(9604, button(session, "ETH")))
+    check("a coin on two networks asks which", button(session, "Ethereum") is not None and button(session, "BEP20") is not None
+          and len(await repo.open_payments(mem4.id)) == 0)
+    check("the coin list comes from NumberHub once, then from memory for ten minutes",
+          sum(1 for m_, p_ in api.calls if (m_, p_) == ("GET", "/topups/methods")) == 1)
+    payments._methods_cache = None
+    api.has_methods_list = False
+    older = await payments.methods(r)
+    api.has_methods_list = True
+    payments._methods_cache = None
+    check("an API from before the coin list: the two USDT networks, nothing else", sorted(older) == ["usdt_bsc", "usdt_tron"])
 
     # ── more arrives on a payment that was already credited ──
     before_more = (await repo.get_member(mem2.id)).balance
@@ -1599,7 +1635,7 @@ async def test_builtin_payments():
           "no longer covers" in why, why)
     cover = await payments.backing(r)
     check("…the cover is the wallet against what customers paid in and still hold",
-          cover is not None and cover[0] == api.wallet and cover[1] == D("39.00"), str(cover))
+          cover is not None and cover[0] == api.wallet and cover[1] == D("59.00"), str(cover))
     check("…and payments work again once the wallet covers it",
           not await refused(payments.open_link(r, mem2.id, payments.NUMBERHUB, D("5"), "usdt_tron")))
 
@@ -1607,7 +1643,7 @@ async def test_builtin_payments():
     p7 = await payments.open_link(r, mem2.id, payments.NUMBERHUB, D("4"), "usdt_bsc")
     await dp.feed_update(bot, msg(OWNER, "/admin"))
     await dp.feed_update(bot, tap(OWNER, button(session, "Payments")))
-    await dp.feed_update(bot, tap(OWNER, button(session, "Turn off built-in USDT")))
+    await dp.feed_update(bot, tap(OWNER, button(session, "Turn off built-in crypto")))
     r = await repo.get_reseller(r.id)
     check("turned off: no new addresses", r.nh_pay == 0 and payments.connected(r) == []
           and "off" in await refused(payments.open_link(r, mem2.id, payments.NUMBERHUB, D("5"), "usdt_bsc")))
@@ -1629,6 +1665,7 @@ async def test_builtin_payments():
     check("the platform default applies only while the owner has not chosen", on_by_default and owner_said_no
           and not payments.builtin_on(await repo.get_reseller(r2.id)))
     payments.ASK_EVERY_FRESH, payments.ASK_EVERY_OLD, payments.ASK_EVERY_LATE = 20.0, 60.0, 3600.0
+    payments._methods_cache = None
     payments.TRANSPORT = None
 
 

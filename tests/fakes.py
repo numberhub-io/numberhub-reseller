@@ -65,6 +65,7 @@ class FakeNumberHub:
         self.topup_supports_reference = True         # False = an older API that ignores `reference`
         self.fail_next_topup: str | None = None      # an error code for the next POST /topups
         self.lose_topup_replies = 0                  # POST /topups that act, then "time out"
+        self.has_methods_list = True                 # False = an API from before GET /topups/methods
 
     def _scope(self, method: str, path: str) -> str:
         if path == "/balance":
@@ -76,13 +77,17 @@ class FakeNumberHub:
         return "orders:write" if method in ("POST", "DELETE") else "orders:read"
 
     # ── deposits ──
-    NETWORKS = {"usdt_bsc": ("BNB Smart Chain (BEP20)", "BEP20"), "usdt_tron": ("Tron (TRC20)", "TRC20")}
+    # method id -> (network, short name, coin)
+    NETWORKS = {"usdt_bsc": ("BNB Smart Chain (BEP20)", "BEP20", "USDT"), "usdt_tron": ("Tron (TRC20)", "TRC20", "USDT"),
+                "btc": ("Bitcoin", "Bitcoin", "BTC"), "ltc": ("Litecoin", "Litecoin", "LTC"),
+                "eth": ("Ethereum", "Ethereum", "ETH"), "eth_bsc": ("BNB Smart Chain (BEP20)", "BEP20", "ETH"),
+                "usdc_base": ("Base", "Base", "USDC")}
 
     def topup_public(self, t: dict, reused: bool | None = None) -> dict:
         payable = t["status"] == "pending"
         out = {"id": t["id"], "status": t["status"], "amount": f"{t['amount']:.2f}",
                "credited": f"{t['credited']:.2f}" if t["credited"] is not None else None, "currency": "USD",
-               "method": t["method"], "pay_currency": "USDT", "network": self.NETWORKS[t["method"]][0],
+               "method": t["method"], "pay_currency": self.NETWORKS[t["method"]][2], "network": self.NETWORKS[t["method"]][0],
                "network_short": self.NETWORKS[t["method"]][1],
                "address": t["address"] if payable else None, "pay_amount": t["pay_amount"] if payable else None,
                "expires_at": iso(t["expires_at"]), "created_at": iso(t["created_at"]), "paid_at": iso(t["paid_at"]),
@@ -110,7 +115,9 @@ class FakeNumberHub:
         now = dt.datetime.now(UTC)
         self.topups[tid] = {"id": tid, "status": "pending", "amount": amount, "credited": None, "method": method,
                             "reference": reference, "lifetime": lifetime, "address": f"0xSHOPADDR{tid}",
-                            "pay_amount": f"{amount * Decimal('1.02'):.2f}", "created_at": now, "paid_at": None,
+                            "pay_amount": (f"{amount * Decimal('1.02'):.2f}" if self.NETWORKS[method][2] in ("USDT", "USDC")
+                                           else "0.00031"),      # another coin: its own small number
+                            "created_at": now, "paid_at": None,
                             "expires_at": now + dt.timedelta(minutes=lifetime)}
         return tid
 
@@ -191,6 +198,10 @@ class FakeNumberHub:
             return self._buy(request)
         if request.method == "POST" and path == "/topups":
             return self._open_topup(request)
+        if request.method == "GET" and path == "/topups/methods" and self.has_methods_list:
+            return self._json(200, {"methods": [
+                {"id": mid, "coin": coin, "network": net, "network_short": short, "partial_credit": coin in ("USDT", "USDC")}
+                for mid, (net, short, coin) in self.NETWORKS.items()]})
         if request.method == "GET" and path.startswith("/topups/"):
             tid = path.split("/")[2]
             t = self.topups.get(int(tid)) if tid.isdigit() else None
