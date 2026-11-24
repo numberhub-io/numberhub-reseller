@@ -106,7 +106,7 @@ Open your own shop bot and send `/admin`, or tap ⚙️ Admin panel in the menu 
 | ➕ Add balance | Send `customer-ID amount`, for example `123456789 5`, or use `@username` instead of the ID |
 | ➖ Remove balance | The same format. Money reserved by an open order cannot be removed |
 | 👥 Customers | The latest 25 customers with their IDs and balances |
-| 📣 Broadcast | Sends your message to every customer of this bot |
+| 📣 Broadcast | Sends your message to every customer of this bot. You see the message and how many customers get it first, and nothing goes out until you tap ✅ Send |
 | 💲 Commission | Changes your commission. It applies to new purchases only |
 | 💳 Payments | Built-in USDT payments (one switch, nothing to set up), automatic crypto top-ups with your own OxaPay or @CryptoBot, and manual deposits customers ask for in the bot (all below). Also a minimum, the recent payments, and the deposits that wait for you |
 | 🏷 Custom prices | Your own price for one app, or for one app in one country: a fixed price (`0.35`) or its own commission (`10%`). Also a profit cap: the most you earn on one number |
@@ -126,6 +126,16 @@ Besides phone numbers, every shop sells **email codes**: a mailbox that receives
 - The price is NumberHub's price for that mail domain plus your commission, rounded up to the cent.
 - One customer may have 3 mailboxes waiting and ask for 10 an hour; a shop 50 an hour. A customer whose six mailboxes in a day all ended with no mail waits until the day has passed. NumberHub limits each account and pauses one whose mailboxes rarely get a mail, so a careless customer must not use up your limit.
 - On by default. ⚙️ Admin panel → 📧 Email codes: on / off. The button also stays hidden while your NumberHub API lists no email sites.
+
+### Proxy data
+
+Every shop also sells **proxy data**: residential IPs worldwide, bought in GB and used within the package's days (30). A customer taps 🌐 Proxy data, picks a package, confirms the price and gets a card with the host, the ports (HTTP and SOCKS5), a login and a password, three ready lines to paste (any country, one country, the same IP for a while), what is used and left, and a one-tap button that sets the proxy up in Telegram.
+
+- **Paid when bought**, unlike a number: the customer's balance is charged as soon as NumberHub confirms the package, and your NumberHub wallet pays for it at the same moment. A purchase that does not happen charges nothing. A package cannot be cancelled or returned.
+- The price is NumberHub's price for the package plus your commission, rounded up to the cent (your profit cap applies).
+- The card shows the gateway's address in numbers, not a name: your shop stays your brand, and some apps refuse a name anyway.
+- A customer may have 5 packages working at once. A lost reply from NumberHub is asked again with the same key: one package, charged once.
+- On by default. ⚙️ Admin panel → 🌐 Proxy data: on / off. A package bought before it was switched off keeps working. The button stays hidden while your NumberHub API sells no packages.
 
 ### Built-in payments (crypto, nothing to set up)
 
@@ -341,7 +351,7 @@ It loads the catalog, buys the cheapest WhatsApp number in stock, checks the hol
 | `main.py` | Starts the builder bot, every shop bot and the sync, sweep and warm loops; graceful shutdown |
 | `app/runtime.py` | Starts and stops one shop bot (aiogram `Bot` and `Dispatcher`) and its NumberHub client |
 | `app/provision.py` | The hosted path: a localhost listener NumberHub calls to create, reconnect, list, pause and resume shops |
-| `app/selling.py` | Prices, buying, cancelling, recovery of lost purchases, sync with NumberHub, settlement |
+| `app/selling.py` | Prices, buying (numbers, email codes, proxy data), cancelling, recovery of lost purchases, sync with NumberHub, settlement |
 | `app/repo.py` | All database reads and writes, including the atomic balance updates |
 | `app/models.py` | Tables: `resellers`, `members`, `member_tx`, `orders`, `price_rules`, `deposits`, `payments` |
 | `app/payments.py` | Automatic top-ups: built-in USDT into the shop's NumberHub wallet, and the owner's own OxaPay or @CryptoBot |

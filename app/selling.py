@@ -245,6 +245,7 @@ def invalidate_prices(reseller_id: int) -> None:
 def forget_prices(reseller_id: int) -> None:
     """The commission changed: no screen may show a price from the old one."""
     invalidate_prices(reseller_id)
+    _proxy_pkgs.pop(reseller_id, None)
     for k in [k for k in _from_price if k[0] == reseller_id]:
         _from_price.pop(k, None)
 
@@ -321,7 +322,7 @@ def _map_error(exc: NumberHubError, reseller: Reseller) -> SellError:
     if problem:
         asyncio.ensure_future(warn_owner(reseller, problem))
         return SellError("paused")
-    if code in ("sold_out", "purchase_failed", "unknown_service", "operators_unavailable"):
+    if code in ("sold_out", "purchase_failed", "unknown_service", "operators_unavailable", "unknown_package"):
         return SellError("sold_out")
     if code == "price_exceeded":
         return SellError("price_changed", member_price(dec(exc.data.get("price")), reseller.markup_pct))
@@ -515,6 +516,9 @@ async def email_sites(reseller: Reseller) -> list[dict]:
     try:
         rows = await cli.email_sites()
     except NumberHubError:
+        if hit is None:
+            # Asked again in a minute, not on every menu (each one waited for the timeout).
+            _email_sites[reseller.id] = (time.monotonic() - 3540, [])
         return hit[1] if hit else []
     rows = [{"site": str(r["site"])[:120], "name": str(r.get("name") or r["site"])[:60]} for r in rows]
     _email_sites[reseller.id] = (time.monotonic(), rows)
@@ -556,7 +560,9 @@ async def email_search(reseller: Reseller, q: str) -> list[dict]:
         rows = await cli.email_suggest(q)
     except NumberHubError:
         return []
-    return [{"site": str(r["site"])[:120], "name": str(r.get("name") or r["site"])[:60]} for r in rows][:8]
+    # known False = the address is a guess from the name: it is shown and warned about.
+    return [{"site": str(r["site"])[:120], "name": str(r.get("name") or r["site"])[:60],
+             "known": r.get("known") is not False} for r in rows][:8]
 
 
 async def email_domains(reseller: Reseller, site: str, fresh: bool = False) -> list[dict]:
@@ -640,6 +646,126 @@ async def _buy_email(reseller: Reseller, member: Member, site: str, site_name_: 
     return order
 
 
+# ─── proxy data packages ─────────────────────────────────────────────────────
+# Residential data in GB, used within the package's days. Unlike a number it is
+# paid for when bought: the customer is charged as soon as NumberHub confirms the
+# package, and nothing is charged when the purchase does not happen. It cannot be
+# cancelled or given back.
+PROXY_MAX_ACTIVE = 5            # packages one customer may have working at once
+_proxy_pkgs: dict[int, tuple[float, list[dict]]] = {}
+_proxy_live: dict[int, tuple[float, dict]] = {}       # order id -> NumberHub's last answer, for a few seconds
+
+
+def proxy_on(reseller: Reseller) -> bool:
+    return getattr(reseller, "proxy_on", None) != 0
+
+
+async def proxy_packages(reseller: Reseller, fresh: bool = False) -> list[dict]:
+    """The packages this shop sells, at its own price (NumberHub's plus the shop's
+    commission): [{gb, nh_price, member_price, per_gb, popular, days}]. Empty when
+    the shop's API has none or cannot be asked (the menu button then hides)."""
+    hit = _proxy_pkgs.get(reseller.id)
+    if hit and not fresh and time.monotonic() - hit[0] < 300:
+        return hit[1]
+    cli = client_for(reseller.id)
+    if cli is None:
+        return []
+    try:
+        data = await cli.proxy_packages()
+    except NumberHubError:
+        if hit is None:
+            # Asked again in a minute, not on every menu.
+            _proxy_pkgs[reseller.id] = (time.monotonic() - 240, [])
+        return hit[1] if hit else []
+    rows: list[dict] = []
+    listed = data.get("packages") if data.get("enabled") else []
+    try:
+        days = int(data.get("validity_days") or 30)
+    except (TypeError, ValueError):
+        days = 30
+    for p in listed if isinstance(listed, list) else []:
+        try:
+            gb = int(p.get("gb") or 0)
+        except (AttributeError, TypeError, ValueError):
+            continue
+        nh_price = dec(p.get("price"))
+        if gb <= 0 or nh_price <= 0:
+            continue
+        price = shop_price(reseller, {}, "proxy", str(gb), nh_price)
+        rows.append({"gb": gb, "nh_price": nh_price, "member_price": price, "days": days,
+                     "per_gb": (price / gb).quantize(CENT, rounding=ROUND_CEILING), "popular": bool(p.get("popular"))})
+    rows.sort(key=lambda r: r["gb"])
+    _proxy_pkgs[reseller.id] = (time.monotonic(), rows)
+    return rows
+
+
+async def buy_proxy(reseller: Reseller, member: Member, gb: int, shown_price: Decimal | None = None) -> Order:
+    if reseller.status != Reseller.ACTIVE or not proxy_on(reseller):
+        raise SellError("paused")
+    if member.is_blocked:
+        raise SellError("blocked")
+    if member.id in _members_buying:
+        raise SellError("duplicate")
+    _members_buying.add(member.id)
+    try:
+        return await _buy_proxy(reseller, member, int(gb), shown_price)
+    finally:
+        _members_buying.discard(member.id)
+
+
+async def _buy_proxy(reseller: Reseller, member: Member, gb: int, shown_price: Decimal | None) -> Order:
+    if await repo.proxy_active_count(member.id) >= PROXY_MAX_ACTIVE:
+        raise SellError("proxy_limit")
+    cli = client_for(reseller.id)
+    if cli is None:
+        raise SellError("paused")
+    row = next((r for r in await proxy_packages(reseller, fresh=True) if r["gb"] == gb), None)
+    if row is None:
+        raise SellError("sold_out")
+    price = row["member_price"]
+    if shown_price is not None and price > shown_price:
+        raise SellError("price_changed", price)
+    values = dict(reseller_id=reseller.id, member_id=member.id, kind="proxy", service="proxy",
+                  service_name=f"{gb} GB", country=str(gb), country_name=f"{gb} GB", country_iso=None,
+                  member_price=price, markup_pct_at_buy=reseller.markup_pct, ceiling_at_buy=row["nh_price"])
+
+    async def repriced(exc: NumberHubError) -> Decimal:
+        _proxy_pkgs.pop(reseller.id, None)
+        return shop_price(reseller, {}, "proxy", str(gb), dec(exc.data.get("price")))
+
+    order = await _backed_place(reseller, member, cli, values,
+                                lambda o: cli.buy_proxy(gb, row["nh_price"], idempotency_key(o)), repriced)
+    # The package works from this moment: it is charged now, not when something arrives.
+    await settle_order(await repo.get_order(order.id))
+    return await repo.get_order(order.id) or order
+
+
+async def proxy_live(reseller: Reseller, order: Order) -> dict | None:
+    """NumberHub's own view of a package: how to connect, what is used, whether it
+    has ended. None when it cannot be read now. Kept for a few seconds, so a
+    customer tapping Refresh does not use up the shop's API allowance."""
+    if order.kind != "proxy" or order.nh_id is None:
+        return None
+    hit = _proxy_live.get(order.id)
+    if hit and time.monotonic() - hit[0] < 20:
+        return hit[1]
+    cli = client_for(reseller.id)
+    if cli is None:
+        return None
+    try:
+        nh = await cli.proxy(order.nh_id)
+    except (NumberHubError, KeyError):
+        return None
+    if not isinstance(nh, dict) or not isinstance(nh.get("proxy"), dict):
+        return None
+    if len(_proxy_live) > 2000:
+        _proxy_live.clear()
+    _proxy_live[order.id] = (time.monotonic(), nh)
+    if nh.get("id") is not None:
+        await repo.apply_nh_state(order.id, nh)          # "completed" once it has ended
+    return nh
+
+
 async def mail_details(reseller: Reseller, order: Order) -> dict:
     """The mail that arrived on an email order: {code, link, message} (any may be
     None). Many sites verify with a link and no code, so the list of orders, which
@@ -667,6 +793,12 @@ async def _attach(reseller: Reseller, order_id: int, nh: dict) -> bool:
         log.warning("order %s: a purchase given up on exists after all (nh %s); hold taken again",
                     order_id, nh.get("id"))
         return True
+    if (cur.kind if cur is not None else str(nh.get("kind") or "")) == "proxy":
+        # A data package is paid for when bought and cannot be given back: the owner
+        # has it in their NumberHub account, and nobody paid the shop for it.
+        log.error("order %s: data package %s exists but the member no longer covers it", order_id, nh.get("id"))
+        asyncio.ensure_future(warn_owner(reseller, "proxy_unpaid"))
+        return False
     log.error("order %s: NumberHub order %s exists but the member no longer covers it — giving it back",
               order_id, nh.get("id"))
     _orphans[int(nh["id"])] = (reseller.id, 0.0)
@@ -729,6 +861,15 @@ async def recover_buying() -> None:
     ask again with the same Idempotency-Key — NumberHub replays the original
     result, or makes the purchase if the first request never arrived."""
     for order in await repo.stale_buying(older_than_sec=60):
+        try:
+            await _recover_one(order)
+        except Exception:  # noqa: BLE001
+            # One order that cannot be handled stopped the recovery of every shop's.
+            log.exception("order %s: recovery crashed; the others go on", order.id)
+
+
+async def _recover_one(order: Order) -> None:
+    for order in (order,):              # one pass: every `continue` below ends this order's turn
         if order.id in _inflight:
             continue                    # a live buy() is still on it
         if _age_sec(order) > BUYING_GIVE_UP_SEC:
@@ -736,6 +877,12 @@ async def recover_buying() -> None:
             # Any number from back then has long expired: give the hold back.
             if await repo.fail_order(order.id, "no_answer"):
                 log.warning("order %s: no answer from NumberHub for 20 h; member hold released", order.id)
+                if order.kind == "proxy":
+                    # A package is paid when bought and lasts 30 days: if it was bought
+                    # after all, the owner has it and paid for it. Say so.
+                    shop = await repo.get_reseller(order.reseller_id)
+                    if shop is not None:
+                        asyncio.ensure_future(warn_owner(shop, "proxy_unconfirmed"))
             continue
         reseller = await repo.get_reseller(order.reseller_id)
         cli = client_for(order.reseller_id)
@@ -750,6 +897,8 @@ async def recover_buying() -> None:
         try:
             if order.kind == "email":
                 nh = await cli.buy_email(order.service, order.country, ceiling, idempotency_key(order))
+            elif order.kind == "proxy":
+                nh = await cli.buy_proxy(int(order.country), ceiling, idempotency_key(order))
             else:
                 nh = await cli.buy(order.service, order.country, ceiling, idempotency_key(order))
         except TransportError:
@@ -764,6 +913,8 @@ async def recover_buying() -> None:
             _inflight.discard(order.id)
         if await _attach(reseller, order.id, nh):
             log.info("order %s: recovered purchase (nh %s)", order.id, nh.get("id"))
+            if order.kind == "proxy":
+                await settle_order(await repo.get_order(order.id))     # paid when bought
             await _show_recovered(reseller, order.id)
 
 
@@ -833,6 +984,7 @@ async def settle_order(order: Order | None) -> bool:
 
 
 _last_card_edit: dict[int, float] = {}
+_mail_tries: dict[int, int] = {}         # email order -> times its mail could not be read yet
 _offlist_polled: dict[int, float] = {}
 _backoff_until: dict[int, float] = {}
 CARD_TICK_SEC = 20
@@ -894,7 +1046,12 @@ async def sync_reseller(reseller: Reseller) -> None:
             new_codes = False
             if fresh.codes_announced == 0 and (codes or fresh.status in Order.CHARGED_STATUSES):
                 mail = await mail_details(reseller, fresh)
-                if await send_ex(bot, member.telegram_id, texts.mail_arrived(member, fresh, mail, codes)) != "retry":
+                if not mail and not codes and _mail_tries.get(fresh.id, 0) < 5:
+                    # The mail could not be read this time. Announced now, a mail with a
+                    # link and no code would be charged and never shown: ask again.
+                    _mail_tries[fresh.id] = _mail_tries.get(fresh.id, 0) + 1
+                elif await send_ex(bot, member.telegram_id, texts.mail_arrived(member, fresh, mail, codes)) != "retry":
+                    _mail_tries.pop(fresh.id, None)
                     await repo.set_codes_announced(fresh.id, max(1, len(codes)))
                     new_codes = True
             elif changed and fresh.status in ("canceled", "expired") and not codes:

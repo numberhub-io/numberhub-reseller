@@ -78,6 +78,8 @@ class Reseller(Base):
     key_by_owner: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Email codes in this shop: 0 = the owner switched them off, anything else on.
     email_on: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Proxy data packages in this shop: 0 = switched off by the owner, anything else on.
+    proxy_on: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # The morning report to the owner (app/reports.py): 0 = off, anything else on.
     # report_day = the UTC day it was last sent for, so it goes out once a day.
     daily_report: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -173,6 +175,8 @@ class Order(Base):
     # "sms" = a phone number for a code by SMS or call; "email" = a mailbox for one
     # mail from one site. An email order keeps the site in `service`, the mail domain
     # in `country` and the mailbox address in `phone`, as NumberHub's own orders do.
+    # "proxy" = a data package, paid when bought: `country` holds its size in GB and
+    # `phone` its login; it stays "received" while it works (expires_at = its end).
     kind: Mapped[str] = mapped_column(String(8), default="sms", server_default="sms")
     # Why a purchase did not happen (NumberHub's own answer: insufficient_funds,
     # sold_out, price_exceeded, ...), for the owner's statistics. None otherwise.

@@ -34,6 +34,7 @@ from app import crypto, repo, runtime, selling  # noqa: E402
 from app.db import init_db  # noqa: E402
 from app.i18n import LANGS, _table, t  # noqa: E402
 from app.models import Order, Reseller  # noqa: E402
+from fakes import iso as fakes_iso  # noqa: E402
 from app.selling import SellError, member_price, original_ceiling  # noqa: E402
 from fakes import FakeNumberHub, FakeSession, fake_bot  # noqa: E402
 from app.bots.callbacks import Adm, Ord  # noqa: E402
@@ -507,6 +508,7 @@ async def test_bot_flow():
     await dp.feed_update(bot, tap(OWNER, Adm(a="broadcast").pack()))
     before = len(session.texts())
     await dp.feed_update(bot, msg(OWNER, "Sale today!"))
+    await dp.feed_update(bot, tap(OWNER, button(session, "Send to")))      # shown to the owner first
     await asyncio.sleep(0.5)
     check("broadcast reaches unblocked customers", sum(1 for x in session.texts()[before:] if x == "Sale today!") >= 2)
     runtime._bots.pop(r.id, None)
@@ -3028,7 +3030,7 @@ async def test_small_topups_and_rupiah():
     check("typed amounts are read as written: thousands are thousands, rupiah words name rupiah", not bad,
           str([(raw, got[raw]) for raw in bad]))
     check("what is not an amount is not guessed",
-          all(payments.read_amount(x) is None for x in ("abc", "$5 idr", "-5", "IDR", "12.345,67", "", "1e5", "5..0")))
+          all(payments.read_amount(x) is None for x in ("abc", "$5 idr", "-5", "IDR", "2 50", "", "1e5", "5..0")))
     check("a shop with no way to pay keeps the old range", payments.limits(r) == (D("1"), D("1000")))
 
     async def top_up(uid):
@@ -3093,7 +3095,7 @@ async def test_small_topups_and_rupiah():
     check("dollars still work, with a comma too: $0.50", made == 1 and gw.ks_bodies[-1]["amount"] == 8250)
     made, text = await typed(9921, "4.000")
     check("under the gateway's Rp 5.000: asked again with both ranges, nothing opened",
-          made == 0 and "from <b>$0.50</b> to <b>$60.60</b>" in text and "from <b>Rp 8.250</b> to <b>Rp 999.900</b>" in text,
+          made == 0 and "from <b>$0.50</b> to <b>$60.60</b>" in text and "from <b>Rp 8.250</b> to <b>Rp 1.000.000</b>" in text,
           text[:200])
     for text in ("5.000", "2.000.000", "0.40", "100", "$5 idr", "abc", "Rp 13.000,50"):
         made, answer = await typed(9921, text)
@@ -3217,6 +3219,463 @@ async def test_small_topups_and_rupiah():
     check("a manual deposit: '13,000' and rupiah are asked again, '2,50' is $2.50", not wrong, str(wrong))
 
 
+async def test_proxy_data():
+    """Proxy data packages in a shop. A shop owner asked why not everything is in the
+    shop bot (2026-11-24). Unlike a number a package is paid for when it is bought."""
+    print("proxy data packages")
+    from aiogram.methods import SendMessage
+    from app.bots.callbacks import Adm, Nav, Ord, Px
+    from app.bots.reseller import build_router
+    from app.models import Member
+    from app.texts import order_card, proxy_card
+    own = 5141
+    api = FakeNumberHub()
+    r = await make_reseller(api, owner=own, bot_id=86601)
+    session = FakeSession(bot_id=86601)
+    bot = fake_bot(session)
+    runtime._bots[r.id] = bot
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(build_router(r.id))
+    cust = 94001
+    m = await member(r, cust, "5.00")
+    labels = lambda: [b.text for row in (session.last_markup().inline_keyboard if session.last_markup() else [])  # noqa: E731
+                      for b in row]
+    urls = lambda: [b.url for row in (session.last_markup().inline_keyboard if session.last_markup() else [])     # noqa: E731
+                    for b in row if b.url]
+    wallet0 = api.wallet
+
+    async def state_of(mem):
+        fresh = await repo.get_member(mem.id)
+        return fresh.balance, fresh.held
+
+    # ── the way in ──
+    await dp.feed_update(bot, msg(cust, "/start"))
+    check("the menu has a Proxy data button", button(session, "Proxy data") == Px(a="home").pack())
+    await dp.feed_update(bot, tap(cust, button(session, "Proxy data")))
+    check("the packages at the shop's price (the wallet's plus 30%, rounded up), the popular one marked",
+          labels()[:3] == ["1 GB · $0.64", "⭐ 5 GB · $3.19", "10 GB · $6.37"] and "within 30 days" in session.last_text(),
+          str(labels()))
+    await dp.feed_update(bot, tap(cust, button(session, "5 GB")))
+    check("the price is confirmed before anything is bought: paid now, per GB, no return",
+          "<b>$3.19</b> ($0.64 per GB), paid now" in session.last_text() and "can't be returned" in session.last_text()
+          and "Your balance: <b>$5.00</b>" in session.last_text()
+          and button(session, "Buy · $3.19") == Px(a="buy", g=5, c=319).pack() and not api.proxy_bodies)
+
+    # ── buying ──
+    await dp.feed_update(bot, tap(cust, button(session, "Buy · $3.19")))
+    o = (await repo.member_orders(m.id, 1))[0]
+    check("bought: the customer is charged at once and nothing stays held",
+          await state_of(m) == (D("1.81"), D("0")) and o.kind == "proxy" and o.status == "received"
+          and o.settled == Order.CHARGED and o.country == "5" and o.nh_price == D("2.45"), str(await state_of(m)))
+    check("one purchase at the wallet, for exactly this package at the wallet's price, paid there at once",
+          api.proxy_bodies == [{"gb": 5, "max_price": "2.45"}] and api.wallet == wallet0 - D("2.45") and api.held == 0)
+    text = session.last_text()
+    check("the card says how to connect, the address in numbers, the ready lines and what is left",
+          "Proxy data · 5 GB" in text and "Host: <code>203.0.113.7</code>" in text
+          and "<code>8080</code> (HTTP) or <code>1080</code> (SOCKS5)" in text and f"Login: <code>{o.phone}</code>" in text
+          and "Password: <code>Pw" in text and "-country-us:" in text and "-sid-" in text
+          and "Used 0.00 GB of 5.00 GB, 5.00 GB left" in text and "Works until" in text and "days left)" in text
+          and "Paid: $3.19" in text and "wallet.example" not in text, text[:400])
+    check("one tap sets it up in Telegram, with the address in numbers",
+          bool(urls()) and urls()[0].startswith(f"https://t.me/socks?server=203.0.113.7&port=1080&user={o.phone}&pass=Pw"),
+          str(urls()))
+    await dp.feed_update(bot, tap(cust, Nav(to="orders").pack()))
+    check("My orders lists the package", any("🌐 5 GB · $3.19" in x for x in labels()), str(labels()))
+    await dp.feed_update(bot, tap(cust, button(session, "5 GB")))
+    check("…and opens its card again", "Host: <code>203.0.113.7</code>" in session.last_text())
+    calls = len(api.calls)
+    await selling.sync_reseller(r)
+    check("the order sync never asks about a package (it would for 30 days)", len(api.calls) == calls)
+    selling._proxy_live.clear()
+    calls = len(api.calls)
+    await dp.feed_update(bot, tap(cust, Ord(a="view", id=o.id).pack()))
+    await dp.feed_update(bot, tap(cust, Ord(a="view", id=o.id).pack()))
+    await dp.feed_update(bot, tap(cust, Ord(a="cancel", id=o.id).pack()))
+    check("Refresh tapped again and again asks the wallet once; a package has nothing to cancel",
+          len(api.calls) - calls == 1 and (await repo.get_order(o.id)).status == "received"
+          and await state_of(m) == (D("1.81"), D("0")))
+    other = await member(r, 94002, "9.00")
+    shown, asked = len(session.texts()), len(api.calls)
+    await dp.feed_update(bot, tap(94002, Ord(a="view", id=o.id).pack()))
+    check("another customer cannot open it: told it is closed, nothing is shown, the wallet is not asked",
+          "closed" in session.alerts()[-1] and len(session.texts()) == shown and len(api.calls) == asked)
+
+    # ── what must not buy ──
+    n = len(api.proxy_bodies)
+    await dp.feed_update(bot, tap(cust, Px(a="buy", g=10, c=637).pack()))
+    check("not enough balance: nothing bought, nothing held", "$6.37" in session.last_text()
+          and len(api.proxy_bodies) == n and await state_of(m) == (D("1.81"), D("0")))
+    await dp.feed_update(bot, tap(cust, Px(a="buy", g=1, c=1).pack()))
+    check("a button made by hand with a lower price buys nothing: the real price to confirm",
+          len(api.proxy_bodies) == n and button(session, "Buy · $0.64") is not None
+          and "price just changed to <b>$0.64</b>" in session.last_text())
+    await dp.feed_update(bot, tap(cust, Px(a="buy", g=999, c=1).pack()))
+    check("a package that does not exist shows the list", len(api.proxy_bodies) == n and "Pick a package" in session.last_text())
+    api.proxy_packages_list[0]["price"] = "0.60"
+    await dp.feed_update(bot, tap(cust, Px(a="buy", g=1, c=64).pack()))
+    check("the price moved since the screen: nothing bought, the new price to confirm",
+          "price just changed to <b>$0.78</b>" in session.last_text() and button(session, "Buy · $0.78") is not None
+          and len(api.proxy_bodies) == n)
+    api.fail_next_buy = "price_exceeded"
+    await dp.feed_update(bot, tap(cust, Px(a="buy", g=1, c=78).pack()))
+    check("the wallet says the price is higher: nothing charged or held, asked to confirm again",
+          "price just changed" in session.last_text() and await state_of(m) == (D("1.81"), D("0")))
+    api.fail_next_buy = "purchase_failed"
+    await dp.feed_update(bot, tap(cust, Px(a="buy", g=1, c=78).pack()))
+    check("the wallet cannot sell one now: said plainly, nothing charged or held",
+          "can't be bought right now" in session.last_text() and await state_of(m) == (D("1.81"), D("0")))
+    api.fail_next_buy = "insufficient_funds"
+    await dp.feed_update(bot, tap(cust, Px(a="buy", g=1, c=78).pack()))
+    check("the owner's wallet is empty: the customer keeps their money",
+          await state_of(m) == (D("1.81"), D("0")) and "Host:" not in session.last_text())
+    n = len(api.proxy_bodies)
+    await asyncio.gather(dp.feed_update(bot, tap(cust, Px(a="buy", g=1, c=78).pack())),
+                         dp.feed_update(bot, tap(cust, Px(a="buy", g=1, c=78).pack())))
+    check("a double tap buys one package", len(api.proxy_bodies) == n + 1 and await state_of(m) == (D("1.03"), D("0")),
+          f"{len(api.proxy_bodies) - n} {await state_of(m)}")
+    limit = selling.PROXY_MAX_ACTIVE
+    selling.PROXY_MAX_ACTIVE = 2
+    await dp.feed_update(bot, tap(cust, Px(a="buy", g=1, c=78).pack()))
+    selling.PROXY_MAX_ACTIVE = limit
+    check("a customer with the most packages that still work is told so, and nothing is bought",
+          "already have 2 data packages" in session.last_text() and len(api.proxy_bodies) == n + 1
+          and await state_of(m) == (D("1.03"), D("0")))
+
+    # ── a reply that never came ──
+    api.lose_replies = 3
+    wallet1, n = api.wallet, len(api.orders)
+    try:
+        await selling.buy_proxy(r, other, 1, D("0.78"))
+        check("three lost replies -> processing", False)
+    except SellError as e:
+        check("the wallet's answer is lost: 'processing', the customer's money held, not charged",
+              e.reason == "processing" and await state_of(other) == (D("9.00"), D("0.78")))
+    from app import repo as _r
+    orig = _r.stale_buying
+    _r.stale_buying = lambda older_than_sec=60: orig(older_than_sec=0)
+    try:
+        await selling.recover_buying()
+        await selling.recover_buying()
+    finally:
+        _r.stale_buying = orig
+    rec = (await repo.member_orders(other.id, 1))[0]
+    sent = [x.text or "" for x in session.requests if isinstance(x, SendMessage) and x.chat_id == 94002]
+    check("recovery asks again with the same request: ONE package, charged once, and the customer gets its card",
+          len(api.orders) == n + 1 and api.wallet == wallet1 - D("0.60") and rec.status == "received"
+          and rec.settled == Order.CHARGED and await state_of(other) == (D("8.22"), D("0"))
+          and any("Proxy data · 1 GB" in x for x in sent), f"{len(api.orders) - n} {await state_of(other)}")
+
+    # ── when the wallet cannot be read ──
+    api.proxy_usage_down = True
+    selling._proxy_live.clear()
+    await dp.feed_update(bot, tap(cust, Ord(a="view", id=o.id).pack()))
+    check("no usage figures: the card still says how to connect", "Host: <code>203.0.113.7</code>" in session.last_text()
+          and "Used" not in session.last_text())
+    api.proxy_usage_down, api.proxy_down = False, True
+    selling._proxy_live.clear()
+    await dp.feed_update(bot, tap(cust, Ord(a="view", id=o.id).pack()))
+    check("the wallet does not answer: the card says so and offers to try again, nothing is lost",
+          "can't be loaded right now" in session.last_text() and button(session, "Connection details") is not None
+          and "Host:" not in session.last_text() and "Proxy data · 5 GB" in session.last_text())
+    api.proxy_down = False
+
+    # ── a package that ended ──
+    api.orders[o.nh_id].update(status="completed", expires_at=fakes_iso(dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)))
+    selling._proxy_live.clear()
+    await dp.feed_update(bot, tap(cust, Ord(a="view", id=o.id).pack()))
+    check("ended: said so, no login is shown any more, and it no longer counts as working",
+          "This package has ended" in session.last_text() and "Host:" not in session.last_text()
+          and (await repo.get_order(o.id)).status == "completed" and await repo.proxy_active_count(m.id) == 1
+          and button(session, "Proxy data") is not None)
+
+    # ── the owner's switch ──
+    await dp.feed_update(bot, msg(own, "/admin"))
+    check("the owner's panel says it is on, with a switch",
+          "🌐 Proxy data: <b>on</b>" in session.last_text() and button(session, "Proxy data: on") == Adm(a="proxy", arg="off").pack())
+    await dp.feed_update(bot, tap(own, button(session, "Proxy data: on")))
+    check("switched off", (await repo.get_reseller(r.id)).proxy_on == 0 and "🌐 Proxy data: <b>off</b>" in session.last_text()
+          and button(session, "Proxy data: off") is not None)
+    await dp.feed_update(bot, msg(cust, "/start"))
+    n = len(api.proxy_bodies)
+    gone = button(session, "Proxy data") is None
+    await dp.feed_update(bot, tap(cust, Px(a="buy", g=1, c=78).pack()))
+    check("off: the button is gone and an old button buys nothing", gone and len(api.proxy_bodies) == n)
+    second = next(x for x in await repo.member_orders(m.id, 5) if x.kind == "proxy" and x.id != o.id)
+    selling._proxy_live.clear()
+    await dp.feed_update(bot, tap(cust, Ord(a="view", id=second.id).pack()))
+    check("…and a package bought before still opens", "Host: <code>203.0.113.7</code>" in session.last_text())
+    await dp.feed_update(bot, msg(own, "/admin"))
+    await dp.feed_update(bot, tap(own, button(session, "Proxy data: off")))
+    await dp.feed_update(bot, msg(cust, "/start"))
+    check("switched on again: the button is back", button(session, "Proxy data") is not None)
+    api2 = FakeNumberHub()
+    api2.proxy_enabled = False
+    r2 = await make_reseller(api2, owner=own, bot_id=86602)
+    check("a wallet that sells no packages: no button, nothing to buy", await selling.proxy_packages(r2) == [])
+
+    # ── every language ──
+    keys = ["btn_proxy", "proxy_pick", "proxy_confirm", "btn_proxy_buy", "proxy_card_title", "proxy_active",
+            "proxy_ended", "proxy_failed", "proxy_usage", "proxy_access", "proxy_card_closed", "btn_proxy_show",
+            "btn_proxy_tg", "err_proxy_limit", "proxy_unavailable"]
+    missing = [(lang, k) for lang in LANGS for k in keys if k not in _table(lang)]
+    same = [(lang, k) for lang in LANGS if lang != "en" for k in keys if _table(lang).get(k) == _table("en")[k]]
+    check("the proxy texts exist in all 14 languages, translated", not missing and not same, f"{missing[:3]} {same[:3]}")
+    live = api.proxy_public(api.orders[second.nh_id], usage=True)
+    errs = []
+    now = dt.datetime.now(dt.timezone.utc)
+    for lang in LANGS:
+        mem = Member(id=1, reseller_id=1, telegram_id=1, language=lang, balance=D("1"), held=D("0"))
+        for st in ("buying", "received", "completed", "failed"):
+            row = Order(id=1, reseller_id=1, member_id=1, kind="proxy", service="proxy", country="5", phone="nh1x",
+                        member_price=D("3.19"), status=st, settled=Order.CHARGED if st in ("received", "completed") else 0,
+                        expires_at=now + dt.timedelta(days=29))
+            for card in (proxy_card(mem, row, live), proxy_card(mem, row, None), order_card(mem, row)):
+                if "{" in card[0] or not card[1].inline_keyboard:
+                    errs.append(f"{lang}/{st}")
+    check("the card renders cleanly in every language and state, with and without the wallet's answer", not errs, str(errs[:5]))
+    runtime._bots.pop(r.id, None)
+
+
+async def test_review_2026_11_24():
+    """What the full review of 2026-11-24 found, each as a check."""
+    print("fixes from the full review")
+    from aiogram.methods import SendMessage
+    from app import fx, payments
+    from app.bots.callbacks import Adm, Em, Nav
+    from app.bots.reseller import build_router, parse_amount
+    from app.models import Payment
+    from fakes import FakeFx, FakeGateways
+    gw = FakeGateways()
+    gw.next = 9000
+    payments.TRANSPORT = gw.transport()
+    fakefx = FakeFx()
+    fx.TRANSPORT, fx._rate = fakefx.transport(), None
+    await fx.refresh()
+    own = 5151
+    api = FakeNumberHub()
+    api.email_guesses = [{"site": "shopee.com", "name": "Shopee"}]
+    api.email_domains["shopee.com"] = [{"domain": "gmx.com", "price": "0.03", "in_stock": True, "delivery": None}]
+    r = await make_reseller(api, owner=own, bot_id=86701)
+    session = FakeSession(bot_id=86701)
+    bot = fake_bot(session)
+    runtime._bots[r.id] = bot
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(build_router(r.id))
+    cust = 95001
+    m = await member(r, cust, "2.00")
+    to = lambda uid: [x.text or "" for x in session.requests if isinstance(x, SendMessage) and x.chat_id == uid]  # noqa: E731
+    await dp.feed_update(bot, msg(own, "/admin"))
+    await dp.feed_update(bot, tap(own, button(session, "Payments")))
+    await dp.feed_update(bot, tap(own, button(session, "Connect 🪙 OxaPay")))
+    await dp.feed_update(bot, msg(own, gw.ox_key))
+    await repo.update_reseller(r.id, deposit_info="Bank transfer, then send the receipt")
+    r = await repo.get_reseller(r.id)
+
+    # ── a form ends when its user does something else ──
+    await dp.feed_update(bot, msg(cust, "/start"))
+    await dp.feed_update(bot, tap(cust, Nav(to="deposit_manual").pack()))
+    await dp.feed_update(bot, msg(cust, "5"))
+    check("a manual deposit asks for its proof", "transaction ID" in session.last_text())
+    await dp.feed_update(bot, msg(cust, "/buy"))
+    await dp.feed_update(bot, msg(cust, "whatsapp"))
+    check("a command ends the deposit: text typed after it is a search, not a proof sent to the owner",
+          await repo.pending_deposit(m.id) is None and "Results for" in session.last_text(), session.last_text()[:80])
+    n_links = len(gw.ox)
+    await dp.feed_update(bot, tap(cust, Nav(to="deposit").pack()))
+    await dp.feed_update(bot, tap(cust, button(session, "Other amount")))
+    await dp.feed_update(bot, tap(cust, Ord(a="view", id=999999).pack()))
+    await dp.feed_update(bot, msg(cust, "5"))
+    check("a button outside the top-up ends it: '5' typed later opens no payment", len(gw.ox) == n_links)
+    await dp.feed_update(bot, msg(cust, "/start"))
+    await dp.feed_update(bot, tap(cust, button(session, "Email codes")))
+    await dp.feed_update(bot, tap(cust, Nav(to="orders").pack()))
+    await dp.feed_update(bot, msg(cust, "openai.com"))
+    check("…and a site typed after leaving Email codes opens no mailbox list", "gmx.com" not in session.last_text())
+
+    # ── amounts are read one way everywhere ──
+    check("the owner's amounts: thousands and rupiah are not guessed, an exponent is not an amount",
+          parse_amount("13.000") is None and parse_amount("13,000") is None and parse_amount("1e5") is None
+          and parse_amount("Rp 5000") is None and parse_amount("2,5") == D("2.50") and parse_amount("$3") == D("3.00")
+          and parse_amount("0.004") is None and parse_amount("1000") == D("1000.00"))
+    check("digits apart are not joined, bank-style rupiah is read, coins that mean dollars are dollars",
+          payments.read_amount("2 50") is None and payments.read_amount("Rp 50.000,00") == ("idr", D("50000.00"), True)
+          and payments.read_amount("Rp13.000,-") == ("idr", D("13000"), True)
+          and payments.read_amount("5 usdt") == ("usd", D("5"), False) and payments.read_amount("US$5") == ("usd", D("5"), False))
+    for text, ok in (("5.000", False), ("2,500", False), ("13,000", False), ("$1,000", True), ("7", True)):
+        await dp.feed_update(bot, msg(cust, "/start"))
+        await dp.feed_update(bot, tap(cust, Nav(to="deposit_manual").pack()))
+        await dp.feed_update(bot, msg(cust, text))
+        if ("transaction ID" in session.last_text()) != ok:
+            check(f"a manual deposit of {text!r}", False, session.last_text()[:60])
+    check("a manual deposit written in thousands is asked again, never claimed as that many dollars",
+          await repo.pending_deposit(m.id) is None)
+    await dp.feed_update(bot, msg(cust, "/start"))
+    await dp.feed_update(bot, tap(cust, Nav(to="deposit").pack()))
+    await dp.feed_update(bot, tap(cust, button(session, "Other amount")))
+    n_links = len(gw.ox)
+    await dp.feed_update(bot, msg(cust, "1.000"))
+    check("'1.000' where only dollars are taken is asked again: no $1000 link, no $1 link",
+          len(gw.ox) == n_links and "Send an amount from" in session.last_text())
+
+    # ── the daily limit counts what was opened and not paid ──
+    before = await repo.payments_today(m.id)
+    p = await repo.create_payment(r.id, m.id, payments.OXAPAY, D("1"))
+    refused = await repo.payments_today(m.id)
+    await repo.attach_invoice(p.id, "inv-rev-1", "https://pay.example/1", dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1))
+    opened = await repo.payments_today(m.id)
+    check("a payment the gateway refused does not count against the customer's day; one that was opened does",
+          refused == before and opened == before + 1, f"{before} {refused} {opened}")
+
+    # ── a payment that can never be confirmed is closed, not asked for ever ──
+    late = await repo.create_payment(r.id, m.id, payments.OXAPAY, D("5"))
+    await repo.attach_invoice(late.id, "no-such-invoice", "https://pay.example/x",
+                              dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=7))
+    fresh = await repo.create_payment(r.id, m.id, payments.OXAPAY, D("5"))
+    await repo.attach_invoice(fresh.id, "no-such-invoice-2", "https://pay.example/y",
+                              dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=30))
+    s1 = await payments.check(await repo.get_payment(late.id), r)
+    s2 = await payments.check(await repo.get_payment(fresh.id), r)
+    check("the gateway cannot be asked about it: long past its end it is closed, inside its time it stays open",
+          s1 == "expired" and (await repo.get_payment(late.id)).status == Payment.EXPIRED
+          and s2 == "unknown" and (await repo.get_payment(fresh.id)).status == Payment.PENDING, f"{s1} {s2}")
+
+    # ── the owner's minimum cannot refuse every top-up ──
+    await dp.feed_update(bot, msg(own, "/admin"))
+    await dp.feed_update(bot, tap(own, button(session, "Payments")))
+    await dp.feed_update(bot, tap(own, button(session, "Minimum")))
+    await dp.feed_update(bot, msg(own, "10000"))
+    check("a minimum above what one top-up can be is refused with the reason",
+          "at most <b>$1000.00</b>" in session.last_text() and (await repo.get_reseller(r.id)).deposit_min is None,
+          session.last_text()[:120])
+    await dp.feed_update(bot, msg(own, "13.000"))
+    check("…and one written in thousands is asked again", "in US dollars" in session.last_text()
+          and (await repo.get_reseller(r.id)).deposit_min is None)
+    await dp.feed_update(bot, msg(own, "/admin"))
+    await repo.update_reseller(r.id, deposit_min=D("5000"))
+    check("a minimum left over from before is not applied when it would refuse everything",
+          payments.limits(await repo.get_reseller(r.id)) == (D("1"), D("1000")))
+    await repo.update_reseller(r.id, deposit_min=None)
+
+    # ── a broadcast is shown first ──
+    await member(r, 95002, "0")
+    await dp.feed_update(bot, msg(own, "/admin"))
+    await dp.feed_update(bot, tap(own, Adm(a="broadcast").pack()))
+    await dp.feed_update(bot, msg(own, "First draft"))
+    first_button = button(session, "Send to")
+    check("the owner sees the message and how many get it; nothing is sent yet",
+          "Your customers will get this message" in session.last_text() and "First draft" in session.last_text()
+          and "Nothing has been sent yet" in session.last_text() and first_button is not None
+          and button(session, "Don't send") is not None and not any("First draft" in x for x in to(95002)))
+    await dp.feed_update(bot, tap(own, Adm(a="broadcast").pack()))
+    await dp.feed_update(bot, msg(own, "Second draft"))
+    await dp.feed_update(bot, tap(own, first_button))
+    await asyncio.sleep(0.3)
+    check("the Send button of an older draft sends nothing", "no longer waiting" in session.alerts()[-1]
+          and not any("draft" in x for x in to(95002)))
+    await dp.feed_update(bot, tap(own, button(session, "Send to")))
+    await asyncio.sleep(0.5)
+    check("the Send button of the draft on screen sends exactly that one, once",
+          [x for x in to(95002) if "draft" in x] == ["Second draft"], str(to(95002)))
+    await dp.feed_update(bot, tap(own, Adm(a="bc_send", arg="00000000").pack()))
+    await asyncio.sleep(0.3)
+    check("…and tapping Send again sends nothing more", [x for x in to(95002) if "draft" in x] == ["Second draft"])
+
+    # ── email: an old button cannot buy another site's mailbox; a guessed address is shown ──
+    await dp.feed_update(bot, msg(cust, "/start"))
+    await dp.feed_update(bot, tap(cust, button(session, "Email codes")))
+    await dp.feed_update(bot, tap(cust, button(session, "OpenAI")))
+    await dp.feed_update(bot, tap(cust, button(session, "gmx.com")))
+    old_buy = button(session, "Get the address")
+    await dp.feed_update(bot, tap(cust, Em(a="home").pack()))
+    await dp.feed_update(bot, tap(cust, button(session, "Google")))
+    n_mail = len(api.email_bodies)
+    await dp.feed_update(bot, tap(cust, old_buy))
+    check("a 'Get the address' button from another site's screen buys nothing: the picker again",
+          len(api.email_bodies) == n_mail and "Which site sends the code" in session.last_text())
+    await dp.feed_update(bot, tap(cust, Em(a="buy", i=0, c=99).pack()))
+    check("…and neither does a button made by hand", len(api.email_bodies) == n_mail)
+    await dp.feed_update(bot, msg(cust, "shopee"))
+    check("a site found by name whose address is a guess shows the address on its button",
+          button(session, "Shopee · shopee.com") is not None, str(session.last_text())[:60])
+    await dp.feed_update(bot, tap(cust, button(session, "Shopee")))
+    check("…and asks to check it before a mailbox is opened", "<b>shopee.com</b>" in session.last_text()
+          and "Check the spelling" in session.last_text())
+    await dp.feed_update(bot, tap(cust, button(session, "gmx.com")))
+    api.fail_next_buy = "sold_out"
+    await dp.feed_update(bot, tap(cust, button(session, "Get the address")))
+    check("a mailbox that cannot be had is not called 'no numbers for this country'",
+          "No mailbox is available" in session.last_text() and "numbers" not in session.last_text().lower())
+
+    # ── a mail that could not be read once is asked for again, not announced empty ──
+    await dp.feed_update(bot, tap(cust, button(session, "Back")))
+    await dp.feed_update(bot, tap(cust, button(session, "gmx.com")))
+    await dp.feed_update(bot, tap(cust, button(session, "Get the address")))
+    box = (await repo.member_orders(m.id, 1))[0]
+    api.mail_arrives(box.nh_id, link="https://shopee.example/confirm?t=abc")
+    real, asked = selling.mail_details, []
+
+    async def flaky(shop, order):
+        asked.append(order.id)
+        return {} if len(asked) == 1 else await real(shop, order)
+    selling.mail_details = flaky
+    try:
+        await selling.sync_reseller(r)
+        first_pass = [x for x in to(cust) if "shopee.example" in x or "sent a mail" in x]
+        await selling.sync_reseller(r)
+    finally:
+        selling.mail_details = real
+    check("the mail's details could not be read: nothing is announced yet; next pass the link is delivered",
+          not first_pass and (await repo.get_order(box.id)).codes_announced == 1
+          and any("https://shopee.example/confirm?t=abc" in x for x in to(cust)), str(first_pass))
+
+    # ── one order that cannot be recovered does not stop the others ──
+    api_b = FakeNumberHub()
+    shop_b = await make_reseller(api_b, owner=own, bot_id=86702)
+    mb = await member(shop_b, 95003, "3.00")
+    values = dict(kind="sms", service="wa", service_name="WhatsApp", country="187", country_name="USA", country_iso="US",
+                  member_price=D("0.39"), markup_pct_at_buy=D("30"), ceiling_at_buy=D("0.30"))
+    stuck_a = await repo.create_order_with_hold(reseller_id=r.id, member_id=m.id, **values)
+    stuck_b = await repo.create_order_with_hold(reseller_id=shop_b.id, member_id=mb.id, **values)
+    from app import repo as _r
+    orig_stale, orig_client = _r.stale_buying, selling.client_for
+
+    def broken(rid):
+        if rid == r.id:
+            raise RuntimeError("this shop's client is broken")
+        return orig_client(rid)
+    _r.stale_buying = lambda older_than_sec=60: orig_stale(older_than_sec=0)
+    selling.client_for = broken
+    try:
+        await selling.recover_buying()
+    finally:
+        _r.stale_buying, selling.client_for = orig_stale, orig_client
+    check("recovery crashes on one shop's order: the next shop's order is still finished",
+          (await repo.get_order(stuck_a.id)).status == Order.BUYING and (await repo.get_order(stuck_b.id)).status == "waiting")
+
+    # ── a package with no clear answer for 20 hours: money back, and the owner is told ──
+    lost = await repo.create_order_with_hold(reseller_id=shop_b.id, member_id=mb.id, kind="proxy", service="proxy",
+                                             service_name="1 GB", country="1", country_name="1 GB", country_iso=None,
+                                             member_price=D("0.64"), markup_pct_at_buy=D("30"), ceiling_at_buy=D("0.49"))
+    session_b = FakeSession(bot_id=86702)
+    runtime._bots[shop_b.id] = fake_bot(session_b)
+    give_up = selling.BUYING_GIVE_UP_SEC
+    _r.stale_buying = lambda older_than_sec=60: orig_stale(older_than_sec=0)
+    selling.BUYING_GIVE_UP_SEC = -1
+    try:
+        await selling.recover_buying()
+        await asyncio.sleep(0.2)
+    finally:
+        _r.stale_buying, selling.BUYING_GIVE_UP_SEC = orig_stale, give_up
+    told = [x.text or "" for x in session_b.requests if isinstance(x, SendMessage) and x.chat_id == own]
+    held = (await repo.get_member(mb.id)).held
+    check("the customer's money is given back and the owner is told to look for the package",
+          (await repo.get_order(lost.id)).status == Order.FAILED and held == D("0.39")
+          and any("no clear answer" in x for x in told), f"{held} {told[-1:]}")
+    await repo.fail_order(stuck_a.id, "test")
+    runtime._bots.pop(r.id, None)
+    runtime._bots.pop(shop_b.id, None)
+
+
 async def main():
     await init_db()
     test_prices()
@@ -3224,6 +3683,7 @@ async def main():
     for fn in (test_buy_and_code, test_no_code_refund, test_failures, test_lost_reply, test_cancel,
                test_races_and_limits, test_bot_flow, test_builder, test_provision, test_custom_prices, test_picker_pages, test_rank_order, test_dead_token, test_rejected_key, test_deposits, test_auto_payments, test_builtin_payments, test_owner_stats, test_kasera_qris, test_paid_left, test_email_codes, test_paused_shop, test_review_money,
                test_review_sync, test_review_bots, test_review_runtime, test_small_topups_and_rupiah,
+               test_proxy_data, test_review_2026_11_24,
                test_cards_render):
         try:
             await fn()

@@ -144,7 +144,12 @@ class NumberHub:
             try:
                 r = await self._send("POST", path, content=body,
                                      headers={"Idempotency-Key": idempotency_key})
-                return r.json()[field]
+                try:
+                    return r.json()[field]
+                except (KeyError, TypeError, ValueError) as exc:
+                    # Accepted, with no order in the answer: the purchase may have
+                    # happened. Asked again with the same key, like a lost reply.
+                    raise TransportError("bad_reply", r.status_code) from exc
             except TransportError as exc:
                 last, maybe_sent = exc, True
                 await asyncio.sleep(1.5 * (attempt + 1))
@@ -204,6 +209,31 @@ class NumberHub:
 
     async def cancel_email(self, nh_id: int) -> dict:
         return await self._req("DELETE", f"/emails/{nh_id}")
+
+    # ── proxy data packages: residential data in GB, paid up front ────────────
+    async def proxy_packages(self) -> dict:
+        """{enabled, validity_days, packages: [{gb, price, per_gb, save_percent, popular}]}."""
+        return await self._req("GET", "/proxy/packages")
+
+    @staticmethod
+    def proxy_body(gb: int, max_price: Decimal) -> bytes:
+        return json.dumps({"gb": int(gb), "max_price": f"{max_price:.2f}"},
+                          separators=(",", ":"), sort_keys=True).encode()
+
+    async def buy_proxy(self, gb: int, max_price: Decimal, idempotency_key: str) -> dict:
+        """A data package of `gb` GB. Same rules as buy(): the key makes a retry return
+        the same package, and an unclear answer raises TransportError. It is paid for
+        at once and cannot be given back."""
+        return await self._purchase("/proxies", self.proxy_body(gb, max_price), idempotency_key, "proxy")
+
+    async def proxy(self, nh_id: int) -> dict:
+        """The package with how to connect, and what is used when that can be read:
+        the order plus its `proxy` block {host, ip, http_port, socks_port, username,
+        password, gb, lines, usage}."""
+        try:
+            return (await self._req("GET", f"/proxies/{int(nh_id)}/usage"))["proxy"]
+        except TransportError:
+            return (await self._req("GET", f"/proxies/{int(nh_id)}"))["proxy"]
 
     # ── deposits into the reseller's wallet (built-in payments) ───────────────
     async def open_topup(self, amount: Decimal, method: str, reference: str, lifetime_minutes: int) -> dict:

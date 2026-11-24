@@ -73,6 +73,15 @@ class FakeNumberHub:
             "reddit.com": [],
         }
         self.email_bodies: list[dict] = []
+        # proxy data packages (GET /proxy/packages, POST /proxies, GET /proxies/{id} and .../usage)
+        self.proxy_enabled = True
+        self.proxy_packages_list = [
+            {"code": "p1", "gb": 1, "price": "0.49", "per_gb": "0.49", "save_percent": 0, "popular": False},
+            {"code": "p5", "gb": 5, "price": "2.45", "per_gb": "0.49", "save_percent": 0, "popular": True},
+            {"code": "p10", "gb": 10, "price": "4.90", "per_gb": "0.49", "save_percent": 0, "popular": False}]
+        self.proxy_bodies: list[dict] = []
+        self.proxy_usage_down = False                # GET /proxies/{id}/usage answers 502
+        self.proxy_down = False                      # every GET /proxies/... answers 503
         # deposits into the wallet (POST /topups, GET /topups/{id})
         self.topups: dict[int, dict] = {}
         self.next_topup = 500
@@ -85,7 +94,7 @@ class FakeNumberHub:
     def _scope(self, method: str, path: str) -> str:
         if path == "/balance":
             return "wallet:read"
-        if path in ("/services", "/countries") or path.startswith("/email/"):
+        if path in ("/services", "/countries") or path.startswith("/email/") or path.startswith("/proxy/"):
             return "catalog:read"
         if path.startswith("/topups"):
             return "orders:write" if method == "POST" else "wallet:read"
@@ -222,13 +231,31 @@ class FakeNumberHub:
         if request.method == "GET" and path == "/countries":
             svc = request.url.params.get("service")
             return self._json(200, {"service": svc, "countries": self.countries.get(svc, [])})
-        if request.method == "POST" and path in ("/numbers", "/emails"):
+        if request.method == "POST" and path in ("/numbers", "/emails", "/proxies"):
             return self._buy(request)
+        if request.method == "GET" and path == "/proxy/packages":
+            return self._json(200, {"enabled": self.proxy_enabled, "validity_days": 30, "currency": "USD",
+                                    "from_per_gb": "0.49",
+                                    "packages": self.proxy_packages_list if self.proxy_enabled else []})
+        if request.method == "GET" and path.startswith("/proxies/"):
+            parts = path.split("/")
+            o = self.orders.get(int(parts[2])) if parts[2].isdigit() else None
+            if o is None or o.get("kind") != "proxy":
+                return self._json(404, {"error": "not_found"})
+            if self.proxy_down:
+                return self._json(503, {"error": "unavailable"})
+            if len(parts) > 3 and parts[3] == "usage":
+                if self.proxy_usage_down:
+                    return self._json(502, {"error": "usage_unavailable"})
+                return self._json(200, {"proxy": self.proxy_public(o, usage=True)})
+            return self._json(200, {"proxy": self.proxy_public(o)})
         if request.method == "GET" and path == "/email/sites":
             return self._json(200, {"sites": self.email_sites_list if self.email_has else []})
         if request.method == "GET" and path == "/email/suggest":
             q = (request.url.params.get("q") or "").lower()
             hits = [dict(s, known=True) for s in self.email_sites_list if q in s["site"] or q in s["name"].lower()]
+            # a name the catalogue only knows as an app: its address is a guess
+            hits += [dict(s, known=False) for s in getattr(self, "email_guesses", []) if q in s["name"].lower()]
             return self._json(200, {"suggestions": hits if self.email_has else []})
         if request.method == "GET" and path.startswith("/email/sites/") and path.endswith("/domains"):
             from urllib.parse import unquote
@@ -315,6 +342,50 @@ class FakeNumberHub:
             self.then_rate_limit = 0
             raise httpx.ReadTimeout("lost reply", request=request)
 
+    def proxy_public(self, o: dict, usage: bool = False) -> dict:
+        """GET /proxies/{id}: the order plus its `proxy` block (with `usage` from .../usage)."""
+        login, pw, ip = o["phone"], o["_password"], "203.0.113.7"
+        used, limit = int(o.get("_used", 0)), o["_gb"] * 1024 ** 3
+        size = lambda n: f"{n / 1024 ** 3:.2f} GB"   # noqa: E731
+        return {**self.public(o), "proxy": {
+            "host": "proxy.wallet.example", "ip": ip, "http_port": 8080, "socks_port": 1080,
+            "username": login, "password": pw, "gb": o["_gb"], "validity_days": 30, "country": None,
+            "lines": {"any": f"{ip}:8080:{login}:{pw}", "country": f"{ip}:8080:{login}-country-us:{pw}",
+                      "sticky": f"{ip}:8080:{login}-country-us-sid-k3x9w2:{pw}",
+                      "socks": f"{ip}:1080:{login}-country-us:{pw}"},
+            "telegram_url": f"https://t.me/socks?server=proxy.wallet.example&port=1080&user={login}&pass={pw}",
+            "setup": {},
+            "usage": ({"used_bytes": used, "limit_bytes": limit, "left_bytes": limit - used, "used": size(used),
+                       "total": size(limit), "left": size(limit - used), "left_pct": 100} if usage else None)}}
+
+    def _do_buy_proxy(self, body: dict) -> tuple[int, dict]:
+        self.proxy_bodies.append(body)
+        if self.fail_next_buy:
+            code, self.fail_next_buy = self.fail_next_buy, None
+            if code == "price_exceeded":
+                return 409, {"error": code, "price": "3.00", "max_price": body["max_price"]}
+            return (402 if code == "insufficient_funds" else 409), {"error": code}
+        pkg = (next((p for p in self.proxy_packages_list if p["gb"] == body.get("gb")), None)
+               if self.proxy_enabled else None)
+        if pkg is None:
+            return 404, {"error": "unknown_package"}
+        price = Decimal(pkg["price"])
+        if Decimal(body["max_price"]) < price:
+            return 409, {"error": "price_exceeded", "price": f"{price:.2f}", "max_price": body["max_price"]}
+        if self.wallet - self.held < price:
+            return 402, {"error": "insufficient_funds"}
+        self.wallet -= price                         # paid when bought: nothing is held
+        self.next_id += 1
+        now = dt.datetime.now(UTC)
+        o = {"id": self.next_id, "kind": "proxy", "service": "proxy",
+             "service_name": f"{pkg['gb']} GB residential proxy", "country": "", "country_name": "Worldwide",
+             "phone": f"nh{self.next_id}x", "verification": "sms", "status": "received", "status_label": "",
+             "price": f"{price:.2f}", "code": None, "codes": [], "operator": None, "created_at": iso(now),
+             "expires_at": iso(now + dt.timedelta(days=30)), "cancel_available_at": None,
+             "_charged": True, "_gb": pkg["gb"], "_password": f"Pw{self.next_id}secret", "_used": 0}
+        self.orders[o["id"]] = o
+        return 201, {"proxy": self.proxy_public(o)}
+
     def _do_buy_email(self, body: dict) -> tuple[int, dict]:
         self.email_bodies.append(body)
         if self.fail_next_buy:
@@ -344,6 +415,8 @@ class FakeNumberHub:
     def _do_buy(self, body: dict) -> tuple[int, dict]:
         if "site" in body:
             return self._do_buy_email(body)
+        if "gb" in body:
+            return self._do_buy_proxy(body)
         if self.fail_next_buy:
             code, self.fail_next_buy = self.fail_next_buy, None
             if code == "insufficient_funds":

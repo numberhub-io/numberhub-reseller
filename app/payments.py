@@ -449,8 +449,9 @@ def usd_to_idr(reseller: Reseller, amount: Decimal) -> int | None:
 _AMOUNT_WORDS = (("rupiah", "idr", 1), ("ribu", "idr", 1000), ("juta", "idr", 1_000_000), ("idr", "idr", 1),
                  ("rp.", "idr", 1), ("rp", "idr", 1), ("rb", "idr", 1000), ("jt", "idr", 1_000_000),
                  ("k", "idr", 1000), ("dollars", "usd", 1), ("dollar", "usd", 1), ("dolar", "usd", 1),
-                 ("usd", "usd", 1), ("$", "usd", 1))
-_GROUPED = re.compile(r"^[1-9]\d{0,2}(?:[., ]\d{3})+$")
+                 ("usdt", "usd", 1), ("usd", "usd", 1), ("us$", "usd", 1), ("$", "usd", 1))
+# 13.000 / 13,000 / 13 000, and with cents after it as banks write it: 50.000,00
+_GROUPED = re.compile(r"^([1-9]\d{0,2}(?:[., ]\d{3})+)(?:[.,](\d{2}))?$")
 
 
 def read_amount(raw: str) -> tuple[str | None, Decimal, bool] | None:
@@ -471,14 +472,16 @@ def read_amount(raw: str) -> tuple[str | None, Decimal, bool] | None:
                 return None                 # "$5 idr": two currencies
             hint, times = cur, times * mult
             s = s.replace(word, " ")
-    s = s.strip().strip(".").strip()
+    s = re.sub(r"[.,]-$", "", s.strip()).strip().strip(".").strip()      # "Rp 13.000,-"
     if not s:
         return None
-    grouped = bool(_GROUPED.match(s))
+    m = _GROUPED.match(s)
+    grouped = m is not None
     if grouped:
-        digits = re.sub(r"[., ]", "", s)
+        digits = re.sub(r"[., ]", "", m.group(1)) + (f".{m.group(2)}" if m.group(2) else "")
     else:
-        digits = s.replace(" ", "").replace(",", ".")
+        # "2 50" is not 250: digits apart from each other are not joined.
+        digits = s.replace(",", ".")
         if not re.fullmatch(r"\d+(?:\.\d+)?", digits):
             return None
     try:
@@ -515,7 +518,9 @@ def limits(reseller: Reseller) -> tuple[Decimal, Decimal]:
     low = min((lim[0] for lim in have), default=CRYPTO_MIN)
     high = max((lim[1] for lim in have), default=MAX_AMOUNT)
     own_min = Decimal(reseller.deposit_min) if getattr(reseller, "deposit_min", None) else Decimal("0")
-    return max(low, own_min), high
+    # A minimum above what one payment can be (a figure typed in another currency,
+    # or a gateway removed since) would refuse every top-up: it is not applied.
+    return (max(low, own_min) if max(low, own_min) <= high else low), high
 
 
 def presets(reseller: Reseller) -> list[Decimal]:
@@ -872,6 +877,9 @@ async def check(payment: Payment, reseller: Reseller | None = None, bot=None) ->
                 shown = details(payment)
                 if state == "paid" and idr != int(shown.get("idr") or -1):
                     log.error("reseller %s: payment %s paid with another amount (%s)", reseller.id, payment.id, idr)
+                    if late:
+                        await repo.close_payment(payment.id, Payment.EXPIRED)
+                        return "expired"
                     return "unknown"
                 if state == "paid" and (shown.get("test") or not live):
                     # A test key's payment: the flow works, and no balance is added.
@@ -884,6 +892,12 @@ async def check(payment: Payment, reseller: Reseller | None = None, bot=None) ->
                 state = await client_for(payment.provider, key).status(payment.invoice_id)
         except PayError as exc:
             log.warning("reseller %s: payment %s check failed: %s", reseller.id, payment.id, exc)
+            if late:
+                # Long past its end and the gateway still cannot be asked (another
+                # account's key, an invoice it does not know): it was asked every 20 s
+                # for ever, and 500 such rows kept new payments from being checked.
+                await repo.close_payment(payment.id, Payment.EXPIRED)
+                return "expired"
             return "unknown"
     if state == "paid":
         done = await repo.credit_payment(payment.id, credit)

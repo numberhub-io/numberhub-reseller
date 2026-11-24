@@ -42,6 +42,14 @@ class Em(CallbackData, prefix="e"):
     a: str                     # home | site | doms | dom | buy
     i: int = 0                 # place in the list
     c: int = 0                 # buy: the price on the button, in cents
+    t: str = ""                # a short mark of the site (and domain) the button was made for
+
+
+class Px(CallbackData, prefix="px"):
+    """Proxy data packages."""
+    a: str                     # home | pkg | buy
+    g: int = 0                 # the package's size in GB
+    c: int = 0                 # buy: the price on the button, in cents
 
 
 class Lang(CallbackData, prefix="l"):

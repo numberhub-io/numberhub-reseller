@@ -67,7 +67,7 @@ async def update_reseller(reseller_id: int, **values) -> None:
                "bot_token_enc", "api_key_enc", "api_key_hint", "max_profit", "deposit_info", "deposit_min",
                "oxapay_key_enc", "cryptobot_token_enc", "nh_pay", "daily_report",
                "kasera_key_enc", "kasera_rate", "key_by_owner", "email_on", "kasera_auto", "kasera_extra",
-               "pay_note"}
+               "pay_note", "proxy_on"}
     values = {k: v for k, v in values.items() if k in allowed}
     if values:
         async with session_factory() as s:
@@ -431,10 +431,21 @@ async def recently_received(reseller_id: int, minutes: int = 25) -> list[Order]:
         now = _now()
         live = or_(Order.expires_at >= now - dt.timedelta(minutes=5),
                    and_(Order.expires_at.is_(None), Order.created_at >= now - dt.timedelta(minutes=minutes)))
+        # A data package stays "received" for its whole 30 days and nothing arrives on
+        # it: it is read when its owner opens it, never in this loop.
         q = select(Order).where(Order.reseller_id == reseller_id,
                                 Order.status.not_in(Order.OPEN + Order.TERMINAL),
-                                live, Order.nh_id.is_not(None))
+                                live, Order.nh_id.is_not(None), Order.kind != "proxy")
         return list((await s.execute(q)).scalars())
+
+
+async def proxy_active_count(member_id: int) -> int:
+    """Data packages this customer has that still work, or are being bought."""
+    async with session_factory() as s:
+        q = select(func.count()).select_from(Order).where(
+            Order.member_id == member_id, Order.kind == "proxy", Order.status.in_((Order.BUYING, "received")),
+            or_(Order.expires_at.is_(None), Order.expires_at > _now()))
+        return int(await s.scalar(q) or 0)
 
 
 async def unsettled_ended(limit: int = 200) -> list[Order]:
@@ -768,10 +779,14 @@ async def open_payments(member_id: int) -> list[Payment]:
 
 
 async def payments_today(member_id: int) -> int:
+    """Payments this customer opened in 24 h and did not pay. A refused attempt opened
+    nothing and a paid one is a customer: ten paid $0.50 top-ups in a day, or a
+    gateway that was down for ten taps, locked a customer out for a day."""
     since = _now() - dt.timedelta(hours=24)
     async with session_factory() as s:
         return int(await s.scalar(select(func.count(Payment.id)).where(
-            Payment.member_id == member_id, Payment.created_at >= since)) or 0)
+            Payment.member_id == member_id, Payment.created_at >= since,
+            Payment.invoice_id.is_not(None), Payment.status != Payment.PAID)) or 0)
 
 
 async def payments_today_shop(reseller_id: int, provider: str) -> int:

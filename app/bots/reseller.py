@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import hashlib
 import re
 from decimal import Decimal, InvalidOperation
 
@@ -16,12 +17,12 @@ from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app import payments, repo, selling
-from app.bots.callbacks import AZ, Adm, Buy, Cty, Em, Lang, Nav, Noop, Ord, Pay, Svc, SvcPage
+from app.bots.callbacks import AZ, Adm, Buy, Cty, Em, Lang, Nav, Noop, Ord, Pay, Px, Svc, SvcPage
 from app.catalog_ui import ANY_OTHER, LETTERS, POPULAR, by_letter, icon, letter_counts, more_popular, nice_name
 from app.i18n import LANGS, resolve, t
 from app.models import Member, Reseller
 from app.selling import SellError
-from app.texts import esc, money, order_card
+from app.texts import esc, money, order_card, proxy_card
 
 log = logging.getLogger(__name__)
 AZ_PAGE = 30
@@ -88,8 +89,7 @@ class Context(BaseMiddleware):
         if reseller is None or user is None:
             return None
         is_owner = user.id == reseller.owner_id
-        if is_owner:
-            await _leave_admin_form(event, data.get("state"))
+        await _leave_form(event, data.get("state"))
         member = await repo.get_or_create_member(reseller.id, user.id, user.username, user.full_name,
                                                  resolve(user.language_code))
         lang = member.language or "en"
@@ -106,21 +106,33 @@ class Context(BaseMiddleware):
         return await handler(event, data)
 
 
-async def _leave_admin_form(event, state: FSMContext | None) -> None:
-    """An admin prompt (broadcast, welcome text, …) ends as soon as the owner does
-    anything else: a command, or a button outside the admin panel. Otherwise a
-    later search ("whatsapp") would go out to every customer as a broadcast."""
+# The buttons that belong to each form. Anything else ends it.
+_FORM_BUTTONS = {"AdminForm": ("a:", "d:"), "EmailForm": ("e:",), "PayForm": ("p:",), "DepositForm": ()}
+
+
+async def _leave_form(event, state: FSMContext | None) -> None:
+    """A form (an owner's prompt, a top-up amount, a deposit's proof, an email site)
+    ends as soon as its user does anything else: a command, or a button outside it.
+    Otherwise a later search ("whatsapp") went out to every customer as a broadcast,
+    was filed with the owner as a deposit's proof, or opened a payment for "5"."""
     if state is None:
         return
     current = await state.get_state()
-    if not current or not current.startswith("AdminForm:"):
+    group = (current or "").split(":", 1)[0]
+    if group not in _FORM_BUTTONS:
         return
     if isinstance(event, Message):
         leaving = (event.text or "").startswith("/")
     else:
-        leaving = not (event.data or "").startswith("a:")
+        leaving = not (event.data or "").startswith(_FORM_BUTTONS[group])
     if leaving:
         await state.set_state(None)
+
+
+def _tok(*parts) -> str:
+    """A short mark of what a button was made for. A list is kept per customer and
+    its buttons name a place in it: an old button must not act on a newer list."""
+    return hashlib.blake2s("|".join(str(p) for p in parts).encode(), digest_size=3).hexdigest()
 
 
 async def _reply(event, text: str) -> None:
@@ -171,10 +183,14 @@ async def menu_screen(reseller: Reseller, member: Member, lang: str, is_owner: b
     if selling.email_on(reseller) and await selling.email_sites(reseller):
         kb.button(text=t(lang, "btn_email"), callback_data=Em(a="home"))
         sizes.append(1)
+    if selling.proxy_on(reseller) and await selling.proxy_packages(reseller):
+        kb.button(text=t(lang, "btn_proxy"), callback_data=Px(a="home"))
+        sizes.append(1)
     if member.last_service and member.last_country:
         from app.numberhub import flag
         name = await display_name(reseller, member.last_service)
-        last = await repo.member_orders(member.id, limit=1)
+        last = [o for o in await repo.member_orders(member.id, limit=10)
+                if getattr(o, "kind", "sms") == "sms" and o.service == member.last_service]
         emoji = flag(last[0].country_iso) if last else ""
         kb.button(text=t(lang, "btn_again", service=name[:24], flag=emoji).strip(), callback_data=Nav(to="again"))
         sizes.append(1)
@@ -357,7 +373,9 @@ async def orders_screen(member: Member, lang: str):
         return t(lang, "orders_empty"), kb.as_markup()
     from app.numberhub import flag
     for o in rows:
-        if getattr(o, "kind", "sms") == "email":
+        if getattr(o, "kind", "sms") == "proxy":
+            label = f"{STATUS_ICON.get(o.status, '•')} 🌐 {o.country} GB · {money(o.member_price)}"
+        elif getattr(o, "kind", "sms") == "email":
             label = f"{STATUS_ICON.get(o.status, '•')} 📧 {o.service_name or o.service} · {money(o.member_price)}"
         else:
             label = (f"{STATUS_ICON.get(o.status, '•')} {o.service_name or o.service} · {flag(o.country_iso)} "
@@ -461,17 +479,25 @@ def pay_limits(reseller: Reseller) -> tuple[Decimal, Decimal]:
     return payments.limits(reseller)
 
 
-def takes_rupiah(reseller: Reseller) -> bool:
-    return payments.KASERA in payments.connected(reseller) and payments.method_limits(reseller, payments.KASERA) is not None
-
-
-def rupiah_range(reseller: Reseller) -> tuple[int, int]:
+def rupiah_range(reseller: Reseller) -> tuple[int, int] | None:
     """The rupiah one QRIS payment can be in this shop: the gateway's own range,
-    and never under the shop's smallest top-up."""
-    low, high = payments.method_limits(reseller, payments.KASERA)
-    low = max(low, pay_limits(reseller)[0])
-    return (max(payments.Kasera.MIN_IDR, payments.usd_to_idr(reseller, low) or 0),
-            min(payments.Kasera.MAX_IDR, int(high * payments.kasera_rate(reseller))))
+    and never under the shop's smallest top-up. None = QRIS cannot take a top-up
+    here (not connected, no rate, or the owner's minimum is above what a QR carries)."""
+    lim = payments.method_limits(reseller, payments.KASERA) if payments.KASERA in payments.connected(reseller) else None
+    if lim is None:
+        return None
+    low = max(lim[0], pay_limits(reseller)[0])
+    if low > lim[1]:
+        return None
+    bottom = max(payments.Kasera.MIN_IDR, payments.usd_to_idr(reseller, low) or 0)
+    most = payments.idr_to_usd(reseller, payments.Kasera.MAX_IDR)
+    top = (payments.Kasera.MAX_IDR if most is not None and most <= lim[1]
+           else int(lim[1] * payments.kasera_rate(reseller)))
+    return (bottom, top) if bottom <= top else None
+
+
+def takes_rupiah(reseller: Reseller) -> bool:
+    return rupiah_range(reseller) is not None
 
 
 async def pay_amount_screen(reseller: Reseller, member: Member, lang: str):
@@ -533,7 +559,9 @@ def email_home_screen(lang: str, sites: list[dict], note: str = ""):
     """Which site sends the code: the most asked for as buttons, or type a name."""
     kb = InlineKeyboardBuilder()
     for i, s in enumerate(sites[:EMAIL_SITES_SHOWN]):
-        kb.button(text=str(s["name"])[:28], callback_data=Em(a="site", i=i))
+        # A site found by name whose address is a guess shows the address too.
+        label = str(s["name"])[:28] if s.get("known", True) else f'{str(s["name"])[:18]} · {s["site"]}'[:40]
+        kb.button(text=label, callback_data=Em(a="site", i=i, t=_tok(s["site"])))
     n = len(sites[:EMAIL_SITES_SHOWN])
     kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
     kb.adjust(*([2] * (n // 2) + ([1] if n % 2 else []) + [1]))
@@ -545,13 +573,15 @@ def email_domains_screen(lang: str, site: dict, rows: list[dict]):
     kb = InlineKeyboardBuilder()
     for i, r in enumerate(rows[:EMAIL_DOMAINS_SHOWN]):
         mark = DELIVERY_MARK.get(r.get("delivery"), "✉️")
-        kb.button(text=f"{mark} {r['domain']} · {money(Decimal(r['cents']) / 100)}"[:60], callback_data=Em(a="dom", i=i))
+        kb.button(text=f"{mark} {r['domain']} · {money(Decimal(r['cents']) / 100)}"[:60],
+                  callback_data=Em(a="dom", i=i, t=_tok(site["site"], r["domain"])))
     kb.button(text=t(lang, "btn_back"), callback_data=Em(a="home"))
     kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
     kb.adjust(*([1] * len(rows[:EMAIL_DOMAINS_SHOWN]) + [2]))
     text = t(lang, "email_pick_domain", site=esc(site["name"]))
-    if site.get("typed"):
-        # An address the customer typed: a typo opens a mailbox for the wrong site.
+    if site.get("typed") or site.get("known") is False:
+        # An address the customer typed, or one guessed from a name: a wrong one opens
+        # a mailbox for the wrong site.
         text += "\n\n" + t(lang, "email_typed_site", site=esc(site["site"]))
     return text, kb.as_markup()
 
@@ -559,12 +589,42 @@ def email_domains_screen(lang: str, site: dict, rows: list[dict]):
 def email_confirm_screen(member: Member, lang: str, site: dict, row: dict, i: int, note: str = ""):
     price = Decimal(row["cents"]) / 100
     kb = InlineKeyboardBuilder()
-    kb.button(text=t(lang, "btn_email_buy", price=money(price)), callback_data=Em(a="buy", i=i, c=int(row["cents"])))
-    kb.button(text=t(lang, "btn_back"), callback_data=Em(a="doms"))
+    kb.button(text=t(lang, "btn_email_buy", price=money(price)),
+              callback_data=Em(a="buy", i=i, c=int(row["cents"]), t=_tok(site["site"], row["domain"])))
+    kb.button(text=t(lang, "btn_back"), callback_data=Em(a="doms", t=_tok(site["site"])))
     kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
     kb.adjust(1, 2)
     text = t(lang, "email_confirm", site=esc(site["name"]), domain=esc(row["domain"]), price=money(price),
              balance=money(member.available))
+    return (note + "\n\n" if note else "") + text, kb.as_markup()
+
+
+# ─── proxy data packages ─────────────────────────────────────────────────────
+PROXY_PACKAGES_SHOWN = 8
+
+
+def proxy_home_screen(lang: str, rows: list[dict]):
+    """The packages, smallest first, each with the shop's price."""
+    kb = InlineKeyboardBuilder()
+    shown = rows[:PROXY_PACKAGES_SHOWN]
+    for r in shown:
+        kb.button(text=f"{'⭐ ' if r['popular'] else ''}{r['gb']} GB · {money(r['member_price'])}",
+                  callback_data=Px(a="pkg", g=r["gb"]))
+    kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+    kb.adjust(*([2] * (len(shown) // 2) + ([1] if len(shown) % 2 else []) + [1]))
+    return t(lang, "proxy_pick", days=shown[0]["days"]), kb.as_markup()
+
+
+def proxy_confirm_screen(member: Member, lang: str, row: dict, note: str = ""):
+    price = row["member_price"]
+    kb = InlineKeyboardBuilder()
+    kb.button(text=t(lang, "btn_proxy_buy", price=money(price)),
+              callback_data=Px(a="buy", g=row["gb"], c=int(price * 100)))
+    kb.button(text=t(lang, "btn_back"), callback_data=Px(a="home"))
+    kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+    kb.adjust(1, 2)
+    text = t(lang, "proxy_confirm", gb=row["gb"], price=money(price), per_gb=money(row["per_gb"]),
+             days=row["days"], balance=money(member.available))
     return (note + "\n\n" if note else "") + text, kb.as_markup()
 
 
@@ -791,14 +851,15 @@ def build_router(reseller_id: int) -> Router:
         a, i = callback_data.a, callback_data.i
         data = await state.get_data()
         sites, site, rows = data.get("em_sites") or [], data.get("em_site"), data.get("em_domains") or []
-        if a == "site" and 0 <= i < len(sites):
+        made_for = callback_data.t
+        if a == "site" and 0 <= i < len(sites) and made_for == _tok(sites[i]["site"]):
             await _email_domains(c, reseller, lang, state, sites[i])
-        elif a == "doms" and site:
+        elif a == "doms" and site and made_for == _tok(site["site"]):
             await _email_domains(c, reseller, lang, state, site)
-        elif a == "dom" and site and 0 <= i < len(rows):
+        elif a == "dom" and site and 0 <= i < len(rows) and made_for == _tok(site["site"], rows[i]["domain"]):
             await _show(c, *email_confirm_screen(member, lang, site, rows[i], i))
             await c.answer()
-        elif a == "buy" and site and 0 <= i < len(rows):
+        elif a == "buy" and site and 0 <= i < len(rows) and made_for == _tok(site["site"], rows[i]["domain"]):
             await _email_buy(c, callback_data, reseller, member, lang, state, site, rows[i])
         else:
             # home, or a button from a list this session no longer has: start again.
@@ -835,10 +896,12 @@ def build_router(reseller_id: int) -> Router:
             if exc.reason in ("processing", "too_many_open"):
                 kb.button(text=t(lang, "btn_orders"), callback_data=Nav(to="orders"))
             else:
-                kb.button(text=t(lang, "btn_back"), callback_data=Em(a="doms"))
+                kb.button(text=t(lang, "btn_back"), callback_data=Em(a="doms", t=_tok(site["site"])))
             kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
             kb.adjust(1)
-            await _show(c, error_text(exc, reseller, fresh, lang), kb.as_markup())
+            # A mailbox is not a number: "no numbers for this country" was shown here.
+            await _show(c, t(lang, "email_no_domains", site=esc(site["name"])) if exc.reason == "sold_out"
+                        else error_text(exc, reseller, fresh, lang), kb.as_markup())
             return
         except Exception:  # noqa: BLE001
             log.exception("email buy crashed")
@@ -869,12 +932,84 @@ def build_router(reseller_id: int) -> Router:
         await state.update_data(em_sites=found, em_site=None, em_domains=None)
         await _show(m, *email_home_screen(lang, found))
 
+    # ── proxy data packages ──
+    async def _proxy_card(target, reseller: Reseller, member: Member, order) -> None:
+        """The package's card with NumberHub's live answer (how to connect, what is left)."""
+        live = await selling.proxy_live(reseller, order)
+        fresh = await repo.get_order(order.id) or order
+        await _show(target, *proxy_card(member, fresh, live))
+
+    @r.callback_query(Px.filter())
+    async def proxy_(c: CallbackQuery, callback_data: Px, reseller: Reseller, member: Member, lang: str,
+                     state: FSMContext):
+        await state.clear()             # a site or an amount being typed is over: no later text is read as one
+        rows = await selling.proxy_packages(reseller) if selling.proxy_on(reseller) else []
+        if not rows:
+            await c.answer(t(lang, "err_paused"), show_alert=True)
+            return
+        row = next((x for x in rows if x["gb"] == callback_data.g), None)
+        if callback_data.a == "pkg" and row is not None:
+            await _show(c, *proxy_confirm_screen(member, lang, row))
+            await c.answer()
+        elif callback_data.a == "buy" and row is not None:
+            await _proxy_buy(c, callback_data, reseller, member, lang, row)
+        else:
+            await _show(c, *proxy_home_screen(lang, rows))
+            await c.answer()
+
+    async def _proxy_buy(c: CallbackQuery, callback_data: Px, reseller: Reseller, member: Member, lang: str,
+                         row: dict) -> None:
+        await c.answer("⏳")
+        try:
+            order = await selling.buy_proxy(reseller, member, row["gb"], Decimal(callback_data.c) / 100)
+        except SellError as exc:
+            if exc.reason == "duplicate":
+                return                  # a double tap: the first tap is buying and shows the card
+            fresh = await repo.get_member(member.id) or member
+            if exc.reason == "price_changed":
+                now = next((x for x in await selling.proxy_packages(reseller, fresh=True) if x["gb"] == row["gb"]), None)
+                if now is not None:
+                    await _show(c, *proxy_confirm_screen(fresh, lang, now,
+                                                         t(lang, "err_price_changed", price=money(exc.price))))
+                    return
+                exc = SellError("sold_out")
+            kb = InlineKeyboardBuilder()
+            if exc.reason == "no_credit" and (payments.connected(reseller) or reseller.deposit_info):
+                kb.button(text=t(lang, "btn_topup"), callback_data=Nav(to="deposit"))
+            elif exc.reason == "no_credit" and support_url(reseller):
+                kb.button(text=t(lang, "btn_support"), url=support_url(reseller))
+            if exc.reason in ("processing", "proxy_limit"):
+                kb.button(text=t(lang, "btn_orders"), callback_data=Nav(to="orders"))
+            else:
+                kb.button(text=t(lang, "btn_back"), callback_data=Px(a="home"))
+            kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+            kb.adjust(1)
+            text = (t(lang, "proxy_unavailable") if exc.reason == "sold_out" else
+                    t(lang, "err_proxy_limit", n=selling.PROXY_MAX_ACTIVE) if exc.reason == "proxy_limit" else
+                    error_text(exc, reseller, fresh, lang))
+            await _show(c, text, kb.as_markup())
+            return
+        except Exception:  # noqa: BLE001
+            log.exception("proxy buy crashed")
+            kb = InlineKeyboardBuilder()
+            kb.button(text=t(lang, "btn_orders"), callback_data=Nav(to="orders"))
+            kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+            kb.adjust(1)
+            await _show(c, t(lang, "err_failed"), kb.as_markup())
+            return
+        await _proxy_card(c, reseller, await repo.get_member(member.id) or member, order)
+
     # ── orders ──
     @r.callback_query(Ord.filter())
     async def ord_(c: CallbackQuery, callback_data: Ord, reseller: Reseller, member: Member, lang: str):
         order = await repo.get_order(callback_data.id)
         if order is None or order.member_id != member.id:
             await c.answer(t(lang, "toast_closed"), show_alert=True)
+            return
+        if getattr(order, "kind", "sms") == "proxy":
+            # A data package has nothing to cancel: every button on it opens its card.
+            await _proxy_card(c, reseller, member, order)
+            await c.answer()
             return
         if callback_data.a == "cancel":
             ok, why, secs = await selling.cancel(reseller, member, order.id)
@@ -905,7 +1040,10 @@ def build_router(reseller_id: int) -> Router:
         # "13,000" is thirteen thousand, not 13.00 (payments.read_amount); a manual
         # deposit is claimed in dollars, so an amount named in rupiah is asked again.
         read = payments.read_amount(m.text)
-        amount = read[1].quantize(Decimal("0.01")) if read is not None and read[0] != "idr" else None
+        # Written in thousands ("5.000") it is most likely another currency: the owner
+        # would get "$5000.00" to approve with one tap. Asked again instead.
+        amount = (read[1].quantize(Decimal("0.01"))
+                  if read is not None and read[0] != "idr" and not (read[2] and read[0] is None) else None)
         if amount is None or amount <= 0 or amount > DEPOSIT_MAX:
             await m.answer(t(lang, "dep_bad_amount"), reply_markup=_cancel_member(lang))
             return
@@ -1064,8 +1202,13 @@ def build_router(reseller_id: int) -> Router:
             await _pick_network(c, reseller, member, lang, callback_data.g.upper(), Decimal(callback_data.c) / 100)
         elif a == "via":
             # A network of a built-in coin (or one of the two codes old buttons carry).
-            await _make_link(c, reseller, member, lang, payments.NUMBERHUB, Decimal(callback_data.c) / 100,
-                             NETWORK.get(callback_data.g, callback_data.g))
+            method = NETWORK.get(callback_data.g, callback_data.g)
+            if payments.builtin_on(reseller) and method not in await payments.methods(reseller):
+                # Not a network this shop takes (a button made by hand): the amounts
+                # again, and no "a customer could not pay" alert to the owner.
+                await _show(c, *await pay_amount_screen(reseller, member, lang))
+            else:
+                await _make_link(c, reseller, member, lang, payments.NUMBERHUB, Decimal(callback_data.c) / 100, method)
         elif a == "show":
             p = await repo.get_payment(callback_data.id)
             if p is None or p.member_id != member.id:
@@ -1127,6 +1270,10 @@ def build_router(reseller_id: int) -> Router:
             await again()
             return
         named, value, grouped = read
+        if grouped and named is None and not qris:
+            # "1,000" where only dollars are taken: one thousand or one? Not guessed.
+            await again()
+            return
         # Rupiah when the customer says so, and in a shop that takes QRIS also when the
         # number cannot be dollars: written in thousands, or more than the shop takes.
         in_rupiah = named == "idr" or (named is None and qris and value >= 1000 and (grouped or value > high))
@@ -1215,11 +1362,11 @@ def build_router(reseller_id: int) -> Router:
 
 
 def parse_amount(raw: str) -> Decimal | None:
-    try:
-        v = Decimal(raw.replace("$", "").replace(",", ".").strip())
-    except (InvalidOperation, ValueError):
+    """A dollar amount as typed, or None. Read like a customer's (payments.read_amount):
+    a number written in thousands ("13,000", once read as $13.00) or named in rupiah
+    is not guessed, and neither is "1e5" (once $100,000)."""
+    read = payments.read_amount(raw)
+    if read is None or read[0] == "idr" or (read[2] and read[0] is None):
         return None
-    if not v.is_finite() or v > 100000:
-        return None
-    v = v.quantize(Decimal("0.01"))
-    return v if v > 0 else None        # "0.004" would have added "$0.00"
+    v = read[1].quantize(Decimal("0.01"))
+    return v if 0 < v <= 100000 else None        # "0.004" would have added "$0.00"

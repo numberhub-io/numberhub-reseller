@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import hashlib
 import re
 from decimal import Decimal, InvalidOperation
 
@@ -88,6 +89,8 @@ async def dashboard(reseller: Reseller):
         "",
         "📧 Email codes: <b>" + ("on" if getattr(reseller, "email_on", None) != 0 else "off") + "</b> · a mailbox "
         "for one verification mail, your commission on top, paid only when the mail arrives",
+        "🌐 Proxy data: <b>" + ("on" if getattr(reseller, "proxy_on", None) != 0 else "off") + "</b> · data "
+        "packages in GB, your commission on top, paid from your NumberHub wallet when a customer buys one",
         "",
         "<i>Customers add balance by themselves in crypto (💳 Payments): built in, it lands in your "
         "NumberHub wallet; or through your own OxaPay or @CryptoBot; or they pay you your way and you add "
@@ -109,9 +112,13 @@ async def dashboard(reseller: Reseller):
     email_on = getattr(reseller, "email_on", None) != 0
     kb.button(text="📧 Email codes: on" if email_on else "📧 Email codes: off",
               callback_data=Adm(a="email", arg="off" if email_on else "on"))
+    # Proxy data packages: paid up front, sold at your commission like everything else.
+    proxy_on = getattr(reseller, "proxy_on", None) != 0
+    kb.button(text="🌐 Proxy data: on" if proxy_on else "🌐 Proxy data: off",
+              callback_data=Adm(a="proxy", arg="off" if proxy_on else "on"))
     kb.button(text="🔄 Refresh", callback_data=Adm(a="home"))
     kb.button(text="🏠 Menu", callback_data=Nav(to="menu"))
-    kb.adjust(1, 2, 2, 2, 2, 2, 1, 2)
+    kb.adjust(1, 2, 2, 2, 2, 2, 2, 2)
     return text, kb.as_markup()
 
 
@@ -543,6 +550,11 @@ def pct(v: Decimal) -> str:
     return f"{Decimal(v).normalize():f}"
 
 
+def _bc_mark(text: str) -> str:
+    """Which broadcast a Send button belongs to: an old button never sends a newer text."""
+    return hashlib.blake2s(str(text).encode(), digest_size=4).hexdigest()
+
+
 PROMPTS = {
     "add": "➕ <b>Add balance</b>\n\nSend the customer's ID (or @username) and the amount.\nExample: <code>123456789 5</code>\n\n<i>Customers find their ID under 💰 Balance.</i>",
     "remove": "➖ <b>Remove balance</b>\n\nSend the customer's ID (or @username) and the amount.\nExample: <code>123456789 2.50</code>",
@@ -591,6 +603,8 @@ def register(r: Router) -> None:
     async def adm(c: CallbackQuery, callback_data: Adm, reseller: Reseller, state: FSMContext,
                   is_owner: bool = False):
         a = callback_data.a
+        # The broadcast waiting for its Send button lives in the session: read before it is wiped.
+        draft = (await state.get_data()).get("bc_text") if a == "bc_send" else None
         await state.clear()
         if a == "home":
             await show(c, *await dashboard(reseller))
@@ -602,6 +616,13 @@ def register(r: Router) -> None:
             await c.answer("📧 Email codes are on: your customers see the button in the menu."
                            if callback_data.arg == "on" else
                            "📧 Email codes are off. A mailbox a customer already has still works.", show_alert=True)
+            return
+        elif a == "proxy" and callback_data.arg in ("on", "off"):
+            await repo.update_reseller(reseller.id, proxy_on=1 if callback_data.arg == "on" else 0)
+            await show(c, *await dashboard(await repo.get_reseller(reseller.id)))
+            await c.answer("🌐 Proxy data is on: your customers see the button in the menu."
+                           if callback_data.arg == "on" else
+                           "🌐 Proxy data is off. A package a customer already bought still works.", show_alert=True)
             return
         elif a == "report" and callback_data.arg in ("on", "off"):
             await repo.update_reseller(reseller.id, daily_report=1 if callback_data.arg == "on" else 0)
@@ -621,6 +642,23 @@ def register(r: Router) -> None:
             await show(c, "\n".join(lines), kb.as_markup())
         elif a == "broadcast" and reseller.status == Reseller.SUSPENDED:
             await c.answer("This bot was disabled by the platform: broadcasts are off.", show_alert=True)
+            return
+        elif a == "bc_send":
+            text = draft
+            if not text or callback_data.arg != _bc_mark(text) or reseller.status == Reseller.SUSPENDED:
+                if text:
+                    await state.update_data(bc_text=text)      # another draft's button: the one on screen stays
+                await c.answer("This message is no longer waiting. Write it again under 📣 Broadcast.", show_alert=True)
+                return
+            bot = c.bot
+
+            async def run():
+                sent, failed = await selling.broadcast(bot, reseller.id, text)
+                await selling.send(bot, reseller.owner_id, f"📣 Broadcast finished: delivered to <b>{sent}</b>"
+                                                           + (f", {failed} could not be reached." if failed else "."))
+            asyncio.create_task(run())
+            await c.answer("📣 Sending… you'll get a message when it's done.", show_alert=True)
+            await show(c, *await dashboard(reseller))
             return
         elif a == "deposits":
             await show(c, *await deposits_screen(reseller))
@@ -950,8 +988,16 @@ def register(r: Router) -> None:
         raw = m.text.strip()
         value = None if raw == "-" else parse_amount(raw)
         if raw != "-" and value is None:
-            await m.answer("❌ Send an amount like <code>1</code>, or <code>-</code> for no minimum.",
-                           reply_markup=_cancel_kb())
+            await m.answer("❌ Send an amount in US dollars like <code>1</code> or <code>0.5</code>, or "
+                           "<code>-</code> for no minimum.", reply_markup=_cancel_kb())
+            return
+        tops = [lim[1] for lim in (payments.method_limits(reseller, p) for p in payments.connected(reseller)) if lim]
+        most = max(tops) if tops else payments.MAX_AMOUNT
+        if value is not None and value > most:
+            # A figure in another currency ("10000" meant as rupiah) would refuse every top-up.
+            await m.answer(f"❌ One top-up here can be at most <b>{money(most)}</b>, so a minimum of "
+                           f"{money(value)} would refuse them all. Amounts are in US dollars: send a smaller "
+                           "one, or <code>-</code> for no minimum.", reply_markup=_cancel_kb())
             return
         await repo.update_reseller(reseller.id, deposit_min=value)
         await state.clear()
@@ -1072,16 +1118,18 @@ def register(r: Router) -> None:
     @r.message(StateFilter(AdminForm.broadcast), F.text)
     @owner_only
     async def f_broadcast(m: Message, reseller: Reseller, state: FSMContext, is_owner: bool = False):
-        await state.clear()
+        # Nothing goes out until the owner has seen it and said so: a text typed into
+        # a prompt left open went to every customer at once.
         text = m.html_text
-        bot = m.bot
-
-        async def run():
-            sent, failed = await selling.broadcast(bot, reseller.id, text)
-            await selling.send(bot, reseller.owner_id, f"📣 Broadcast finished: delivered to <b>{sent}</b>"
-                                                       + (f", {failed} could not be reached." if failed else "."))
-        asyncio.create_task(run())
-        await m.answer("📣 Sending… you'll get a message when it's done.")
+        await state.clear()
+        await state.update_data(bc_text=text)
+        n = len(await repo.member_chat_ids(reseller.id))
+        kb = InlineKeyboardBuilder()
+        kb.button(text=f"✅ Send to {n} customers", callback_data=Adm(a="bc_send", arg=_bc_mark(text)))
+        kb.button(text="✖️ Don't send", callback_data=Adm(a="home"))
+        kb.adjust(1)
+        await m.answer("📣 <b>Your customers will get this message:</b>\n\n" + text[:3500]
+                       + "\n\n<i>Nothing has been sent yet.</i>", reply_markup=kb.as_markup())
 
     @r.message(StateFilter(AdminForm.block), F.text)
     @owner_only

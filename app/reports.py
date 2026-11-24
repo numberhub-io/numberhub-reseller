@@ -19,6 +19,10 @@ WHY = {
     "price_exceeded": "the price moved while they were buying",
     "duplicate_order": "too many open orders for that app and country",
     "spend_limit_reached": "your API key's daily limit was reached",
+    "daily_spend_limit_exceeded": "your API key's daily limit was reached",
+    "operators_unavailable": "no number in stock", "unknown_service": "that app is not sold any more",
+    "unknown_package": "that package is not sold any more", "rate_limited": "too many requests at once",
+    "bad_reply": "NumberHub did not answer",
     "no_answer": "NumberHub did not answer", "unknown": "not recorded",
 }
 PROVIDER = {"numberhub": "Built-in crypto", "oxapay": "Your OxaPay", "cryptobot": "Your @CryptoBot"}

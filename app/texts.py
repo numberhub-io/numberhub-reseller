@@ -53,6 +53,10 @@ _EMAIL_WORDING = {"st_waiting", "st_received", "st_expired", "st_buying", "st_fa
 
 def order_card(member: Member, order: Order) -> tuple[str, InlineKeyboardMarkup]:
     from app.selling import order_codes
+    if getattr(order, "kind", "sms") == "proxy":
+        # Whoever draws a card without NumberHub's live answer (a recovered purchase,
+        # a refresh) gets the short one; opening it loads the rest.
+        return proxy_card(member, order, None)
     lang = member.language or "en"
     codes = order_codes(order)
     email = getattr(order, "kind", "sms") == "email"
@@ -116,6 +120,71 @@ def order_card(member: Member, order: Order) -> tuple[str, InlineKeyboardMarkup]
         kb.button(text=t(lang, "btn_new_number"), callback_data=Svc(code=order.service, page=0))
     kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
     kb.adjust(2)
+    return "\n".join(lines), kb.as_markup()
+
+
+def proxy_card(member: Member, order: Order, live: dict | None = None):
+    """A data package. With NumberHub's live answer (`live`: its order with the
+    `proxy` block) the card says how to connect and what is left; without it (not
+    asked yet, or it could not be read) it says what was bought and offers to load
+    the rest. The host shown is the gateway's address in numbers: a shop is its
+    owner's brand, and some apps refuse a name anyway."""
+    from urllib.parse import quote
+
+    from app.bots.callbacks import Px
+    lang = member.language or "en"
+    lines = [t(lang, "proxy_card_title", gb=esc(order.country))]
+    p = live.get("proxy") if isinstance(live, dict) and isinstance(live.get("proxy"), dict) else None
+    until = order.expires_at
+    if until is not None and until.tzinfo is None:
+        until = until.replace(tzinfo=dt.timezone.utc)
+    now = dt.datetime.now(dt.timezone.utc)
+    st = order.status
+    ended = st in ("completed", "canceled", "expired") or (until is not None and until <= now)
+    active = st == "received" and not ended
+    if st == "failed":
+        lines.append(t(lang, "proxy_failed", price=money(order.member_price)))
+    elif st == "buying":
+        lines.append(t(lang, "err_processing"))
+    elif ended:
+        lines.append(t(lang, "proxy_ended"))
+    elif until is not None:
+        lines.append(t(lang, "proxy_active", date=until.strftime("%Y-%m-%d"),
+                       days=max(0, int((until - now).total_seconds() // 86400))))
+    usage = p.get("usage") if p else None
+    if isinstance(usage, dict) and usage.get("total"):
+        lines.append(t(lang, "proxy_usage", used=esc(usage.get("used")), total=esc(usage.get("total")),
+                       left=esc(usage.get("left"))))
+    host = str((p or {}).get("ip") or (p or {}).get("host") or "")
+    user, password = str((p or {}).get("username") or ""), str((p or {}).get("password") or "")
+    shown = bool(active and host and user and password)
+    if shown:
+        http, socks = p.get("http_port") or "", p.get("socks_port") or ""
+        ready = p.get("lines") if isinstance(p.get("lines"), dict) else {}
+        lines += ["", t(lang, "proxy_access", host=esc(host), http=esc(http), socks=esc(socks), login=esc(user),
+                        password=esc(password),
+                        any=esc(ready.get("any") or f"{host}:{http}:{user}:{password}"),
+                        country=esc(ready.get("country") or f"{host}:{http}:{user}-country-us:{password}"),
+                        sticky=esc(ready.get("sticky") or f"{host}:{http}:{user}-country-us-sid-a1b2c3:{password}"))]
+    elif active:
+        lines += ["", t(lang, "proxy_card_closed")]
+    if order.settled == Order.CHARGED:
+        lines += ["", t(lang, "card_paid", price=money(order.member_price))]
+    kb = InlineKeyboardBuilder()
+    sizes = []
+    if active:
+        kb.button(text=t(lang, "btn_refresh" if shown else "btn_proxy_show"), callback_data=Ord(a="view", id=order.id))
+        sizes.append(1)
+        if shown and p.get("socks_port"):
+            # Telegram's own proxy link: one tap sets it up in the app.
+            kb.button(text=t(lang, "btn_proxy_tg"),
+                      url=f"https://t.me/socks?server={quote(host)}&port={quote(str(p['socks_port']))}"
+                          f"&user={quote(user)}&pass={quote(password)}")
+            sizes.append(1)
+    if st != "buying":
+        kb.button(text=t(lang, "btn_proxy"), callback_data=Px(a="home"))
+    kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+    kb.adjust(*sizes, 2)
     return "\n".join(lines), kb.as_markup()
 
 
@@ -192,6 +261,14 @@ OWNER_ALERTS = {
                          "and is kept for them. Top up your wallet at numberhub.io or in @TheNumberHubBot: "
                          "then a balance you add by hand, approve as a deposit or take through your own "
                          "gateway can buy."),
+    "proxy_unpaid": ("⚠️ <b>A proxy data package was bought on your NumberHub account, and your customer's "
+                     "balance no longer covered it.</b>\nIt could not be given back. You find it in your "
+                     "NumberHub account under your orders: use it yourself, or pass its details to the "
+                     "customer once they have paid you."),
+    "proxy_unconfirmed": ("⚠️ <b>A proxy data purchase got no clear answer from NumberHub for 20 hours</b>, so "
+                          "your customer got their money back.\nIf a package from that time shows in your "
+                          "NumberHub account under your orders, your wallet paid for it: pass its details to "
+                          "the customer once they have paid you, or use it yourself."),
     "route_cap": ("⚠️ <b>A customer could not buy: your NumberHub account has the most open orders it "
                   "may have for one app and country</b> (all your shops count together). It frees up "
                   "as those orders finish."),
