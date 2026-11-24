@@ -124,7 +124,7 @@ Besides phone numbers, every shop sells **email codes**: a mailbox that receives
 
 - Charged only when a mail arrives, like a number: the price is held with the order, charged once, and released when no mail comes or the customer cancels (possible two minutes after the mailbox was opened).
 - The price is NumberHub's price for that mail domain plus your commission, rounded up to the cent.
-- One customer may have 3 mailboxes waiting and ask for 10 an hour; a shop 50 an hour. NumberHub limits each account and pauses one whose mailboxes rarely get a mail, so a careless customer must not use up your limit.
+- One customer may have 3 mailboxes waiting and ask for 10 an hour; a shop 50 an hour. A customer whose six mailboxes in a day all ended with no mail waits until the day has passed. NumberHub limits each account and pauses one whose mailboxes rarely get a mail, so a careless customer must not use up your limit.
 - On by default. ⚙️ Admin panel → 📧 Email codes: on / off. The button also stays hidden while your NumberHub API lists no email sites.
 
 ### Built-in payments (crypto, nothing to set up)

@@ -492,6 +492,7 @@ async def _place(reseller: Reseller, member: Member, values: dict, purchase, rep
 EMAIL_MAX_OPEN = 3              # mailboxes one customer may have waiting
 EMAIL_PER_HOUR = 10             # ...and may ask for in an hour
 EMAIL_SHOP_PER_HOUR = 50        # all customers of one shop together
+EMAIL_WASTED_MAX = 6            # mailboxes in a day that ended with no mail, when none got one
 _email_sites: dict[int, tuple[float, list[dict]]] = {}
 _email_domains: dict[tuple[int, str], tuple[float, list[dict]]] = {}
 
@@ -583,6 +584,12 @@ async def _buy_email(reseller: Reseller, member: Member, site: str, site_name_: 
         raise SellError("too_many_open")
     if (await repo.email_orders_since(60, member_id=member.id) >= EMAIL_PER_HOUR
             or await repo.email_orders_since(60, reseller_id=reseller.id) >= EMAIL_SHOP_PER_HOUR):
+        raise SellError("email_limit")
+    # Mailboxes that are opened and never used count against the mail source for
+    # every customer of every shop. Someone whose mailboxes never get a mail stops
+    # for the day; one mail arriving lifts it.
+    wasted, got = await repo.email_outcomes(member.id, 24)
+    if wasted >= EMAIL_WASTED_MAX and got == 0:
         raise SellError("email_limit")
     cli = client_for(reseller.id)
     if cli is None:

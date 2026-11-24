@@ -469,6 +469,18 @@ async def member_open_count(member_id: int, service: str | None = None, country:
         return (await s.execute(q)).scalar_one()
 
 
+async def email_outcomes(member_id: int, hours: int = 24) -> tuple[int, int]:
+    """(mailboxes of this customer that ended with no mail, mailboxes that got
+    one) among those asked for in the last `hours`."""
+    since = _now() - dt.timedelta(hours=hours)
+    async with session_factory() as s:
+        rows = dict((await s.execute(
+            select(Order.settled, func.count()).where(Order.member_id == member_id, Order.kind == "email",
+                                                      Order.created_at >= since, Order.status != Order.FAILED)
+            .group_by(Order.settled))).all())
+    return int(rows.get(Order.RELEASED, 0)), int(rows.get(Order.CHARGED, 0))
+
+
 async def email_orders_since(minutes: int, member_id: int | None = None, reseller_id: int | None = None) -> int:
     """Mailboxes asked for in the last `minutes` by one customer or in one shop
     (a purchase that was refused opened none and does not count)."""

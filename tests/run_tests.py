@@ -2411,6 +2411,32 @@ async def test_email_codes():
     finally:
         selling.EMAIL_PER_HOUR, selling.EMAIL_SHOP_PER_HOUR = keep
 
+    # ── mailboxes that never get a mail ──
+    idle = await member(r, 93005, "1.00")
+    for n in range(selling.EMAIL_WASTED_MAX):
+        box = await selling.buy_email(r, idle, "openai.com", "OpenAI", "yandex.com", None)
+        api.set_status(box.nh_id, "expired")
+        await sync_now()
+    try:
+        await selling.buy_email(r, idle, "openai.com", "OpenAI", "yandex.com", None)
+        stopped = ""
+    except SellError as e:
+        stopped = e.reason
+    check("six mailboxes in a day that got no mail, and none that did: the customer waits",
+          stopped == "email_limit" and await repo.email_outcomes(idle.id) == (6, 0)
+          and (await repo.get_member(idle.id)).balance == D("1.00"), f"{stopped} {await repo.email_outcomes(idle.id)}")
+    user = await member(r, 93006, "1.00")
+    box = await selling.buy_email(r, user, "openai.com", "OpenAI", "yandex.com", None)
+    api.mail_arrives(box.nh_id, code="111000")
+    await sync_now()
+    for n in range(selling.EMAIL_WASTED_MAX):
+        box = await selling.buy_email(r, user, "openai.com", "OpenAI", "yandex.com", None)
+        api.set_status(box.nh_id, "expired")
+        await sync_now()
+    box = await selling.buy_email(r, user, "openai.com", "OpenAI", "yandex.com", None)
+    check("…a customer whose mailboxes do get mail is not stopped by the ones that did not",
+          box.status == "waiting" and await repo.email_outcomes(user.id) == (6, 1))
+
     # ── a lost reply never opens two mailboxes ──
     four = await member(r, 93004, "1.00")
     api.lose_replies = 3
