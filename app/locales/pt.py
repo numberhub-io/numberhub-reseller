@@ -119,4 +119,6 @@ T = {
     # QRIS through the owner's KaseraPay account (app/payments.py, provider kasera)
     'btn_pay_qris': '🇮🇩 QRIS (rupias)',
     'pay_qris': '💳 <b>Pague {idr} com QRIS</b>\n\nEscaneie este QR com qualquer app de banco ou carteira da Indonésia (GoPay, OVO, DANA, ShopeePay) e pague em {minutes} minutos. <b>{amount}</b> entra sozinho no seu saldo assim que o pagamento chegar, e você receberá uma mensagem.',
+    'btn_pay_show_qr': '📋 Ver o QR ({amount})',
+    'pay_open_hint_qr': '⏳ Você tem um pagamento QRIS de <b>{amount}</b> em aberto: toque abaixo para ver o QR de novo, ou escolha outro valor.',
 }

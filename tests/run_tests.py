@@ -1835,6 +1835,24 @@ async def test_kasera_qris():
           r.kasera_rate == D("16500") and payments.connected(r) == [payments.KASERA]
           and payments.kasera_limits(r) == (D("0.07"), D("60.60")) and "Rp 16.500 = $1" in session.last_text(),
           session.last_text()[:160])
+    check("a usual rate gets no warning", "Check this rate" not in session.last_text())
+    await dp.feed_update(bot, tap(OWNER, button(session, "Rupiah for $1")))
+    await dp.feed_update(bot, msg(OWNER, "5000"))
+    check("a rate far under what a dollar costs is saved, and the owner is told what it means in their numbers",
+          (await repo.get_reseller(r.id)).kasera_rate == D("5000") and "Check this rate" in session.last_text()
+          and "pays Rp 5.000 gets $1.00" in session.last_text(), session.last_text()[:200])
+    await dp.feed_update(bot, msg(OWNER, "/admin"))
+    await dp.feed_update(bot, tap(OWNER, button(session, "Payments")))
+    check("…and the Payments screen keeps saying so", "Check this rate" in session.last_text())
+    await dp.feed_update(bot, tap(OWNER, button(session, "Rupiah for $1")))
+    await dp.feed_update(bot, msg(OWNER, "30000"))
+    check("a rate far over it is told the other way round",
+          "pays Rp 30.000 for $1.00" in session.last_text(), session.last_text()[:200])
+    await dp.feed_update(bot, tap(OWNER, button(session, "Rupiah for $1")))
+    await dp.feed_update(bot, msg(OWNER, "16500"))
+    r = await repo.get_reseller(r.id)
+    check("back to a usual rate: saved, no warning",
+          r.kasera_rate == D("16500") and "Check this rate" not in session.last_text())
 
     # ── a customer adds $5 ──
     await add(cust, "$5.00")
@@ -1850,6 +1868,23 @@ async def test_kasera_qris():
           gw.ks_bodies[-1]["amount"] == 82500 and gw.ks_bodies[-1]["payment_methods"] == ["qris"]
           and gw.ks_bodies[-1]["merchant_ref"] == f"s{r.id}-p{p1.id}" and list(gw.ks_idem) == [f"s{r.id}-p{p1.id}"])
     check("the picture is a real PNG", payments.qr_png(d1["qr"])[:8] == b"\x89PNG\r\n\x1a\n")
+    left = (p1.expires_at.replace(tzinfo=dt.timezone.utc) - dt.datetime.now(dt.timezone.utc)).total_seconds() / 60
+    check("the gateway's Jakarta time is stored as UTC: open for 60 minutes, not for 8 hours", 58 < left <= 60.1,
+          f"{left:.1f} minutes")
+    gw.ks_naive = True
+    _, _, until = await payments.Kasera(gw.ks_key).create_qris(20000, "naive-1", "a time without a zone")
+    gw.ks_naive = False
+    left = (until - dt.datetime.now(dt.timezone.utc)).total_seconds() / 60
+    check("a gateway time without a zone can never keep a payment open longer than was asked for",
+          until.tzinfo is not None and 58 < left <= 60.1, f"{left:.1f} minutes")
+    await dp.feed_update(bot, msg(cust, "/start"))
+    await dp.feed_update(bot, tap(cust, button(session, "Balance")))
+    await dp.feed_update(bot, tap(cust, button(session, "Add balance")))
+    check("an open QRIS payment is offered as its QR, not as an address",
+          button(session, "Show the QR") is not None and "see its QR again" in session.last_text()
+          and "address" not in session.last_text(), session.last_text()[:200])
+    await dp.feed_update(bot, tap(cust, button(session, "Show the QR")))
+    check("…and one tap sends the QR again", len(photos(cust)) == 2 and "Rp 82.500" in photos(cust)[-1].caption)
     await dp.feed_update(bot, tap(cust, Pay(a="chk", id=p1.id).pack()))
     check("'I've paid' before it arrives: not yet", "Not received yet" in session.alerts()[-1]
           and (await repo.get_member(mem.id)).balance == 0)

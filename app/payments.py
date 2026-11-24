@@ -286,6 +286,7 @@ class Kasera:
     as working and never add balance."""
     BASE = "https://pay.kasera.id/v1"
     MIN_IDR, MAX_IDR = 1000, 1_000_000     # above 1,000,000 the gateway wants buyer and delivery details
+    USUAL_RATE = (13_000, 22_000)          # rupiah for a dollar: outside it the owner is asked to check
 
     def __init__(self, key: str):
         self.key = key
@@ -337,7 +338,12 @@ class Kasera:
             raise PayError("KaseraPay gave no QRIS code")
         if int(d.get("amount") or 0) != int(idr):
             raise PayError("KaseraPay answered with another amount than was asked")
-        until = _parse_iso(d.get("expires_at")) or _now() + dt.timedelta(minutes=INVOICE_MINUTES)
+        # The gateway answers in Jakarta time ("…+07:00"). Never later than was asked
+        # for: a time without a zone, read as UTC, would keep the payment open for hours.
+        latest = _now() + dt.timedelta(minutes=INVOICE_MINUTES)
+        until = _parse_iso(d.get("expires_at"))
+        if until is None or until <= _now() or until > latest + dt.timedelta(minutes=2):
+            until = latest
         return str(d["id"]), qr, until
 
     async def state(self, invoice_id: str) -> tuple[str, int, bool]:
@@ -371,6 +377,12 @@ def kasera_rate(reseller: Reseller) -> Decimal | None:
     """Rupiah for one dollar in this shop, as its owner set it."""
     rate = getattr(reseller, "kasera_rate", None)
     return Decimal(rate) if rate is not None and Decimal(rate) > 0 else None
+
+
+def kasera_rate_odd(rate) -> bool:
+    """Far from what a dollar costs: most likely a typo, or a test left on."""
+    low, high = Kasera.USUAL_RATE
+    return rate is not None and not low <= Decimal(rate) <= high
 
 
 def kasera_limits(reseller: Reseller) -> tuple[Decimal, Decimal] | None:
@@ -583,11 +595,13 @@ async def backing(reseller: Reseller) -> tuple[Decimal, Decimal] | None:
 
 
 def _parse_iso(value) -> dt.datetime | None:
+    """A gateway's time, as UTC. The database keeps no time zone, so a time with
+    another offset must be converted before it is stored: its offset is dropped."""
     try:
         when = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except (TypeError, ValueError):
         return None
-    return when if when.tzinfo else when.replace(tzinfo=dt.timezone.utc)
+    return (when if when.tzinfo else when.replace(tzinfo=dt.timezone.utc)).astimezone(dt.timezone.utc)
 
 
 async def _builtin_state(reseller: Reseller, payment: Payment) -> tuple[str, Decimal | None]:

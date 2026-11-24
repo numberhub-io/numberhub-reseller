@@ -382,6 +382,7 @@ class FakeGateways:
         self.ks: dict[str, dict] = {}
         self.ks_idem: dict[str, str] = {}
         self.ks_bodies: list[dict] = []
+        self.ks_naive = False              # answer the expiry without a time zone
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handle)
@@ -427,12 +428,19 @@ class FakeGateways:
                 if idem not in self.ks_idem:
                     tid = f"payreq_{self.next}"
                     self.next += 1
-                    until = dt.datetime.now(UTC) + dt.timedelta(minutes=body.get("expires_in_minutes", 60))
+                    # The real gateway answers in Jakarta time: "2026-11-24T08:15:23+07:00".
+                    wib = dt.timezone(dt.timedelta(hours=7))
+                    until = (dt.datetime.now(UTC) + dt.timedelta(minutes=body.get("expires_in_minutes", 60))
+                             ).astimezone(wib).replace(microsecond=0)
+                    made = dt.datetime.now(wib).replace(microsecond=0)
+                    if self.ks_naive:
+                        until = until.replace(tzinfo=None)
                     self.ks[tid] = {"id": tid, "status": "pending", "amount": body["amount"], "currency": "IDR",
                                     "livemode": auth.endswith(self.ks_key), "payment_method": "qris",
                                     "payment": {"type": "qr", "qr_string": f"00020101021226670016ID.CO.QRIS.WWW{tid}"},
-                                    "expires_at": until.isoformat().replace("+00:00", "Z"), "paid_at": None,
-                                    "merchant_ref": body.get("merchant_ref")}
+                                    "expires_at": until.isoformat(), "created_at": made.isoformat(),
+                                    "paid_at": None, "fee": 285, "net": body["amount"] - 285,
+                                    "merchant_ref": body.get("merchant_ref"), "external_id": body.get("external_id")}
                     self.ks_idem[idem] = tid
                 return httpx.Response(201, json=self.ks[self.ks_idem[idem]])
             if request.method == "GET" and path.startswith("/v1/transactions/"):

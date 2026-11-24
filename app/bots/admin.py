@@ -243,6 +243,8 @@ async def deposits_screen(reseller: Reseller, note: str = ""):
             "⚠️ key saved: set the rupiah rate" if payments.has_key(reseller, payments.KASERA) else "— not connected")
         + "</b> · customers in Indonesia pay by QR from any bank or wallet app",
     ]
+    if payments.KASERA in gates and payments.kasera_rate_odd(payments.kasera_rate(reseller)):
+        lines.append(kasera_rate_warning(payments.kasera_rate(reseller)))
     recent = await repo.recent_payments(reseller.id, limit=6) if gates else []
     if recent:
         n_paid, total = await repo.payment_totals(reseller.id, 30)
@@ -329,6 +331,20 @@ GATEWAY_HOWTO = {
 KASERA_RATE_ASK = ("💱 <b>How many rupiah is one dollar in your shop?</b>\n\nSend a number, for example "
                    "<code>16500</code>. A customer who adds $5.00 then pays Rp 82.500 by QRIS. You can change "
                    "it any time; a QR already shown keeps the rate it was made with.")
+
+
+def kasera_rate_warning(rate) -> str:
+    """What an unusual rupiah rate means, in the owner's own numbers. Their price
+    stays theirs: nothing is refused."""
+    low, high = payments.Kasera.USUAL_RATE
+    rp = lambda n: "Rp " + f"{int(n):,}".replace(",", ".")      # noqa: E731
+    if Decimal(rate) < low:
+        return (f"⚠️ <b>Check this rate.</b> A dollar usually costs well over {rp(low)}. At yours, a customer "
+                f"who pays {rp(rate)} gets $1.00 of balance. If that is not what you mean, change it with "
+                f"💱 Rupiah for $1.")
+    return (f"⚠️ <b>Check this rate.</b> A dollar usually costs well under {rp(high)}. At yours, a customer "
+            f"pays {rp(rate)} for $1.00 of balance. If that is not what you mean, change it with "
+            f"💱 Rupiah for $1.")
 
 
 def _back_to_prices():

@@ -465,8 +465,10 @@ async def pay_amount_screen(reseller: Reseller, member: Member, lang: str):
         sizes += [1, 1]
     elif open_ and (payments.details(open_[0]).get("address") or payments.details(open_[0]).get("qr")):
         # A built-in payment has an address instead of a link: one tap shows it again.
-        text += "\n\n" + t(lang, "pay_open_hint_address", amount=money(open_[0].amount))
-        kb.button(text=t(lang, "btn_pay_show", amount=money(open_[0].amount)), callback_data=Pay(a="show", id=open_[0].id))
+        qr = bool(payments.details(open_[0]).get("qr"))      # a QRIS payment has a QR, not an address
+        text += "\n\n" + t(lang, "pay_open_hint_qr" if qr else "pay_open_hint_address", amount=money(open_[0].amount))
+        kb.button(text=t(lang, "btn_pay_show_qr" if qr else "btn_pay_show", amount=money(open_[0].amount)),
+                  callback_data=Pay(a="show", id=open_[0].id))
         kb.button(text=t(lang, "btn_pay_check"), callback_data=Pay(a="chk", id=open_[0].id))
         sizes += [1, 1]
     presets = [p for p in payments.PRESETS if low <= p <= high]
