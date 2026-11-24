@@ -648,6 +648,39 @@ async def test_provision():
         r = await client.post(f"/internal/shops/{rid}/status", headers=H, json={"owner_id": 9101, "status": "active"})
         check("a shop the platform suspended can't be resumed by its owner",
               r.status == 409 and (await repo.get_reseller(rid)).status == Reseller.SUSPENDED)
+        # ── what each shop owes its built-in customers (read by the wallet service) ──
+        from app.models import Payment
+        resp = await client.get("/internal/reserves", headers={"X-Provision-Secret": "wrong"})
+        check("the figures need the shared secret too", resp.status == 403)
+        resp = await client.get("/internal/reserves", headers=H)
+        check("a shop nobody paid with built-in payments is not listed", resp.status == 200
+              and all(x["shop_id"] != rid for x in (await resp.json())["shops"]))
+        m1 = await repo.get_or_create_member(rid, 88001, None, None)
+        m2 = await repo.get_or_create_member(rid, 88002, None, None)
+        m3 = await repo.get_or_create_member(rid, 88003, None, None)
+        for member, amount in ((m1, "30"), (m2, "10")):
+            row = await repo.create_payment(rid, member.id, "numberhub", D(amount))
+            await repo.attach_invoice(row.id, str(900 + row.id), None, None)
+            await repo.credit_payment(row.id, D(amount))
+        await repo.member_adjust(rid, m3.id, D("25"))        # a balance added by hand
+        fig = lambda: next(x for x in figures if x["shop_id"] == rid)     # noqa: E731
+        figures = (await (await client.get("/internal/reserves", headers=H)).json())["shops"]
+        check("two customers paid $40 with built-in payments and hold it all",
+              fig() == {"shop_id": rid, "owner_id": 9101, "customers_hold": "40.00", "deposits_seen": "40.00"},
+              str(figures))
+        await repo.member_adjust(rid, m1.id, D("-12"))
+        figures = (await (await client.get("/internal/reserves", headers=H)).json())["shops"]
+        check("one spent $12: customers hold $28 of the $40 paid in",
+              fig()["customers_hold"] == "28.00" and fig()["deposits_seen"] == "40.00", str(figures))
+        await repo.member_adjust(rid, m2.id, D("50"))
+        figures = (await (await client.get("/internal/reserves", headers=H)).json())["shops"]
+        check("a balance added by hand on top is not counted as paid in",
+              fig()["customers_hold"] == "28.00", str(figures))
+        pending = await repo.create_payment(rid, m3.id, "numberhub", D("9"))
+        await repo.attach_invoice(pending.id, "999", None, None)
+        figures = (await (await client.get("/internal/reserves", headers=H)).json())["shops"]
+        check("a payment that is not paid yet counts for nothing",
+              fig()["deposits_seen"] == "40.00" and (await repo.get_payment(pending.id)).status == Payment.PENDING)
         settings.provision_secret = "short"
         check("a short secret keeps the listener off", await provision.start_server() is None)
     finally:

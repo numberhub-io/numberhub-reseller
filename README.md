@@ -132,6 +132,7 @@ How it stays safe:
 - A customer can have 3 addresses open and open 10 a day; a shop can open 300 a day. A shop that is paused, suspended or disconnected takes no payments.
 - Money sent on another network, or after the 3 hours, cannot be recovered. The customer is told so on the payment screen. A payment that was sent in time and confirmed late is still added: a payment that was given up is looked at again for 3 days.
 - Your customers' money is what your shop buys their numbers with. If your NumberHub wallet falls below what your customers paid in and have not spent yet, the shop stops giving out payment addresses and tells you, until the wallet covers it again.
+- On a shop hosted by NumberHub, what your customers paid in and still hold is kept for the shop in your NumberHub wallet: it buys their numbers and cannot be spent on anything else. As they spend it, what you earned becomes yours to use. The platform reports those figures to the wallet service (`GET /internal/reserves` on the provisioning listener, same secret).
 - Turning it off stops new addresses at once. An address a customer already has still works until it runs out, and a payment to it is still added.
 
 You can use it together with your own gateway and with manual deposits; the customer then picks how to pay. An operator can make it the default for shops whose owner has not chosen (`NUMBERHUB_PAY_DEFAULT`).

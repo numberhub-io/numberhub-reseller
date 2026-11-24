@@ -823,6 +823,37 @@ async def builtin_unspent(reseller_id: int) -> Decimal:
     return total.quantize(Decimal("0.01"))
 
 
+async def builtin_figures() -> list[dict]:
+    """For every shop that was ever paid with built-in payments: what its customers
+    still hold from them (as builtin_unspent) and the total of those payments the
+    shop has given to its customers. One read, so the two belong together. The
+    wallet service keeps that much of the owner's wallet for the shop."""
+    cent = Decimal("0.01")
+    async with session_factory() as s:
+        paid = (await s.execute(
+            select(Payment.reseller_id, Payment.member_id, func.coalesce(func.sum(Payment.credited), 0)).where(
+                Payment.provider == "numberhub", Payment.status == Payment.PAID)
+            .group_by(Payment.reseller_id, Payment.member_id))).all()
+        if not paid:
+            return []
+        by_shop: dict[int, dict[int, Decimal]] = {}
+        for rid, mid, total in paid:
+            by_shop.setdefault(rid, {})[mid] = Decimal(str(total or 0))
+        owners = dict((await s.execute(select(Reseller.id, Reseller.owner_id).where(
+            Reseller.id.in_(list(by_shop))))).all())
+        members = [m for per in by_shop.values() for m in per]
+        balances = dict((await s.execute(select(Member.id, Member.balance).where(Member.id.in_(members)))).all())
+    out = []
+    for rid, per in sorted(by_shop.items()):
+        if rid not in owners:
+            continue
+        hold = sum((max(Decimal("0"), min(Decimal(str(balances.get(mid) or 0)), paid_in))
+                    for mid, paid_in in per.items()), Decimal("0"))
+        out.append({"shop_id": rid, "owner_id": owners[rid], "customers_hold": str(hold.quantize(cent)),
+                    "deposits_seen": str(sum(per.values(), Decimal("0")).quantize(cent))})
+    return out
+
+
 async def pending_payments(limit: int = 500) -> list[Payment]:
     """Every link still waiting for the gateway, oldest first (for the poller)."""
     async with session_factory() as s:

@@ -173,6 +173,13 @@ async def list_shops(request: web.Request) -> web.Response:
     return web.json_response({"shops": [_shop_json(r, await repo.stats(r.id, 7)) for r in rows]})
 
 
+async def reserves(request: web.Request) -> web.Response:
+    """What each shop owes the customers who paid with built-in payments. The
+    wallet service reads it to keep that much of the owner's wallet for the shop,
+    so customers' money cannot be spent on anything else."""
+    return web.json_response({"shops": await repo.builtin_figures()})
+
+
 async def set_status(request: web.Request) -> web.Response:
     try:
         data = await request.json()
@@ -203,6 +210,7 @@ def build_app() -> web.Application:
     app = web.Application(middlewares=[_auth], client_max_size=16 * 1024)
     app.router.add_post("/internal/shops", create_shop)
     app.router.add_get("/internal/shops", list_shops)
+    app.router.add_get("/internal/reserves", reserves)
     app.router.add_post("/internal/shops/{id}/status", set_status)
     return app
 
