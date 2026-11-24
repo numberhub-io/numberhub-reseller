@@ -118,6 +118,15 @@ Open your own shop bot and send `/admin`, or tap ⚙️ Admin panel in the menu 
 
 Your commission is a percentage added on top of NumberHub's price for each country. With a 30% commission, a number NumberHub prices at $0.25 costs your customer $0.33 (rounded up to the cent) and you keep $0.08. The bot uses NumberHub's highest price for that route (`price_max`) as the base, so NumberHub can never charge you more for a sale than the customer paid.
 
+### Email codes
+
+Besides phone numbers, every shop sells **email codes**: a mailbox that receives one verification mail from one site. A customer taps 📧 Email codes, picks the site that sends the code (the most asked for are buttons, or they type its name), picks a mail domain (✅ marks the ones that deliver best for that site) and confirms the price. They get an address to enter on the site; the code, and the confirmation link when the mail has one, arrive in the chat.
+
+- Charged only when a mail arrives, like a number: the price is held with the order, charged once, and released when no mail comes or the customer cancels (possible two minutes after the mailbox was opened).
+- The price is NumberHub's price for that mail domain plus your commission, rounded up to the cent.
+- One customer may have 3 mailboxes waiting and ask for 10 an hour; a shop 50 an hour. NumberHub limits each account and pauses one whose mailboxes rarely get a mail, so a careless customer must not use up your limit.
+- On by default. ⚙️ Admin panel → 📧 Email codes: on / off. The button also stays hidden while your NumberHub API lists no email sites.
+
 ### Built-in payments (crypto, nothing to set up)
 
 ⚙️ Admin panel → 💳 Payments → 💵 Turn on built-in crypto. That is the whole setup: no account to open, no key to paste.

@@ -16,7 +16,7 @@ from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app import payments, repo, selling
-from app.bots.callbacks import AZ, Adm, Buy, Cty, Lang, Nav, Noop, Ord, Pay, Svc, SvcPage
+from app.bots.callbacks import AZ, Adm, Buy, Cty, Em, Lang, Nav, Noop, Ord, Pay, Svc, SvcPage
 from app.catalog_ui import ANY_OTHER, LETTERS, POPULAR, by_letter, icon, letter_counts, more_popular, nice_name
 from app.i18n import LANGS, resolve, t
 from app.models import Member, Reseller
@@ -57,6 +57,10 @@ class DepositForm(StatesGroup):
 
 class PayForm(StatesGroup):
     amount = State()           # the customer types an amount for an automatic payment link
+
+
+class EmailForm(StatesGroup):
+    site = State()             # email codes: the customer may type the name of a site
 
 
 class Context(BaseMiddleware):
@@ -162,6 +166,9 @@ async def menu_screen(reseller: Reseller, member: Member, lang: str, is_owner: b
     kb = InlineKeyboardBuilder()
     kb.button(text=t(lang, "btn_buy"), callback_data=Nav(to="buy"))
     sizes = [1]
+    if selling.email_on(reseller) and await selling.email_sites(reseller):
+        kb.button(text=t(lang, "btn_email"), callback_data=Em(a="home"))
+        sizes.append(1)
     if member.last_service and member.last_country:
         from app.numberhub import flag
         name = await display_name(reseller, member.last_service)
@@ -348,8 +355,11 @@ async def orders_screen(member: Member, lang: str):
         return t(lang, "orders_empty"), kb.as_markup()
     from app.numberhub import flag
     for o in rows:
-        label = (f"{STATUS_ICON.get(o.status, '•')} {o.service_name or o.service} · {flag(o.country_iso)} "
-                 f"{o.phone and ('+' + o.phone.lstrip('+')) or ''} · {money(o.member_price)}")
+        if getattr(o, "kind", "sms") == "email":
+            label = f"{STATUS_ICON.get(o.status, '•')} 📧 {o.service_name or o.service} · {money(o.member_price)}"
+        else:
+            label = (f"{STATUS_ICON.get(o.status, '•')} {o.service_name or o.service} · {flag(o.country_iso)} "
+                     f"{o.phone and ('+' + o.phone.lstrip('+')) or ''} · {money(o.member_price)}")
         kb.button(text=label[:60], callback_data=Ord(a="view", id=o.id))
     kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
     kb.adjust(1)
@@ -486,6 +496,52 @@ async def pay_amount_screen(reseller: Reseller, member: Member, lang: str):
     return text, kb.as_markup()
 
 
+# ─── email codes ─────────────────────────────────────────────────────────────
+EMAIL_SITES_SHOWN = 16
+EMAIL_DOMAINS_SHOWN = 10
+DELIVERY_MARK = {"high": "✅", "low": "⚠️"}
+
+
+def email_home_screen(lang: str, sites: list[dict], note: str = ""):
+    """Which site sends the code: the most asked for as buttons, or type a name."""
+    kb = InlineKeyboardBuilder()
+    for i, s in enumerate(sites[:EMAIL_SITES_SHOWN]):
+        kb.button(text=str(s["name"])[:28], callback_data=Em(a="site", i=i))
+    n = len(sites[:EMAIL_SITES_SHOWN])
+    kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+    kb.adjust(*([2] * (n // 2) + ([1] if n % 2 else []) + [1]))
+    return (note + "\n\n" if note else "") + t(lang, "email_pick_site"), kb.as_markup()
+
+
+def email_domains_screen(lang: str, site: dict, rows: list[dict]):
+    kb = InlineKeyboardBuilder()
+    for i, r in enumerate(rows[:EMAIL_DOMAINS_SHOWN]):
+        mark = DELIVERY_MARK.get(r.get("delivery"), "✉️")
+        kb.button(text=f"{mark} {r['domain']} · {money(Decimal(r['cents']) / 100)}"[:60], callback_data=Em(a="dom", i=i))
+    kb.button(text=t(lang, "btn_back"), callback_data=Em(a="home"))
+    kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+    kb.adjust(*([1] * len(rows[:EMAIL_DOMAINS_SHOWN]) + [2]))
+    return t(lang, "email_pick_domain", site=esc(site["name"])), kb.as_markup()
+
+
+def email_confirm_screen(member: Member, lang: str, site: dict, row: dict, i: int, note: str = ""):
+    price = Decimal(row["cents"]) / 100
+    kb = InlineKeyboardBuilder()
+    kb.button(text=t(lang, "btn_email_buy", price=money(price)), callback_data=Em(a="buy", i=i, c=int(row["cents"])))
+    kb.button(text=t(lang, "btn_back"), callback_data=Em(a="doms"))
+    kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+    kb.adjust(1, 2)
+    text = t(lang, "email_confirm", site=esc(site["name"]), domain=esc(row["domain"]), price=money(price),
+             balance=money(member.available))
+    return (note + "\n\n" if note else "") + text, kb.as_markup()
+
+
+def _email_rows(rows: list[dict]) -> list[dict]:
+    """What the session keeps of a domain list: plain values only."""
+    return [{"domain": r["domain"], "cents": int(r["member_price"] * 100), "delivery": r.get("delivery")}
+            for r in rows[:EMAIL_DOMAINS_SHOWN]]
+
+
 def error_text(exc: SellError, reseller: Reseller, member: Member, lang: str) -> str:
     if exc.reason == "no_credit" and payments.connected(reseller):
         return t(lang, "err_no_credit_auto", price=money(exc.price), available=money(member.available))
@@ -493,7 +549,8 @@ def error_text(exc: SellError, reseller: Reseller, member: Member, lang: str) ->
         return t(lang, "err_no_credit", price=money(exc.price), available=money(member.available),
                  id=member.telegram_id, support=support_label(reseller, lang))
     key = {"paused": "err_paused", "sold_out": "err_sold_out", "too_many_open": "err_too_many",
-           "busy": "err_busy", "processing": "err_processing", "blocked": "blocked"}.get(exc.reason, "err_failed")
+           "busy": "err_busy", "processing": "err_processing", "blocked": "blocked",
+           "email_limit": "err_email_limit"}.get(exc.reason, "err_failed")
     return t(lang, key)
 
 
@@ -660,6 +717,112 @@ def build_router(reseller_id: int) -> Router:
         text, kb = order_card(member, order)
         await _show(c, text, kb)
         await repo.set_card(order.id, c.message.chat.id, c.message.message_id)
+
+    # ── email codes ──
+    async def _email_home(c: CallbackQuery, reseller: Reseller, lang: str, state: FSMContext) -> None:
+        sites = (await selling.email_sites(reseller))[:EMAIL_SITES_SHOWN] if selling.email_on(reseller) else []
+        if not sites:
+            await c.answer(t(lang, "err_paused"), show_alert=True)
+            return
+        await state.set_state(EmailForm.site)
+        await state.update_data(em_sites=sites, em_site=None, em_domains=None)
+        await _show(c, *email_home_screen(lang, sites))
+        await c.answer()
+
+    async def _email_domains(c: CallbackQuery, reseller: Reseller, lang: str, state: FSMContext, site: dict) -> None:
+        try:
+            rows = _email_rows(await selling.email_domains(reseller, site["site"]))
+        except SellError:
+            await c.answer(t(lang, "err_busy"), show_alert=True)
+            return
+        await state.update_data(em_site=site, em_domains=rows)
+        if not rows:
+            kb = InlineKeyboardBuilder()
+            kb.button(text=t(lang, "btn_back"), callback_data=Em(a="home"))
+            kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+            kb.adjust(2)
+            await _show(c, t(lang, "email_no_domains", site=esc(site["name"])), kb.as_markup())
+        else:
+            await _show(c, *email_domains_screen(lang, site, rows))
+        await c.answer()
+
+    @r.callback_query(Em.filter())
+    async def email(c: CallbackQuery, callback_data: Em, reseller: Reseller, member: Member, lang: str,
+                    state: FSMContext):
+        a, i = callback_data.a, callback_data.i
+        data = await state.get_data()
+        sites, site, rows = data.get("em_sites") or [], data.get("em_site"), data.get("em_domains") or []
+        if a == "site" and 0 <= i < len(sites):
+            await _email_domains(c, reseller, lang, state, sites[i])
+        elif a == "doms" and site:
+            await _email_domains(c, reseller, lang, state, site)
+        elif a == "dom" and site and 0 <= i < len(rows):
+            await _show(c, *email_confirm_screen(member, lang, site, rows[i], i))
+            await c.answer()
+        elif a == "buy" and site and 0 <= i < len(rows):
+            await _email_buy(c, callback_data, reseller, member, lang, state, site, rows[i])
+        else:
+            # home, or a button from a list this session no longer has: start again.
+            await _email_home(c, reseller, lang, state)
+
+    async def _email_buy(c: CallbackQuery, callback_data: Em, reseller: Reseller, member: Member, lang: str,
+                         state: FSMContext, site: dict, row: dict) -> None:
+        await c.answer(t(lang, "buying"))
+        try:
+            order = await selling.buy_email(reseller, member, site["site"], site["name"], row["domain"],
+                                            Decimal(callback_data.c) / 100)
+        except SellError as exc:
+            if exc.reason == "duplicate":
+                return                  # a double tap: the first tap is buying and shows the card
+            fresh = await repo.get_member(member.id) or member
+            if exc.reason == "price_changed":
+                # The list with today's prices, and the same domain to confirm again.
+                try:
+                    rows = _email_rows(await selling.email_domains(reseller, site["site"], fresh=True))
+                except SellError:
+                    rows = []
+                await state.update_data(em_domains=rows)
+                at = next((n for n, r in enumerate(rows) if r["domain"] == row["domain"]), None)
+                if at is not None:
+                    await _show(c, *email_confirm_screen(fresh, lang, site, rows[at], at,
+                                                         t(lang, "err_price_changed", price=money(exc.price))))
+                    return
+                exc = SellError("sold_out")
+            kb = InlineKeyboardBuilder()
+            if exc.reason == "no_credit" and (payments.connected(reseller) or reseller.deposit_info):
+                kb.button(text=t(lang, "btn_topup"), callback_data=Nav(to="deposit"))
+            elif exc.reason == "no_credit" and support_url(reseller):
+                kb.button(text=t(lang, "btn_support"), url=support_url(reseller))
+            if exc.reason in ("processing", "too_many_open"):
+                kb.button(text=t(lang, "btn_orders"), callback_data=Nav(to="orders"))
+            else:
+                kb.button(text=t(lang, "btn_back"), callback_data=Em(a="doms"))
+            kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+            kb.adjust(1)
+            await _show(c, error_text(exc, reseller, fresh, lang), kb.as_markup())
+            return
+        except Exception:  # noqa: BLE001
+            log.exception("email buy crashed")
+            kb = InlineKeyboardBuilder()
+            kb.button(text=t(lang, "btn_orders"), callback_data=Nav(to="orders"))
+            kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+            kb.adjust(1)
+            await _show(c, t(lang, "err_failed"), kb.as_markup())
+            return
+        await state.clear()
+        text, kb = order_card(member, order)
+        await _show(c, text, kb)
+        await repo.set_card(order.id, c.message.chat.id, c.message.message_id)
+
+    @r.message(StateFilter(EmailForm.site), F.text, ~F.text.startswith("/"))
+    async def email_typed(m: Message, reseller: Reseller, lang: str, state: FSMContext):
+        found = await selling.email_search(reseller, m.text) if selling.email_on(reseller) else []
+        if not found:
+            sites = (await state.get_data()).get("em_sites") or []
+            await _show(m, *email_home_screen(lang, sites, t(lang, "email_none_found")))
+            return
+        await state.update_data(em_sites=found, em_site=None, em_domains=None)
+        await _show(m, *email_home_screen(lang, found))
 
     # ── orders ──
     @r.callback_query(Ord.filter())

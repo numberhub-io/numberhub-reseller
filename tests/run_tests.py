@@ -2220,6 +2220,276 @@ async def test_paid_left():
     await forget_paid_in()
 
 
+async def test_email_codes():
+    """Email codes in a shop (2026-11-24): a mailbox for one verification mail, sold like
+    a number. Email codes were 59% of NumberHub's margin and no shop could sell them."""
+    print("email codes")
+    from app.bots.callbacks import Em
+    from app.bots.reseller import build_router
+    own = 5131
+    api = FakeNumberHub()
+    r = await make_reseller(api, owner=own, bot_id=86501)
+    session = FakeSession(bot_id=86501)
+    bot = fake_bot(session)
+    runtime._bots[r.id] = bot
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(build_router(r.id))
+    cust = 93001
+    m = await member(r, cust, "1.00")
+    labels = lambda: [b.text for row in (session.last_markup().inline_keyboard if session.last_markup() else [])  # noqa: E731
+                      for b in row]
+    sync_now = lambda: selling.sync_reseller(r)                 # noqa: E731
+
+    async def to_site(uid, name):
+        await dp.feed_update(bot, msg(uid, "/start"))
+        await dp.feed_update(bot, tap(uid, button(session, "Email codes")))
+        await dp.feed_update(bot, tap(uid, button(session, name)))
+
+    async def get_box(uid, site_name, domain):
+        """The whole way to a mailbox; returns the newest order of that customer."""
+        await to_site(uid, site_name)
+        await dp.feed_update(bot, tap(uid, button(session, domain)))
+        await dp.feed_update(bot, tap(uid, button(session, "Get the address")))
+        mem = await repo.get_or_create_member(r.id, uid, None, None)
+        rows = await repo.member_orders(mem.id, limit=1)
+        return rows[0] if rows else None
+
+    # ── the way in ──
+    await dp.feed_update(bot, msg(cust, "/start"))
+    check("the menu has an Email codes button", button(session, "Email codes") == Em(a="home").pack())
+    await dp.feed_update(bot, tap(cust, button(session, "Email codes")))
+    check("the customer is asked which site sends the code, with the most asked for as buttons",
+          "Which site sends the code" in session.last_text() and labels()[:3] == ["OpenAI", "Google", "Reddit"],
+          str(labels()))
+    await dp.feed_update(bot, tap(cust, button(session, "OpenAI")))
+    check("the mail domains in stock, the reliable first, at the shop's price (NumberHub's plus 30%, rounded up)",
+          labels()[:3] == ["✅ gmx.com · $0.04", "✉️ hotmail.com · $0.07", "⚠️ yandex.com · $0.02"]
+          and not any("mail.ru" in x for x in labels()), str(labels()))
+    await dp.feed_update(bot, tap(cust, button(session, "gmx.com")))
+    check("the price is confirmed before anything is bought: charged only when a mail arrives",
+          "<b>$0.04</b>" in session.last_text() and "only when a mail arrives" in session.last_text()
+          and "<b>$1.00</b>" in session.last_text() and button(session, "Get the address · $0.04") is not None
+          and not api.orders)
+    await dp.feed_update(bot, tap(cust, button(session, "Get the address")))
+    o1 = (await repo.member_orders(m.id, limit=1))[0]
+    mm = await repo.get_member(m.id)
+    check("a mailbox: its address on the card, the shop's price held, nothing charged",
+          o1.kind == "email" and o1.status == "waiting" and o1.phone == f"box{o1.nh_id}@gmx.com"
+          and f"<code>{o1.phone}</code>" in session.last_text() and "Enter this address on the site" in session.last_text()
+          and mm.balance == D("1.00") and mm.held == D("0.04"), session.last_text()[:200])
+    check("…and the card speaks of a mail, not of an SMS or a number",
+          "Waiting for the mail" in session.last_text() and "charged only if a mail arrives" in session.last_text()
+          and "SMS" not in session.last_text() and "number" not in session.last_text().lower(), session.last_text())
+    check("NumberHub was asked for that site and domain at its own price, with the order's key",
+          api.email_bodies[-1] == {"site": "openai.com", "domain": "gmx.com", "max_price": "0.03"}
+          and api.held == D("0.03") and o1.service == "openai.com" and o1.country == "gmx.com"
+          and o1.member_price == D("0.04") and o1.ceiling_at_buy == D("0.03"), str(api.email_bodies[-1]))
+
+    # ── the mail arrives: a code and a link ──
+    api.mail_arrives(o1.nh_id, code="482913", link="https://openai.com/verify?t=abc&u=1")
+    await sync_now()
+    mm = await repo.get_member(m.id)
+    told = [x for x in session.texts() if "482913" in x]
+    check("the code and the link are sent to the customer, and the price is charged",
+          mm.balance == D("0.96") and mm.held == 0 and any("your code is <code>482913</code>" in x
+          and "https://openai.com/verify?t=abc&amp;u=1" in x for x in told), str(told[-1:]))
+    n = len(session.texts())
+    await sync_now()
+    await selling.settle_sweep()
+    check("a second look neither charges nor tells again",
+          (await repo.get_member(m.id)).balance == D("0.96")
+          and len([x for x in session.texts()[n:] if "your code is" in x]) == 0)
+    await dp.feed_update(bot, tap(cust, Ord(a="view", id=o1.id).pack()))
+    check("the finished card shows the code and offers another mailbox",
+          "482913" in session.last_text() and button(session, "Another mailbox") == Em(a="home").pack())
+
+    # ── a mail with a link and no code ──
+    o2 = await get_box(cust, "Google", "outlook.com")
+    api.mail_arrives(o2.nh_id, link="https://accounts.google.com/confirm/xyz")
+    await sync_now()
+    told = [x for x in session.texts() if "accounts.google.com/confirm/xyz" in x]
+    check("a mail that confirms with a link and has no code is delivered too, and charged",
+          len(told) == 1 and "sent a mail to" in told[0] and "Open this link to confirm" in told[0]
+          and (await repo.get_member(m.id)).balance == D("0.90"), str(told))
+    await sync_now()
+    check("…once", len([x for x in session.texts() if "accounts.google.com/confirm/xyz" in x]) == 1)
+    o3 = await get_box(cust, "OpenAI", "hotmail.com")
+    api.mail_arrives(o3.nh_id, message="Welcome!  Your account   is ready.\nNo code here.")
+    await sync_now()
+    check("a mail with neither: the start of its text",
+          any("sent a mail to" in x and "Welcome! Your account is ready. No code here." in x for x in session.texts()))
+
+    # ── no mail: nothing charged ──
+    before = (await repo.get_member(m.id)).balance
+    o4 = await get_box(cust, "OpenAI", "gmx.com")
+    api.set_status(o4.nh_id, "expired")
+    await sync_now()
+    mm = await repo.get_member(m.id)
+    check("no mail arrives: nothing is charged and the customer is told",
+          mm.balance == before and mm.held == 0 and (await repo.get_order(o4.id)).settled == Order.RELEASED
+          and any("No mail arrived for OpenAI" in x and "back on your balance" in x for x in session.texts()))
+    await dp.feed_update(bot, tap(cust, Ord(a="view", id=o4.id).pack()))
+    check("…its card says no mail arrived", "No mail arrived" in session.last_text()
+          and "No code arrived" not in session.last_text() and "SMS" not in session.last_text())
+    await dp.feed_update(bot, tap(cust, Ord(a="view", id=o2.id).pack()))
+    check("the card of the mail that had only a link says a mail was received, and what was paid",
+          "Mail received" in session.last_text() and "Paid: $0.06" in session.last_text(), session.last_text()[:200])
+
+    # ── cancel ──
+    o5 = await get_box(cust, "OpenAI", "gmx.com")
+    api.cancel_lock = 97
+    await dp.feed_update(bot, tap(cust, Ord(a="cancel", id=o5.id).pack()))
+    check("cancelling in the first two minutes is refused with the time left",
+          "97" in session.alerts()[-1] and (await repo.get_order(o5.id)).status == "waiting")
+    api.cancel_lock = 0
+    await dp.feed_update(bot, tap(cust, Ord(a="cancel", id=o5.id).pack()))
+    mm = await repo.get_member(m.id)
+    check("then it cancels: the mailbox is given back and the hold released",
+          (await repo.get_order(o5.id)).status == "canceled" and mm.held == 0 and mm.balance == before
+          and ("DELETE", f"/emails/{o5.nh_id}") in api.calls and api.orders[o5.nh_id]["status"] == "canceled")
+    o6 = await get_box(cust, "OpenAI", "gmx.com")
+    api.cancel_code_first = True
+    await dp.feed_update(bot, tap(cust, Ord(a="cancel", id=o6.id).pack()))
+    api.cancel_code_first = False
+    mm = await repo.get_member(m.id)
+    check("a mail that beat the cancel is delivered and charged, not refunded",
+          (await repo.get_order(o6.id)).status == "received" and mm.balance == before - D("0.04") and mm.held == 0)
+
+    # ── typing a site ──
+    await dp.feed_update(bot, msg(cust, "/start"))
+    await dp.feed_update(bot, tap(cust, button(session, "Email codes")))
+    await dp.feed_update(bot, msg(cust, "redd"))
+    check("typing a name finds the site", labels()[0] == "Reddit" and "Which site sends the code" in session.last_text())
+    await dp.feed_update(bot, tap(cust, button(session, "Reddit")))
+    check("a site with no mailbox in stock says so", "No mailbox is available for <b>Reddit</b>" in session.last_text())
+    await dp.feed_update(bot, tap(cust, button(session, "Back")))
+    await dp.feed_update(bot, msg(cust, "zzzzqq"))
+    check("a name nothing matches: asked again, the list stays",
+          "Nothing found for that name" in session.last_text() and len(labels()) >= 2)
+
+    # ── a price that moved ──
+    await to_site(cust, "OpenAI")
+    await dp.feed_update(bot, tap(cust, button(session, "gmx.com")))
+    stale = button(session, "Get the address")
+    api.email_domains["openai.com"][0]["price"] = "0.05"
+    orders_before = len(api.orders)
+    await dp.feed_update(bot, tap(cust, stale))
+    check("the price rose since the screen: nothing is bought, the new price is shown to confirm",
+          len(api.orders) == orders_before and "$0.07" in session.last_text()
+          and button(session, "Get the address · $0.07") is not None, session.last_text()[:160])
+    api.email_domains["openai.com"][0]["price"] = "0.03"
+
+    # ── limits that protect the owner's account ──
+    two = 93002
+    m2 = await member(r, two, "1.00")
+    for _ in range(3):
+        await get_box(two, "OpenAI", "yandex.com")
+    n_orders = len(api.orders)
+    await to_site(two, "OpenAI")
+    await dp.feed_update(bot, tap(two, button(session, "yandex.com")))
+    await dp.feed_update(bot, tap(two, button(session, "Get the address")))
+    check("three mailboxes waiting is the most one customer may have",
+          len(api.orders) == n_orders and await repo.member_open_count(m2.id, kind="email") == 3
+          and "open" in session.last_text().lower(), session.last_text()[:120])
+    keep = (selling.EMAIL_PER_HOUR, selling.EMAIL_SHOP_PER_HOUR)
+    try:
+        selling.EMAIL_PER_HOUR = await repo.email_orders_since(60, member_id=m.id)
+        await to_site(cust, "OpenAI")
+        await dp.feed_update(bot, tap(cust, button(session, "gmx.com")))
+        await dp.feed_update(bot, tap(cust, button(session, "Get the address")))
+        check("a customer who asked for many mailboxes in an hour waits", len(api.orders) == n_orders
+              and "many mailboxes in a short time" in session.last_text())
+        selling.EMAIL_PER_HOUR = keep[0]
+        selling.EMAIL_SHOP_PER_HOUR = await repo.email_orders_since(60, reseller_id=r.id)
+        three = await member(r, 93003, "1.00")
+        try:
+            await selling.buy_email(r, three, "openai.com", "OpenAI", "gmx.com", None)
+            limited = ""
+        except SellError as e:
+            limited = e.reason
+        check("…and so does the whole shop at its hourly limit", limited == "email_limit" and len(api.orders) == n_orders)
+    finally:
+        selling.EMAIL_PER_HOUR, selling.EMAIL_SHOP_PER_HOUR = keep
+
+    # ── a lost reply never opens two mailboxes ──
+    four = await member(r, 93004, "1.00")
+    api.lose_replies = 3
+    try:
+        await selling.buy_email(r, four, "openai.com", "OpenAI", "gmx.com", None)
+        lost = ""
+    except SellError as e:
+        lost = e.reason
+    stuck = [x for x in await repo.member_orders(four.id, 5) if x.status == Order.BUYING]
+    check("three lost replies: 'processing', the hold is kept, the order waits",
+          lost == "processing" and len(stuck) == 1 and stuck[0].kind == "email"
+          and (await repo.get_member(four.id)).held == D("0.04"))
+    n_orders = len(api.orders)
+    orig = repo.stale_buying
+    repo.stale_buying = lambda older_than_sec=60: orig(older_than_sec=0)
+    try:
+        await selling.recover_buying()
+    finally:
+        repo.stale_buying = orig
+    rec = await repo.get_order(stuck[0].id)
+    check("recovery asks again with the same request: the ONE mailbox NumberHub opened is linked",
+          rec.status == "waiting" and rec.nh_id in api.orders and len(api.orders) == n_orders
+          and rec.phone == api.orders[rec.nh_id]["phone"], f"{rec.status} {len(api.orders)} {n_orders}")
+
+    # ── the customer's order list ──
+    await dp.feed_update(bot, msg(cust, "/orders"))
+    check("email orders are in the customer's list, marked as such",
+          any("📧 OpenAI" in x for x in labels()) and not any("+box" in x for x in labels()), str(labels()[:3]))
+
+    # ── the owner's switch ──
+    from app.bots.callbacks import Adm
+    await dp.feed_update(bot, msg(own, "/admin"))
+    check("the Admin panel says email codes are on and has the switch",
+          "📧 Email codes: <b>on</b>" in session.last_text() and button(session, "Email codes: on") == Adm(a="email", arg="off").pack())
+    await dp.feed_update(bot, tap(own, button(session, "Email codes: on")))
+    off = await repo.get_reseller(r.id)
+    check("one tap switches them off", off.email_on == 0 and not selling.email_on(off)
+          and button(session, "Email codes: off") is not None)
+    await dp.feed_update(bot, msg(cust, "/start"))
+    check("…and the customers' menu no longer has the button", button(session, "Email codes") is None)
+    await dp.feed_update(bot, tap(cust, Em(a="home").pack()))
+    check("…an old button says sales are paused", "paused" in session.alerts()[-1].lower())
+    try:
+        await selling.buy_email(off, m, "openai.com", "OpenAI", "gmx.com", None)
+        refused = ""
+    except SellError as e:
+        refused = e.reason
+    check("…and nothing can be bought", refused == "paused")
+    await dp.feed_update(bot, msg(own, "/admin"))
+    await dp.feed_update(bot, tap(own, button(session, "Email codes: off")))
+    check("switched on again", selling.email_on(await repo.get_reseller(r.id)))
+
+    # ── an API without email codes: no button ──
+    api2 = FakeNumberHub()
+    api2.email_has = False
+    r2 = await make_reseller(api2, owner=5132, bot_id=86502)
+    session2 = FakeSession(bot_id=86502)
+    bot2 = fake_bot(session2)
+    runtime._bots[r2.id] = bot2
+    dp2 = Dispatcher(storage=MemoryStorage())
+    dp2.include_router(build_router(r2.id))
+    await dp2.feed_update(bot2, msg(93010, "/start"))
+    check("a shop whose API lists no email sites shows no Email codes button", button(session2, "Email codes") is None
+          and button(session2, "Buy") is not None)
+
+    # ── every language ──
+    keys = ["btn_email", "email_pick_site", "email_none_found", "email_pick_domain", "email_no_domains",
+            "email_confirm", "btn_email_buy", "email_card_title", "email_card_address", "email_card_howto",
+            "email_msg_code", "email_msg_mail", "email_msg_link", "err_email_limit", "btn_email_again",
+            "email_st_waiting", "email_st_received", "email_st_expired", "email_card_held", "email_msg_refunded",
+            "email_st_buying", "email_st_failed"]
+    missing = [(lang, k) for lang in LANGS for k in keys if k not in _table(lang)]
+    same = [(lang, k) for lang in LANGS if lang != "en" for k in keys
+            if k not in ("email_card_title", "email_card_address") and _table(lang).get(k) == _table("en")[k]]
+    check("the email texts exist in all 14 languages, translated", not missing and not same, f"{missing[:3]} {same[:3]}")
+    runtime._bots.pop(r.id, None)
+    runtime._bots.pop(r2.id, None)
+
+
 async def test_paused_shop():
     print("a paused shop")
     from app.bots.reseller import build_router
@@ -2575,7 +2845,7 @@ async def main():
     test_prices()
     test_i18n()
     for fn in (test_buy_and_code, test_no_code_refund, test_failures, test_lost_reply, test_cancel,
-               test_races_and_limits, test_bot_flow, test_builder, test_provision, test_custom_prices, test_picker_pages, test_rank_order, test_dead_token, test_rejected_key, test_deposits, test_auto_payments, test_builtin_payments, test_owner_stats, test_kasera_qris, test_paid_left, test_paused_shop, test_review_money,
+               test_races_and_limits, test_bot_flow, test_builder, test_provision, test_custom_prices, test_picker_pages, test_rank_order, test_dead_token, test_rejected_key, test_deposits, test_auto_payments, test_builtin_payments, test_owner_stats, test_kasera_qris, test_paid_left, test_email_codes, test_paused_shop, test_review_money,
                test_review_sync, test_review_bots, test_review_runtime, test_cards_render):
         try:
             await fn()

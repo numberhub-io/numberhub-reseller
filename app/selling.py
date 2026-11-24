@@ -407,38 +407,56 @@ async def _buy(reseller: Reseller, member: Member, service: str, country: str,
         raise SellError("price_changed", price)
     from app.catalog_ui import nice_name
     svc_name = nice_name(service, service_name(await services(reseller), service))
-    # A balance the owner added by hand has no money behind it in the NumberHub wallet
-    # unless the owner put some there. It must not buy with what OTHER customers paid
-    # in. Such purchases go one at a time per owner, through to NumberHub's answer, so
-    # several at once cannot each see the same free money.
+    values = dict(reseller_id=reseller.id, member_id=member.id, service=service, service_name=svc_name,
+                  country=country, country_name=row.get("name"), country_iso=(row.get("flag") or None),
+                  member_price=price, markup_pct_at_buy=reseller.markup_pct, ceiling_at_buy=row["ceiling"])
+
+    async def repriced(exc: NumberHubError) -> Decimal:
+        learn_ceiling(reseller.id, service, country, exc.data.get("price"))
+        # The member is shown THIS route's price at NumberHub's real price
+        # (the owner's rule or cap included), not the plain commission.
+        return shop_price(reseller, await price_rules(reseller.id), service, country, dec(exc.data.get("price")))
+
+    order = await _backed_place(reseller, member, cli, values,
+                                lambda o: cli.buy(service, country, row["ceiling"], idempotency_key(o)), repriced)
+    invalidate_prices(reseller.id)
+    return order
+
+
+async def _backed_place(reseller: Reseller, member: Member, cli, values: dict, purchase, repriced) -> Order:
+    """Place a purchase of any kind. A balance the owner added by hand has no money
+    behind it in the NumberHub wallet unless the owner put some there. It must not
+    buy with what OTHER customers paid in. Such purchases go one at a time per
+    owner, through to NumberHub's answer, so several at once cannot each see the
+    same free money."""
+    price, ceiling = values["member_price"], values["ceiling_at_buy"]
     fresh = await repo.get_member(member.id) or member
     hand = min(price, by_hand_part(fresh, price))
     # Nothing to protect while no customer of this owner holds paid-in money: then
     # the wallet is all the owner's, and NumberHub itself says when it is empty.
     if hand <= 0 or await repo.owner_paid_left(reseller.owner_id) <= 0:
-        return await _place(reseller, member, cli, service, country, row, price, svc_name)
+        return await _place(reseller, member, values, purchase, repriced)
     async with _owner_locks.setdefault(reseller.owner_id, asyncio.Lock()):
-        backed = await _backed(reseller, cli, hand / price, row["ceiling"])
+        backed = await _backed(reseller, cli, hand / price, ceiling)
         if backed is None:
             raise SellError("busy")
         if not backed:
             asyncio.ensure_future(warn_owner(reseller, "by_hand_unbacked"))
             raise SellError("paused")
-        return await _place(reseller, member, cli, service, country, row, price, svc_name)
+        return await _place(reseller, member, values, purchase, repriced)
 
 
-async def _place(reseller: Reseller, member: Member, cli, service: str, country: str, row: dict,
-                 price: Decimal, svc_name: str) -> Order:
-    order = await repo.create_order_with_hold(
-        reseller_id=reseller.id, member_id=member.id, service=service, service_name=svc_name,
-        country=country, country_name=row.get("name"), country_iso=(row.get("flag") or None),
-        member_price=price, markup_pct_at_buy=reseller.markup_pct, ceiling_at_buy=row["ceiling"])
+async def _place(reseller: Reseller, member: Member, values: dict, purchase, repriced) -> Order:
+    """Hold the customer's price with the order, then make the purchase
+    (`purchase(order)` is the NumberHub call, with the order's own key)."""
+    price = values["member_price"]
+    order = await repo.create_order_with_hold(**values)
     if order is None:
         raise SellError("no_credit", price)
     _inflight.add(order.id)
     try:
         try:
-            nh = await cli.buy(service, country, row["ceiling"], idempotency_key(order))
+            nh = await purchase(order)
         except TransportError:
             # Outcome unknown even after retries: the row stays BUYING with its
             # hold and the recovery sweep asks again with the same key.
@@ -448,12 +466,7 @@ async def _place(reseller: Reseller, member: Member, cli, service: str, country:
             # NumberHub's purchase handler said no: nothing was bought.
             await repo.fail_order(order.id, exc.code)
             if exc.code == "price_exceeded":
-                learn_ceiling(reseller.id, service, country, exc.data.get("price"))
-                # The member is shown THIS route's price at NumberHub's real price
-                # (the owner's rule or cap included), not the plain commission.
-                new = shop_price(reseller, await price_rules(reseller.id), service, country,
-                                 dec(exc.data.get("price")))
-                raise SellError("price_changed", new) from exc
+                raise SellError("price_changed", await repriced(exc)) from exc
             raise _map_error(exc, reseller) from exc
         except Exception:
             # e.g. the HTTP client was closed under us. The request may have gone
@@ -464,10 +477,148 @@ async def _place(reseller: Reseller, member: Member, cli, service: str, country:
             raise SellError("failed")
     finally:
         _inflight.discard(order.id)
-    invalidate_prices(reseller.id)
     log.info("reseller %s member %s bought order %s (nh %s) %s/%s for %s (ceiling %s)",
-             reseller.id, member.id, order.id, nh.get("id"), service, country, price, row["ceiling"])
+             reseller.id, member.id, order.id, nh.get("id"), values["service"], values["country"], price,
+             values["ceiling_at_buy"])
     return await repo.get_order(order.id)
+
+
+# ─── email codes ─────────────────────────────────────────────────────────────
+# A mailbox that receives one mail from one site. Same money rules as a number:
+# held with the order, charged once when the mail arrives, released otherwise.
+# Our mail source judges the whole NumberHub account on how many mailboxes get a
+# mail, and NumberHub limits each account (80 new mailboxes an hour, a pause on
+# low delivery). One careless customer must not use up the owner's limit:
+EMAIL_MAX_OPEN = 3              # mailboxes one customer may have waiting
+EMAIL_PER_HOUR = 10             # ...and may ask for in an hour
+EMAIL_SHOP_PER_HOUR = 50        # all customers of one shop together
+_email_sites: dict[int, tuple[float, list[dict]]] = {}
+_email_domains: dict[tuple[int, str], tuple[float, list[dict]]] = {}
+
+
+def email_on(reseller: Reseller) -> bool:
+    """Email codes are sold unless the owner switched them off."""
+    return getattr(reseller, "email_on", None) != 0
+
+
+async def email_sites(reseller: Reseller) -> list[dict]:
+    """The sites most asked for, for the picker's buttons: [{site, name}]. Empty
+    when the shop's API has none or cannot be asked (the button then hides)."""
+    hit = _email_sites.get(reseller.id)
+    if hit and time.monotonic() - hit[0] < 3600:
+        return hit[1]
+    cli = client_for(reseller.id)
+    if cli is None:
+        return []
+    try:
+        rows = await cli.email_sites()
+    except NumberHubError:
+        return hit[1] if hit else []
+    rows = [{"site": str(r["site"])[:120], "name": str(r.get("name") or r["site"])[:60]} for r in rows]
+    _email_sites[reseller.id] = (time.monotonic(), rows)
+    return rows
+
+
+async def email_search(reseller: Reseller, q: str) -> list[dict]:
+    """Sites matching what the customer typed: [{site, name}], at most 8."""
+    cli = client_for(reseller.id)
+    q = (q or "").strip()[:60]
+    if cli is None or len(q) < 2:
+        return []
+    try:
+        rows = await cli.email_suggest(q)
+    except NumberHubError:
+        return []
+    return [{"site": str(r["site"])[:120], "name": str(r.get("name") or r["site"])[:60]} for r in rows][:8]
+
+
+async def email_domains(reseller: Reseller, site: str, fresh: bool = False) -> list[dict]:
+    """The mail domains a customer can pick for `site`, in NumberHub's order (the
+    ones with a good delivery record first), in stock only, at the shop's price:
+    [{domain, nh_price, member_price, delivery}]. Raises SellError."""
+    key = (reseller.id, site)
+    hit = _email_domains.get(key)
+    if hit and not fresh and time.monotonic() - hit[0] < 60:
+        return hit[1]
+    cli = client_for(reseller.id)
+    if cli is None:
+        raise SellError("paused")
+    try:
+        rows = await cli.email_domains(site)
+    except NumberHubError as exc:
+        raise _map_error(exc, reseller) from exc
+    out = []
+    for r in rows:
+        price = dec(r.get("price"))
+        if price <= 0 or not r.get("in_stock"):
+            continue
+        out.append({"domain": str(r["domain"])[:120], "nh_price": price,
+                    "member_price": shop_price(reseller, {}, site, str(r["domain"]), price),
+                    "delivery": r.get("delivery") if r.get("delivery") in ("high", "low") else None})
+    _email_domains[key] = (time.monotonic(), out)
+    if len(_email_domains) > 2000:
+        for k in [k for k, v in list(_email_domains.items()) if time.monotonic() - v[0] > 300]:
+            _email_domains.pop(k, None)
+    return out
+
+
+async def buy_email(reseller: Reseller, member: Member, site: str, site_name_: str, domain: str,
+                    shown_price: Decimal | None = None) -> Order:
+    if reseller.status != Reseller.ACTIVE or not email_on(reseller):
+        raise SellError("paused")
+    if member.is_blocked:
+        raise SellError("blocked")
+    if member.id in _members_buying:
+        raise SellError("duplicate")
+    _members_buying.add(member.id)
+    try:
+        return await _buy_email(reseller, member, site, site_name_, domain, shown_price)
+    finally:
+        _members_buying.discard(member.id)
+
+
+async def _buy_email(reseller: Reseller, member: Member, site: str, site_name_: str, domain: str,
+                     shown_price: Decimal | None) -> Order:
+    if await repo.member_open_count(member.id, kind="email") >= EMAIL_MAX_OPEN:
+        raise SellError("too_many_open")
+    if (await repo.email_orders_since(60, member_id=member.id) >= EMAIL_PER_HOUR
+            or await repo.email_orders_since(60, reseller_id=reseller.id) >= EMAIL_SHOP_PER_HOUR):
+        raise SellError("email_limit")
+    cli = client_for(reseller.id)
+    if cli is None:
+        raise SellError("paused")
+    row = next((r for r in await email_domains(reseller, site, fresh=True) if r["domain"] == domain), None)
+    if row is None:
+        raise SellError("sold_out")
+    price = row["member_price"]
+    if shown_price is not None and price > shown_price:
+        raise SellError("price_changed", price)
+    values = dict(reseller_id=reseller.id, member_id=member.id, kind="email", service=site,
+                  service_name=(site_name_ or site)[:128], country=domain, country_name=domain, country_iso=None,
+                  member_price=price, markup_pct_at_buy=reseller.markup_pct, ceiling_at_buy=row["nh_price"])
+
+    async def repriced(exc: NumberHubError) -> Decimal:
+        _email_domains.pop((reseller.id, site), None)
+        return shop_price(reseller, {}, site, domain, dec(exc.data.get("price")))
+
+    order = await _backed_place(reseller, member, cli, values,
+                                lambda o: cli.buy_email(site, domain, row["nh_price"], idempotency_key(o)), repriced)
+    _email_domains.pop((reseller.id, site), None)
+    return order
+
+
+async def mail_details(reseller: Reseller, order: Order) -> dict:
+    """The mail that arrived on an email order: {code, link, message} (any may be
+    None). Many sites verify with a link and no code, so the list of orders, which
+    carries codes only, is not enough to tell the customer what came."""
+    cli = client_for(reseller.id)
+    if cli is None or order.nh_id is None:
+        return {}
+    try:
+        block = (await cli.email(order.nh_id)).get("email")
+    except (NumberHubError, KeyError):
+        return {}
+    return block if isinstance(block, dict) else {}
 
 
 async def _attach(reseller: Reseller, order_id: int, nh: dict) -> bool:
@@ -564,7 +715,10 @@ async def recover_buying() -> None:
                    else original_ceiling(order.member_price, order.markup_pct_at_buy))
         _inflight.add(order.id)
         try:
-            nh = await cli.buy(order.service, order.country, ceiling, idempotency_key(order))
+            if order.kind == "email":
+                nh = await cli.buy_email(order.service, order.country, ceiling, idempotency_key(order))
+            else:
+                nh = await cli.buy(order.service, order.country, ceiling, idempotency_key(order))
         except TransportError:
             continue                    # still unclear: try again next sweep
         except NumberHubError as exc:
@@ -606,16 +760,19 @@ async def cancel(reseller: Reseller, member: Member, order_id: int) -> tuple[boo
     cli = client_for(reseller.id)
     if cli is None:
         return False, "busy", 0
+    email = order.kind == "email"
     try:
-        body = await cli.cancel(order.nh_id)
+        body = await (cli.cancel_email(order.nh_id) if email else cli.cancel(order.nh_id))
     except NumberHubError as exc:
         if exc.code == "cancel_locked":
             return False, "locked", int(exc.data.get("seconds_remaining") or 15)
+        if exc.code == "not_cancelable":
+            return False, "closed", 0
         if exc.status == 404:
             return False, "not_found", 0
         return False, "busy", 0
-    if body.get("number"):
-        await repo.apply_nh_state(order.id, body["number"])
+    if body.get("email" if email else "number"):
+        await repo.apply_nh_state(order.id, body["email" if email else "number"])
     fresh = await repo.get_order(order.id)
     await settle_order(fresh)
     if body.get("reason") == "code_received":
@@ -680,7 +837,7 @@ async def sync_reseller(reseller: Reseller) -> None:
                 continue
             _offlist_polled[order.id] = now
             try:
-                nh = await cli.number(order.nh_id)
+                nh = await (cli.email(order.nh_id) if order.kind == "email" else cli.number(order.nh_id))
             except NumberHubError as exc:
                 if exc.status in (401, 403, 429):
                     await _sync_trouble(reseller, exc, cli)
@@ -698,7 +855,18 @@ async def sync_reseller(reseller: Reseller) -> None:
             continue
         codes = order_codes(fresh)
         new_codes = n_codes > fresh.codes_announced
-        if new_codes:
+        if fresh.kind == "email":
+            # One mail per mailbox, and it may carry a link and no code at all: tell
+            # the customer once, when the order shows it received its mail.
+            new_codes = False
+            if fresh.codes_announced == 0 and (codes or fresh.status in Order.CHARGED_STATUSES):
+                mail = await mail_details(reseller, fresh)
+                if await send_ex(bot, member.telegram_id, texts.mail_arrived(member, fresh, mail, codes)) != "retry":
+                    await repo.set_codes_announced(fresh.id, max(1, len(codes)))
+                    new_codes = True
+            elif changed and fresh.status in ("canceled", "expired") and not codes:
+                await send(bot, member.telegram_id, texts.refunded(member, fresh))
+        elif new_codes:
             announced = fresh.codes_announced
             for code in codes[fresh.codes_announced:]:
                 if await send_ex(bot, member.telegram_id, texts.code_arrived(member, fresh, code)) == "retry":

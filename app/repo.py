@@ -66,7 +66,7 @@ async def update_reseller(reseller_id: int, **values) -> None:
     allowed = {"markup_pct", "welcome_text", "support_contact", "status", "bot_username", "bot_title",
                "bot_token_enc", "api_key_enc", "api_key_hint", "max_profit", "deposit_info", "deposit_min",
                "oxapay_key_enc", "cryptobot_token_enc", "nh_pay", "daily_report",
-               "kasera_key_enc", "kasera_rate", "key_by_owner"}
+               "kasera_key_enc", "kasera_rate", "key_by_owner", "email_on"}
     values = {k: v for k, v in values.items() if k in allowed}
     if values:
         async with session_factory() as s:
@@ -457,12 +457,29 @@ async def member_orders(member_id: int, limit: int = 10) -> list[Order]:
         return list((await s.execute(q)).scalars())
 
 
-async def member_open_count(member_id: int, service: str | None = None, country: str | None = None) -> int:
+async def member_open_count(member_id: int, service: str | None = None, country: str | None = None,
+                            kind: str | None = None) -> int:
     async with session_factory() as s:
         q = select(func.count()).select_from(Order).where(Order.member_id == member_id,
                                                           Order.status.in_(Order.OPEN))
         if service is not None:
             q = q.where(Order.service == service, Order.country == str(country))
+        if kind is not None:
+            q = q.where(Order.kind == kind)
+        return (await s.execute(q)).scalar_one()
+
+
+async def email_orders_since(minutes: int, member_id: int | None = None, reseller_id: int | None = None) -> int:
+    """Mailboxes asked for in the last `minutes` by one customer or in one shop
+    (a purchase that was refused opened none and does not count)."""
+    since = _now() - dt.timedelta(minutes=minutes)
+    async with session_factory() as s:
+        q = select(func.count()).select_from(Order).where(Order.kind == "email", Order.created_at >= since,
+                                                          Order.status != Order.FAILED)
+        if member_id is not None:
+            q = q.where(Order.member_id == member_id)
+        if reseller_id is not None:
+            q = q.where(Order.reseller_id == reseller_id)
         return (await s.execute(q)).scalar_one()
 
 

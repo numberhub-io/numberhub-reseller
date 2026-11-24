@@ -59,6 +59,20 @@ class FakeNumberHub:
         self.then_rate_limit = 0                     # after the next lost reply, N requests get 429
         self.in_progress_next = 0                    # next N replays: 409 idempotency_in_progress
         self.scopes = {"catalog:read", "orders:read", "orders:write", "wallet:read"}
+        # email codes (GET /email/..., POST /emails, GET and DELETE /emails/{id})
+        self.email_has = True                        # False = an API without email codes
+        self.email_sites_list = [{"site": "openai.com", "name": "OpenAI"},
+                                 {"site": "accounts.google.com", "name": "Google"},
+                                 {"site": "reddit.com", "name": "Reddit"}]
+        self.email_domains = {
+            "openai.com": [{"domain": "gmx.com", "price": "0.03", "in_stock": True, "delivery": "high"},
+                           {"domain": "hotmail.com", "price": "0.05", "in_stock": True, "delivery": None},
+                           {"domain": "yandex.com", "price": "0.01", "in_stock": True, "delivery": "low"},
+                           {"domain": "mail.ru", "price": "0.02", "in_stock": False, "delivery": None}],
+            "accounts.google.com": [{"domain": "outlook.com", "price": "0.04", "in_stock": True, "delivery": "high"}],
+            "reddit.com": [],
+        }
+        self.email_bodies: list[dict] = []
         # deposits into the wallet (POST /topups, GET /topups/{id})
         self.topups: dict[int, dict] = {}
         self.next_topup = 500
@@ -71,7 +85,7 @@ class FakeNumberHub:
     def _scope(self, method: str, path: str) -> str:
         if path == "/balance":
             return "wallet:read"
-        if path in ("/services", "/countries"):
+        if path in ("/services", "/countries") or path.startswith("/email/"):
             return "catalog:read"
         if path.startswith("/topups"):
             return "orders:write" if method == "POST" else "wallet:read"
@@ -163,6 +177,19 @@ class FakeNumberHub:
     def public(self, o: dict) -> dict:
         return {k: v for k, v in o.items() if not k.startswith("_")}
 
+    def email_public(self, o: dict) -> dict:
+        """GET /emails/{id}: the order plus its `email` block."""
+        mail = o.get("_mail") or {}
+        return {**self.public(o), "email": {
+            "address": o["phone"], "code": o["codes"][-1] if o["codes"] else None, "link": mail.get("link"),
+            "links": [mail["link"]] if mail.get("link") else [], "message": mail.get("message")}}
+
+    def mail_arrives(self, nh_id: int, code: str | None = None, link: str | None = None,
+                     message: str | None = None) -> None:
+        """The mailbox got its mail: a code, a link, or only text."""
+        self.orders[nh_id]["_mail"] = {"link": link, "message": message}
+        self.set_status(nh_id, "received", code)
+
     # ── HTTP ──
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handle)
@@ -195,8 +222,35 @@ class FakeNumberHub:
         if request.method == "GET" and path == "/countries":
             svc = request.url.params.get("service")
             return self._json(200, {"service": svc, "countries": self.countries.get(svc, [])})
-        if request.method == "POST" and path == "/numbers":
+        if request.method == "POST" and path in ("/numbers", "/emails"):
             return self._buy(request)
+        if request.method == "GET" and path == "/email/sites":
+            return self._json(200, {"sites": self.email_sites_list if self.email_has else []})
+        if request.method == "GET" and path == "/email/suggest":
+            q = (request.url.params.get("q") or "").lower()
+            hits = [dict(s, known=True) for s in self.email_sites_list if q in s["site"] or q in s["name"].lower()]
+            return self._json(200, {"suggestions": hits if self.email_has else []})
+        if request.method == "GET" and path.startswith("/email/sites/") and path.endswith("/domains"):
+            from urllib.parse import unquote
+            site = unquote(path.split("/")[3])
+            return self._json(200, {"site": site, "site_name": site, "domains": self.email_domains.get(site, [])})
+        if path.startswith("/emails/"):
+            tail = path.split("/")[2]
+            o = self.orders.get(int(tail)) if tail.isdigit() else None
+            if o is None or o.get("kind") != "email":
+                return self._json(404, {"error": "not_found"})
+            if request.method == "GET":
+                return self._json(200, {"email": self.email_public(o)})
+            if request.method == "DELETE":
+                if o["status"] != "waiting":
+                    return self._json(409, {"error": "not_cancelable", "order_status": o["status"]})
+                if self.cancel_lock:
+                    return self._json(409, {"error": "cancel_locked", "seconds_remaining": self.cancel_lock})
+                if self.cancel_code_first:
+                    self.mail_arrives(o["id"], "999111")
+                    return self._json(200, {"ok": False, "email": self.email_public(o), "reason": "code_received"})
+                self.set_status(o["id"], "canceled")
+                return self._json(200, {"ok": True, "email": self.email_public(o)})
         if request.method == "POST" and path == "/topups":
             return self._open_topup(request)
         if request.method == "GET" and path == "/topups/methods" and self.has_methods_list:
@@ -261,7 +315,35 @@ class FakeNumberHub:
             self.then_rate_limit = 0
             raise httpx.ReadTimeout("lost reply", request=request)
 
+    def _do_buy_email(self, body: dict) -> tuple[int, dict]:
+        self.email_bodies.append(body)
+        if self.fail_next_buy:
+            code, self.fail_next_buy = self.fail_next_buy, None
+            return (402 if code == "insufficient_funds" else 409), {"error": code}
+        site, domain = body.get("site"), body.get("domain")
+        row = next((d for d in self.email_domains.get(site, []) if d["domain"] == domain and d["in_stock"]), None)
+        if row is None:
+            return 409, {"error": "sold_out"}
+        price = Decimal(row["price"])
+        if Decimal(body["max_price"]) < price:
+            return 409, {"error": "price_exceeded", "price": f"{price:.2f}", "max_price": body["max_price"]}
+        if self.wallet - self.held < price:
+            return 402, {"error": "insufficient_funds"}
+        self.held += price
+        self.next_id += 1
+        now = dt.datetime.now(UTC)
+        name = next((s["name"] for s in self.email_sites_list if s["site"] == site), site)
+        o = {"id": self.next_id, "kind": "email", "service": site, "service_name": name, "country": domain,
+             "country_name": domain, "phone": f"box{self.next_id}@{domain}", "verification": "sms",
+             "status": "waiting", "status_label": "", "price": f"{price:.2f}", "code": None, "codes": [],
+             "operator": None, "created_at": iso(now), "expires_at": iso(now + dt.timedelta(minutes=20)),
+             "cancel_available_at": iso(now + dt.timedelta(seconds=125)), "_mail": {}}
+        self.orders[o["id"]] = o
+        return 201, {"email": self.email_public(o)}
+
     def _do_buy(self, body: dict) -> tuple[int, dict]:
+        if "site" in body:
+            return self._do_buy_email(body)
         if self.fail_next_buy:
             code, self.fail_next_buy = self.fail_next_buy, None
             if code == "insufficient_funds":

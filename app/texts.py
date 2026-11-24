@@ -9,7 +9,7 @@ from decimal import Decimal
 from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app.bots.callbacks import Nav, Ord, Svc
+from app.bots.callbacks import Em, Nav, Ord, Svc
 from app.i18n import t
 from app.models import Member, Order
 from app.numberhub import flag
@@ -47,43 +47,57 @@ def mmss(secs: int) -> str:
     return f"{secs // 60:02d}:{secs % 60:02d}"
 
 
+# Status lines that speak of an SMS or a number have a wording of their own for a mailbox.
+_EMAIL_WORDING = {"st_waiting", "st_received", "st_expired", "st_buying", "st_failed", "card_held"}
+
+
 def order_card(member: Member, order: Order) -> tuple[str, InlineKeyboardMarkup]:
     from app.selling import order_codes
     lang = member.language or "en"
     codes = order_codes(order)
+    email = getattr(order, "kind", "sms") == "email"
+
+    def k(key: str) -> str:
+        return "email_" + key if email and key in _EMAIL_WORDING else key
     emoji = flag(order.country_iso)
-    lines = [t(lang, "card_title", service=esc(order.service_name or order.service), flag=emoji,
-               country=esc(order.country_name or order.country))]
-    if order.phone:
-        lines.append(t(lang, "card_number", phone=esc(phone_fmt(order.phone))))
+    if email:
+        # A mailbox for one mail from one site: the address instead of a number.
+        lines = [t(lang, "email_card_title", site=esc(order.service_name or order.service))]
+        if order.phone:
+            lines.append(t(lang, "email_card_address", address=esc(order.phone)))
+    else:
+        lines = [t(lang, "card_title", service=esc(order.service_name or order.service), flag=emoji,
+                   country=esc(order.country_name or order.country))]
+        if order.phone:
+            lines.append(t(lang, "card_number", phone=esc(phone_fmt(order.phone))))
     lines.append("")
     st = order.status
     if st not in ("buying", "pending", "waiting", "completed", "canceled", "expired", "failed"):
         st = "received"           # received, or a transient NumberHub status after a code
     if st == "waiting":
-        lines.append(t(lang, "st_waiting", left=mmss(seconds_until(order.expires_at))))
+        lines.append(t(lang, k("st_waiting"), left=mmss(seconds_until(order.expires_at))))
         if not codes:
-            lines.append(t(lang, "card_howto"))
+            lines.append(t(lang, "email_card_howto" if email else "card_howto"))
     elif st == "canceled" and not codes:
         lines.append(t(lang, "st_canceled", price=money(order.member_price)))
-    elif st == "expired" and not codes:
-        lines.append(t(lang, "st_expired", price=money(order.member_price)))
+    elif st == "expired" and not codes and not (email and order.settled == Order.CHARGED):
+        lines.append(t(lang, k("st_expired"), price=money(order.member_price)))
     elif st in ("received", "completed", "canceled", "expired"):
-        lines.append(t(lang, "st_received" if st == "received" else "st_completed"))
+        lines.append(t(lang, k("st_received") if st == "received" else "st_completed"))
     else:
-        lines.append(t(lang, f"st_{st}", price=money(order.member_price)))
+        lines.append(t(lang, k(f"st_{st}"), price=money(order.member_price)))
     if codes:
         lines.append(t(lang, "card_code", code=esc(codes[-1])))
-        hint = flash_hint(lang, codes[-1])
+        hint = "" if email else flash_hint(lang, codes[-1])
         if hint:
             lines.append(hint)
         if len(codes) > 1:
             lines.append(t(lang, "card_more_codes", codes=", ".join(f"<code>{esc(c)}</code>" for c in codes[:-1])))
     if st in ("buying", "pending", "waiting"):
-        lines.append(t(lang, "card_held", price=money(order.member_price)))
+        lines.append(t(lang, k("card_held"), price=money(order.member_price)))
     elif codes or st in ("received", "completed"):
         lines.append(t(lang, "card_paid", price=money(order.member_price)))
-    if order.phone or codes:
+    if (order.phone or codes) and not email:
         lines += ["", t(lang, "card_tip")]
 
     kb = InlineKeyboardBuilder()
@@ -94,6 +108,8 @@ def order_card(member: Member, order: Order) -> tuple[str, InlineKeyboardMarkup]
         else:
             kb.button(text=t(lang, "btn_cancel"), callback_data=Ord(a="cancel", id=order.id))
         kb.button(text=t(lang, "btn_refresh"), callback_data=Ord(a="view", id=order.id))
+    elif email and st not in ("buying",):
+        kb.button(text=t(lang, "btn_email_again"), callback_data=Em(a="home"))
     elif st in ("canceled", "expired", "failed") and not codes:
         kb.button(text=t(lang, "btn_new_number"), callback_data=Svc(code=order.service, page=0))
     elif st in ("received", "completed"):
@@ -125,12 +141,33 @@ def code_arrived(member: Member, order: Order, code: str) -> str:
     return f"{text}\n\n{hint}" if hint else text
 
 
+def mail_arrived(member: Member, order: Order, mail: dict, codes: list[str]) -> str:
+    """The mail an email order was waiting for: its code, and its link when it has
+    one (many sites confirm with a link and no code), else the start of its text."""
+    lang = member.language or "en"
+    site = esc(order.service_name or order.service)
+    code = str(mail.get("code") or (codes[-1] if codes else "") or "").strip()
+    link = str(mail.get("link") or "").strip()
+    lines = [t(lang, "email_msg_code", site=site, code=esc(code)) if code
+             else t(lang, "email_msg_mail", site=site, address=esc(order.phone or ""))]
+    if link.startswith(("https://", "http://")):
+        lines.append(t(lang, "email_msg_link", link=esc(link[:900])))
+    elif not code:
+        body = " ".join(str(mail.get("message") or "").split())
+        if body:
+            lines += ["", esc(body[:700])]
+    return "\n".join(lines)
+
+
 def number_ready(member: Member, order: Order) -> str:
     return t(member.language or "en", "msg_ready", phone=esc(phone_fmt(order.phone)),
              service=esc(order.service_name or order.service))
 
 
 def refunded(member: Member, order: Order) -> str:
+    if getattr(order, "kind", "sms") == "email":
+        return t(member.language or "en", "email_msg_refunded", site=esc(order.service_name or order.service),
+                 price=money(order.member_price))
     return t(member.language or "en", "msg_refunded", service=esc(order.service_name or order.service),
              price=money(order.member_price))
 

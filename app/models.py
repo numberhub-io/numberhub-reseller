@@ -69,6 +69,8 @@ class Reseller(Base):
     # seen it. Only such a key can have what customers pay in kept for the shop, so
     # on a platform run for others only such a shop offers built-in payments.
     key_by_owner: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Email codes in this shop: 0 = the owner switched them off, anything else on.
+    email_on: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # The morning report to the owner (app/reports.py): 0 = off, anything else on.
     # report_day = the UTC day it was last sent for, so it goes out once a day.
     daily_report: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -152,15 +154,19 @@ class Order(Base):
     reseller_id: Mapped[int] = mapped_column(ForeignKey("resellers.id", ondelete="CASCADE"), index=True)
     member_id: Mapped[int] = mapped_column(ForeignKey("members.id", ondelete="CASCADE"), index=True)
     nh_id: Mapped[int | None] = mapped_column(nullable=True)
+    # "sms" = a phone number for a code by SMS or call; "email" = a mailbox for one
+    # mail from one site. An email order keeps the site in `service`, the mail domain
+    # in `country` and the mailbox address in `phone`, as NumberHub's own orders do.
+    kind: Mapped[str] = mapped_column(String(8), default="sms", server_default="sms")
     # Why a purchase did not happen (NumberHub's own answer: insufficient_funds,
     # sold_out, price_exceeded, ...), for the owner's statistics. None otherwise.
     fail_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    service: Mapped[str] = mapped_column(String(16))
+    service: Mapped[str] = mapped_column(String(128))
     service_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    country: Mapped[str] = mapped_column(String(16))
+    country: Mapped[str] = mapped_column(String(128))
     country_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     country_iso: Mapped[str | None] = mapped_column(String(2), nullable=True)   # for the flag
-    phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    phone: Mapped[str | None] = mapped_column(String(255), nullable=True)
     member_price: Mapped[Decimal] = mapped_column(Numeric(12, 2))
     # The markup in force when bought: the purchase request (and its replay after a
     # lost reply) is rebuilt from it, not from today's setting.

@@ -86,6 +86,9 @@ async def dashboard(reseller: Reseller):
         f"🏦 NumberHub wallet: {wallet}",
         f"🔗 Share your bot: <code>t.me/{esc(reseller.bot_username)}</code>",
         "",
+        "📧 Email codes: <b>" + ("on" if getattr(reseller, "email_on", None) != 0 else "off") + "</b> · a mailbox "
+        "for one verification mail, your commission on top, paid only when the mail arrives",
+        "",
         "<i>Customers add balance by themselves in crypto (💳 Payments): built in, it lands in your "
         "NumberHub wallet; or through your own OxaPay or @CryptoBot; or they pay you your way and you add "
         "it here. Each number is paid from your NumberHub wallet only when its code arrives.</i>",
@@ -102,9 +105,13 @@ async def dashboard(reseller: Reseller):
     kb.button(text="📝 Welcome text", callback_data=Adm(a="welcome"))
     kb.button(text="🆘 Support contact", callback_data=Adm(a="support"))
     kb.button(text="🚫 Block / unblock", callback_data=Adm(a="block"))
+    # Email codes: a mailbox for one verification mail, sold like a number.
+    email_on = getattr(reseller, "email_on", None) != 0
+    kb.button(text="📧 Email codes: on" if email_on else "📧 Email codes: off",
+              callback_data=Adm(a="email", arg="off" if email_on else "on"))
     kb.button(text="🔄 Refresh", callback_data=Adm(a="home"))
     kb.button(text="🏠 Menu", callback_data=Nav(to="menu"))
-    kb.adjust(1, 2, 2, 2, 2, 2, 2)
+    kb.adjust(1, 2, 2, 2, 2, 2, 1, 2)
     return text, kb.as_markup()
 
 
@@ -533,6 +540,13 @@ def register(r: Router) -> None:
             await show(c, *await dashboard(reseller))
         elif a == "stats":
             await show(c, *await stats_screen(reseller))
+        elif a == "email" and callback_data.arg in ("on", "off"):
+            await repo.update_reseller(reseller.id, email_on=1 if callback_data.arg == "on" else 0)
+            await show(c, *await dashboard(await repo.get_reseller(reseller.id)))
+            await c.answer("📧 Email codes are on: your customers see the button in the menu."
+                           if callback_data.arg == "on" else
+                           "📧 Email codes are off. A mailbox a customer already has still works.", show_alert=True)
+            return
         elif a == "report" and callback_data.arg in ("on", "off"):
             await repo.update_reseller(reseller.id, daily_report=1 if callback_data.arg == "on" else 0)
             await show(c, *await stats_screen(await repo.get_reseller(reseller.id)))

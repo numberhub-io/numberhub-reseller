@@ -11,6 +11,7 @@ import hmac
 import json
 import logging
 from decimal import Decimal
+from urllib.parse import quote
 
 import httpx
 
@@ -132,14 +133,18 @@ class NumberHub:
         and the last answer proves nothing (429, auth, the idempotency gate, a
         timeout), raises TransportError: the outcome is unknown, and the caller
         keeps the hold and lets recovery ask again with the same key."""
-        body = self.buy_body(service, country, max_price)
+        return await self._purchase("/numbers", self.buy_body(service, country, max_price), idempotency_key, "number")
+
+    async def _purchase(self, path: str, body: bytes, idempotency_key: str, field: str) -> dict:
+        """One purchase, asked up to three times with the same key and the same bytes.
+        See buy() for what each kind of failure means."""
         last: NumberHubError | None = None
         maybe_sent = False
         for attempt in range(3):
             try:
-                r = await self._send("POST", "/numbers", content=body,
+                r = await self._send("POST", path, content=body,
                                      headers={"Idempotency-Key": idempotency_key})
-                return r.json()["number"]
+                return r.json()[field]
             except TransportError as exc:
                 last, maybe_sent = exc, True
                 await asyncio.sleep(1.5 * (attempt + 1))
@@ -165,6 +170,40 @@ class NumberHub:
 
     async def orders(self, limit: int = 100) -> list[dict]:
         return (await self._req("GET", "/orders", params={"limit": limit})).get("orders", [])
+
+    # ── email codes: a mailbox that receives one mail from one site ──────────
+    async def email_sites(self) -> list[dict]:
+        """The sites most asked for: [{site, name}]."""
+        rows = (await self._req("GET", "/email/sites")).get("sites", [])
+        return [r for r in rows if isinstance(r, dict) and r.get("site")] if isinstance(rows, list) else []
+
+    async def email_suggest(self, q: str) -> list[dict]:
+        """Sites matching what a customer typed: [{site, name, known}]."""
+        rows = (await self._req("GET", "/email/suggest", params={"q": q})).get("suggestions", [])
+        return [r for r in rows if isinstance(r, dict) and r.get("site")] if isinstance(rows, list) else []
+
+    async def email_domains(self, site: str) -> list[dict]:
+        """Mail domains for one site, the reliable ones first:
+        [{domain, price, in_stock, delivery: "high" | "low" | null}]."""
+        rows = (await self._req("GET", f"/email/sites/{quote(site, safe='')}/domains")).get("domains", [])
+        return [r for r in rows if isinstance(r, dict) and r.get("domain")] if isinstance(rows, list) else []
+
+    @staticmethod
+    def email_body(site: str, domain: str, max_price: Decimal) -> bytes:
+        return json.dumps({"site": site, "domain": domain, "max_price": f"{max_price:.2f}"},
+                          separators=(",", ":"), sort_keys=True).encode()
+
+    async def buy_email(self, site: str, domain: str, max_price: Decimal, idempotency_key: str) -> dict:
+        """A mailbox for one mail from `site`. Same rules as buy(): the key makes a
+        retry return the same order, and an unclear answer raises TransportError."""
+        return await self._purchase("/emails", self.email_body(site, domain, max_price), idempotency_key, "email")
+
+    async def email(self, nh_id: int) -> dict:
+        """The order with its `email` block: {address, code, link, links, message}."""
+        return (await self._req("GET", f"/emails/{nh_id}"))["email"]
+
+    async def cancel_email(self, nh_id: int) -> dict:
+        return await self._req("DELETE", f"/emails/{nh_id}")
 
     # ── deposits into the reseller's wallet (built-in payments) ───────────────
     async def open_topup(self, amount: Decimal, method: str, reference: str, lifetime_minutes: int) -> dict:
