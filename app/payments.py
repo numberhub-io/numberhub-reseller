@@ -413,9 +413,21 @@ def has_key(reseller: Reseller, provider: str) -> bool:
     return bool(getattr(reseller, _enc_field(provider), None))
 
 
+def builtin_allowed(reseller: Reseller) -> bool:
+    """On a platform run for others (a wallet service hands the keys over:
+    PROVISION_SECRET is set) built-in payments need a key nobody but the platform
+    has seen. A key the owner pasted has been seen by its owner, and what customers
+    pay in through it cannot be kept for them. Running the platform for yourself
+    (no PROVISION_SECRET) there is nobody to protect them from: always allowed."""
+    return not (settings.provision_secret and getattr(reseller, "key_by_owner", None))
+
+
 def builtin_on(reseller: Reseller) -> bool:
     """Whether this shop takes built-in USDT payments: the owner's choice, or the
-    platform's default while they have not chosen."""
+    platform's default while they have not chosen. Never on a key its owner pasted
+    on a platform run for others (builtin_allowed)."""
+    if not builtin_allowed(reseller):
+        return False
     choice = getattr(reseller, "nh_pay", None)
     return bool(settings.numberhub_pay_default) if choice is None else bool(choice)
 

@@ -223,7 +223,9 @@ async def deposits_screen(reseller: Reseller, note: str = ""):
     lines = ([note, ""] if note else []) + [
         "💳 <b>Payments</b>",
         "",
-        "<b>💵 Built-in crypto</b> " + ("✅ on" if builtin else "⏸ off"),
+        "<b>💵 Built-in crypto</b> " + ("✅ on" if builtin else "⏸ off" if payments.builtin_allowed(reseller) else
+                                       "— not available: this shop runs on an API key you pasted yourself. "
+                                       "Connect the bot again in @TheNumberHubBot (🤖 Your own bot) to use it."),
         "Nothing to set up. A customer taps 💳 Add balance, picks an amount and a coin (USDT, BTC, ETH, LTC, "
         "TRX, BNB, SOL, USDC and more) and gets an address and the exact amount to send. When it arrives, "
         "the money is added in dollars to <b>your NumberHub wallet</b> and "
@@ -268,9 +270,11 @@ async def deposits_screen(reseller: Reseller, note: str = ""):
         lines.append(f"Minimum top-up: <b>{money(reseller.deposit_min)}</b>")
     lines += ["", f"<b>Waiting for you:</b> {len(rows)}" if rows else "No manual deposit waiting."]
     kb = InlineKeyboardBuilder()
-    sizes = [1]
-    kb.button(text="⏸ Turn off built-in crypto" if builtin else "💵 Turn on built-in crypto",
-              callback_data=Adm(a="nhpay", arg="off" if builtin else "on"))
+    sizes = []
+    if payments.builtin_allowed(reseller):
+        kb.button(text="⏸ Turn off built-in crypto" if builtin else "💵 Turn on built-in crypto",
+                  callback_data=Adm(a="nhpay", arg="off" if builtin else "on"))
+        sizes.append(1)
     for g, label in ((payments.OXAPAY, "🪙 OxaPay"), (payments.CRYPTOBOT, "🤖 @CryptoBot"),
                      (payments.KASERA, "🇮🇩 KaseraPay")):
         if payments.has_key(reseller, g):
@@ -668,8 +672,16 @@ def register(r: Router) -> None:
             await m.answer(err, reply_markup=_cancel_kb())
             return
         if not await repo.member_adjust(reseller.id, member.id, -amount):
-            await m.answer(f"❌ They have only <b>{money(member.available)}</b> available "
-                           "(money reserved by open orders can't be removed).", reply_markup=_cancel_kb())
+            fresh = await repo.get_member(member.id) or member
+            if not fresh.paid_left:
+                await m.answer(f"❌ They have only <b>{money(fresh.available)}</b> available "
+                               "(money reserved by open orders can't be removed).", reply_markup=_cancel_kb())
+                return
+            can = max(Decimal("0"), min(fresh.available, fresh.by_hand))
+            await m.answer(f"❌ You can remove at most <b>{money(can)}</b> from this customer. "
+                           f"<b>{money(fresh.paid_left)}</b> of their balance is what they paid in themselves with "
+                           "built-in payments: that is theirs to spend and can't be removed. Neither can money "
+                           "reserved by open orders.", reply_markup=_cancel_kb())
             return
         fresh = await repo.get_member(member.id)
         await selling.send(m.bot, fresh.telegram_id, t(fresh.language, "msg_debited", amount=money(amount),

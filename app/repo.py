@@ -66,7 +66,7 @@ async def update_reseller(reseller_id: int, **values) -> None:
     allowed = {"markup_pct", "welcome_text", "support_contact", "status", "bot_username", "bot_title",
                "bot_token_enc", "api_key_enc", "api_key_hint", "max_profit", "deposit_info", "deposit_min",
                "oxapay_key_enc", "cryptobot_token_enc", "nh_pay", "daily_report",
-               "kasera_key_enc", "kasera_rate"}
+               "kasera_key_enc", "kasera_rate", "key_by_owner"}
     values = {k: v for k, v in values.items() if k in allowed}
     if values:
         async with session_factory() as s:
@@ -171,13 +171,15 @@ async def set_member_blocked(member_id: int, blocked: bool) -> None:
 
 async def member_adjust(reseller_id: int, member_id: int, amount: Decimal) -> bool:
     """The reseller adds (+) or removes (-) credit. A removal can't touch credit
-    reserved by an open order, nor go below zero."""
+    reserved by an open order, nor go below zero, nor take what the customer paid
+    in with built-in payments: that is the customer's money and can only be spent."""
     if not amount.is_finite() or amount == 0:
         return False
     async with session_factory() as s:
         cond = [Member.id == member_id, Member.reseller_id == reseller_id]
         if amount < 0:
             cond.append(money2(Member.balance - Member.held) >= -amount)
+            cond.append(money2(Member.balance - func.coalesce(Member.paid_left, 0)) >= -amount)
         res = await s.execute(update(Member).where(*cond).values(balance=money2(Member.balance + amount)))
         if res.rowcount != 1:
             await s.rollback()
@@ -391,9 +393,13 @@ async def settle(order_id: int, charge: bool) -> bool:
         o = await s.get(Order, order_id)
         price = o.member_price
         if charge:
+            # Paid-in money is spent first: a customer who paid is never held up by a
+            # bonus the owner added, and what the shop owes them falls with every code.
+            left = func.coalesce(Member.paid_left, 0)
             res = await s.execute(update(Member).where(
                 Member.id == o.member_id, Member.held >= price, Member.balance >= price,
-            ).values(balance=money2(Member.balance - price), held=money2(Member.held - price)))
+            ).values(balance=money2(Member.balance - price), held=money2(Member.held - price),
+                     paid_left=case((left > price, money2(left - price)), else_=0)))
             if res.rowcount == 1:
                 s.add(MemberTx(reseller_id=o.reseller_id, member_id=o.member_id, kind="charge",
                                amount=-price, order_id=o.id))
@@ -706,8 +712,12 @@ async def credit_payment(payment_id: int, amount: Decimal | None = None, late: b
         if res.rowcount != 1:
             await s.rollback()
             return None
+        values = {"balance": money2(Member.balance + credit)}
+        if row.provider == "numberhub":
+            # Paid into the shop's NumberHub wallet: the customer's own money.
+            values["paid_left"] = money2(func.coalesce(Member.paid_left, 0) + credit)
         res = await s.execute(update(Member).where(Member.id == row.member_id, Member.reseller_id == row.reseller_id)
-                              .values(balance=money2(Member.balance + credit)))
+                              .values(**values))
         if res.rowcount != 1:
             await s.rollback()
             return None
@@ -783,8 +793,11 @@ async def credit_payment_more(payment_id: int, have: Decimal, now: Decimal) -> D
         if res.rowcount != 1:
             await s.rollback()
             return None
+        values = {"balance": money2(Member.balance + extra)}
+        if row.provider == "numberhub":
+            values["paid_left"] = money2(func.coalesce(Member.paid_left, 0) + extra)
         res = await s.execute(update(Member).where(Member.id == row.member_id, Member.reseller_id == row.reseller_id)
-                              .values(balance=money2(Member.balance + extra)))
+                              .values(**values))
         if res.rowcount != 1:
             await s.rollback()
             return None
@@ -806,29 +819,37 @@ async def recent_builtin_topup(reseller_id: int, days: int = 3) -> int | None:
     return int(inv) if inv and str(inv).isdigit() else None
 
 
+def _paid_left_sum():
+    # Never more than the balance, whatever a row says: it is what is still there.
+    left = func.coalesce(Member.paid_left, 0)
+    return func.coalesce(func.sum(case((left > Member.balance, Member.balance), else_=left)), 0)
+
+
 async def builtin_unspent(reseller_id: int) -> Decimal:
-    """What a shop's customers paid in with built-in payments and still hold: for
-    each customer the smaller of their balance and everything they ever paid in
-    that way. The shop's NumberHub wallet has to cover it (payments.backing)."""
+    """What a shop's customers paid in with built-in payments and still hold
+    (members.paid_left). The shop's NumberHub wallet has to cover it
+    (payments.backing), and it is what the wallet service keeps for the shop."""
     async with session_factory() as s:
-        paid = {mid: Decimal(str(total or 0)) for mid, total in (await s.execute(
-            select(Payment.member_id, func.coalesce(func.sum(Payment.credited), 0)).where(
-                Payment.reseller_id == reseller_id, Payment.provider == "numberhub",
-                Payment.status == Payment.PAID).group_by(Payment.member_id))).all()}
-        if not paid:
-            return Decimal("0.00")
-        rows = (await s.execute(select(Member.id, Member.balance).where(
-            Member.reseller_id == reseller_id, Member.id.in_(list(paid))))).all()
-    total = sum((max(Decimal("0"), min(Decimal(str(bal or 0)), paid[mid])) for mid, bal in rows), Decimal("0"))
-    return total.quantize(Decimal("0.01"))
+        total = await s.scalar(select(_paid_left_sum()).where(Member.reseller_id == reseller_id))
+    return max(Decimal("0"), Decimal(str(total or 0))).quantize(Decimal("0.01"))
 
 
-async def builtin_figures() -> list[dict]:
+async def owner_paid_left(owner_id: int) -> Decimal:
+    """The same over ALL of one owner's shops: they share one NumberHub wallet."""
+    async with session_factory() as s:
+        total = await s.scalar(select(_paid_left_sum()).where(Member.reseller_id.in_(
+            select(Reseller.id).where(Reseller.owner_id == owner_id))))
+    return max(Decimal("0"), Decimal(str(total or 0))).quantize(Decimal("0.01"))
+
+
+async def builtin_figures(days: int = 3) -> list[dict]:
     """For every shop that was ever paid with built-in payments: what its customers
-    still hold from them (as builtin_unspent) and the total of those payments the
-    shop has given to its customers. One read, so the two belong together. The
-    wallet service keeps that much of the owner's wallet for the shop."""
+    still hold from them (as builtin_unspent), and the payments it has given to its
+    customers in the last `days`, one by one (NumberHub's deposit number and the
+    amount credited). One read, so they belong together. The wallet service keeps
+    for the shop what customers hold plus every deposit not named here yet."""
     cent = Decimal("0.01")
+    since = _now() - dt.timedelta(days=max(1, int(days)))
     async with session_factory() as s:
         paid = (await s.execute(
             select(Payment.reseller_id, Payment.member_id, func.coalesce(func.sum(Payment.credited), 0)).where(
@@ -841,15 +862,24 @@ async def builtin_figures() -> list[dict]:
             by_shop.setdefault(rid, {})[mid] = Decimal(str(total or 0))
         owners = dict((await s.execute(select(Reseller.id, Reseller.owner_id).where(
             Reseller.id.in_(list(by_shop))))).all())
-        members = [m for per in by_shop.values() for m in per]
-        balances = dict((await s.execute(select(Member.id, Member.balance).where(Member.id.in_(members)))).all())
+        holds = dict((await s.execute(select(Member.reseller_id, _paid_left_sum()).where(
+            Member.reseller_id.in_(list(by_shop))).group_by(Member.reseller_id))).all())
+        given: dict[int, list[dict]] = {}
+        for rid, invoice, credited in (await s.execute(
+                select(Payment.reseller_id, Payment.invoice_id, Payment.credited).where(
+                    Payment.provider == "numberhub", Payment.status == Payment.PAID,
+                    Payment.invoice_id.is_not(None), Payment.paid_at >= since)
+                .order_by(Payment.id.desc()).limit(5000))).all():
+            if str(invoice).isdigit() and credited is not None:
+                given.setdefault(rid, []).append({"id": int(invoice), "amount": str(Decimal(str(credited)).quantize(cent))})
     out = []
     for rid, per in sorted(by_shop.items()):
         if rid not in owners:
             continue
-        hold = sum((max(Decimal("0"), min(Decimal(str(balances.get(mid) or 0)), paid_in))
-                    for mid, paid_in in per.items()), Decimal("0"))
+        hold = max(Decimal("0"), Decimal(str(holds.get(rid) or 0)))
         out.append({"shop_id": rid, "owner_id": owners[rid], "customers_hold": str(hold.quantize(cent)),
+                    "credited": given.get(rid, []),
+                    # The total, for a wallet service from before deposits were named one by one.
                     "deposits_seen": str(sum(per.values(), Decimal("0")).quantize(cent))})
     return out
 

@@ -407,7 +407,7 @@ async def finish_create(m: Message, owner, state: FSMContext, markup: Decimal, e
     reseller = await repo.create_reseller(
         owner_id=owner.id, bot_token_enc=data["token"], bot_id=data["bot_id"], bot_username=data["username"],
         bot_title=data.get("title"), api_key_enc=data["key"], api_key_hint=data.get("hint"),
-        markup_pct=markup, support_contact=contact, status=Reseller.ACTIVE)
+        markup_pct=markup, support_contact=contact, status=Reseller.ACTIVE, key_by_owner=1)
     await runtime.start(reseller)
     kb = InlineKeyboardBuilder()
     kb.button(text=f"🔗 Open @{reseller.bot_username}", url=f"https://t.me/{reseller.bot_username}")
@@ -445,7 +445,8 @@ async def _reconnect(m: Message, state: FSMContext, rid: int, data: dict, key: s
         return
     await repo.update_reseller(rid, bot_token_enc=data["token"], bot_username=data.get("username"),
                                bot_title=data.get("title"), api_key_enc=crypto.encrypt(key), api_key_hint=key[-4:],
-                               status=Reseller.ACTIVE if reseller.status != Reseller.DISABLED else Reseller.DISABLED)
+                               status=Reseller.ACTIVE if reseller.status != Reseller.DISABLED else Reseller.DISABLED,
+                               key_by_owner=1)
     await runtime.restart(rid)
     await m.answer(f"✅ <b>@{esc(data.get('username'))}</b> is reconnected, with its customers and balances.",
                    reply_markup=home_kb())
@@ -472,7 +473,8 @@ async def got_newkey(m: Message, state: FSMContext):
         return
     await state.clear()
     status = Reseller.DISABLED if reseller.status == Reseller.DISABLED else Reseller.ACTIVE
-    await repo.update_reseller(reseller.id, api_key_enc=crypto.encrypt(key), api_key_hint=key[-4:], status=status)
+    await repo.update_reseller(reseller.id, api_key_enc=crypto.encrypt(key), api_key_hint=key[-4:], status=status,
+                               key_by_owner=1)
     await runtime.swap_key(reseller.id, key)
     await m.answer(f"✅ New key saved for @{esc(reseller.bot_username)}"
                    + (" — it is selling again." if status == Reseller.ACTIVE else " (the bot is still paused)."),

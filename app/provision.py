@@ -133,7 +133,7 @@ async def create_shop(request: web.Request) -> web.Response:
             status = Reseller.DISABLED if existing.status == Reseller.DISABLED else Reseller.ACTIVE
             await repo.update_reseller(existing.id, bot_token_enc=crypto.encrypt(token), bot_username=me.username,
                                        bot_title=me.full_name, api_key_enc=crypto.encrypt(key),
-                                       api_key_hint=key[-4:], status=status)
+                                       api_key_hint=key[-4:], status=status, key_by_owner=0)
             await runtime.restart(existing.id)
             log.info("hosted shop %s reconnected for owner %s", existing.id, owner_id)
             return web.json_response({"shop": _shop_json(await repo.get_reseller(existing.id)),
@@ -143,7 +143,8 @@ async def create_shop(request: web.Request) -> web.Response:
             reseller = await repo.create_reseller(
                 owner_id=owner_id, bot_token_enc=crypto.encrypt(token), bot_id=me.id, bot_username=me.username,
                 bot_title=me.full_name, api_key_enc=crypto.encrypt(key), api_key_hint=key[-4:],
-                markup_pct=markup, support_contact=f"@{username}" if username else None, status=Reseller.ACTIVE)
+                markup_pct=markup, support_contact=f"@{username}" if username else None, status=Reseller.ACTIVE,
+                key_by_owner=0)
         except IntegrityError:
             return _err("taken", 409)
         await runtime.start(reseller)
@@ -177,7 +178,11 @@ async def reserves(request: web.Request) -> web.Response:
     """What each shop owes the customers who paid with built-in payments. The
     wallet service reads it to keep that much of the owner's wallet for the shop,
     so customers' money cannot be spent on anything else."""
-    return web.json_response({"shops": await repo.builtin_figures()})
+    try:
+        days = min(3650, max(1, int(request.query.get("days", "3"))))
+    except ValueError:
+        days = 3
+    return web.json_response({"shops": await repo.builtin_figures(days)})
 
 
 async def set_status(request: web.Request) -> web.Response:

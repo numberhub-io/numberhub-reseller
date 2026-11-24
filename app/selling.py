@@ -335,6 +335,30 @@ def _map_error(exc: NumberHubError, reseller: Reseller) -> SellError:
 
 
 # ─── buying ──────────────────────────────────────────────────────────────────
+_owner_locks: dict[int, asyncio.Lock] = {}   # purchases with hand-added balance: one at a time per owner
+
+
+def by_hand_part(member: Member, price: Decimal) -> Decimal:
+    """How much of `price` this customer would pay with balance that was added by
+    hand. Paid-in money goes first, and their open orders are counted as spending
+    it already."""
+    paid_free = max(Decimal("0"), Decimal(member.paid_left or 0) - Decimal(member.held or 0))
+    return max(Decimal("0"), Decimal(price) - paid_free)
+
+
+async def _backed(reseller: Reseller, cli, share: Decimal, ceiling: Decimal) -> bool | None:
+    """Does the owner's OWN money in the NumberHub wallet cover this purchase's
+    hand-added share? Their own money is what the wallet has available beyond what
+    the customers of all their shops paid in and still hold. None = the wallet
+    could not be read: nothing proves the money is there, so nothing is bought."""
+    try:
+        wallet = dec((await cli.balance()).get("available"))
+    except NumberHubError:
+        return None
+    own = wallet - await repo.owner_paid_left(reseller.owner_id)
+    return own >= (Decimal(ceiling) * share).quantize(Decimal("0.01"), rounding="ROUND_UP")
+
+
 _inflight: set[int] = set()          # orders a live buy() or recovery is talking to NumberHub about
 _members_buying: set[int] = set()    # one purchase at a time per member (a double tap)
 _orphans: dict[int, tuple[int, float]] = {}   # NumberHub order -> (reseller, next try): give it back
@@ -383,6 +407,28 @@ async def _buy(reseller: Reseller, member: Member, service: str, country: str,
         raise SellError("price_changed", price)
     from app.catalog_ui import nice_name
     svc_name = nice_name(service, service_name(await services(reseller), service))
+    # A balance the owner added by hand has no money behind it in the NumberHub wallet
+    # unless the owner put some there. It must not buy with what OTHER customers paid
+    # in. Such purchases go one at a time per owner, through to NumberHub's answer, so
+    # several at once cannot each see the same free money.
+    fresh = await repo.get_member(member.id) or member
+    hand = min(price, by_hand_part(fresh, price))
+    # Nothing to protect while no customer of this owner holds paid-in money: then
+    # the wallet is all the owner's, and NumberHub itself says when it is empty.
+    if hand <= 0 or await repo.owner_paid_left(reseller.owner_id) <= 0:
+        return await _place(reseller, member, cli, service, country, row, price, svc_name)
+    async with _owner_locks.setdefault(reseller.owner_id, asyncio.Lock()):
+        backed = await _backed(reseller, cli, hand / price, row["ceiling"])
+        if backed is None:
+            raise SellError("busy")
+        if not backed:
+            asyncio.ensure_future(warn_owner(reseller, "by_hand_unbacked"))
+            raise SellError("paused")
+        return await _place(reseller, member, cli, service, country, row, price, svc_name)
+
+
+async def _place(reseller: Reseller, member: Member, cli, service: str, country: str, row: dict,
+                 price: Decimal, svc_name: str) -> Order:
     order = await repo.create_order_with_hold(
         reseller_id=reseller.id, member_id=member.id, service=service, service_name=svc_name,
         country=country, country_name=row.get("name"), country_iso=(row.get("flag") or None),

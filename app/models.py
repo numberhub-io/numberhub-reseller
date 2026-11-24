@@ -64,6 +64,11 @@ class Reseller(Base):
     # is added to the shop's NumberHub wallet. 1 = on, 0 = off, None = the
     # platform's default (settings.numberhub_pay_default).
     nh_pay: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 1 = the shop runs on an API key its owner pasted (the builder bot); empty or 0 =
+    # the key was handed over by the operator's wallet service and nobody else has
+    # seen it. Only such a key can have what customers pay in kept for the shop, so
+    # on a platform run for others only such a shop offers built-in payments.
+    key_by_owner: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # The morning report to the owner (app/reports.py): 0 = off, anything else on.
     # report_day = the UTC day it was last sent for, so it goes out once a day.
     daily_report: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -87,6 +92,13 @@ class Member(Base):
     language: Mapped[str] = mapped_column(String(8), default="en")
     balance: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0"))
     held: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0"))
+    # The part of `balance` this customer paid in with built-in payments and has not
+    # spent: real money, sitting in the shop's NumberHub wallet. Up when such a
+    # payment is credited, down when an order is charged (paid-in money goes first).
+    # The rest of the balance was added by the owner (by hand, an approved deposit,
+    # or the owner's own gateway) and has only the owner's own money behind it.
+    # Always between 0 and `balance`. The owner cannot take it away.
+    paid_left: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0"), server_default="0")
     is_blocked: Mapped[bool] = mapped_column(Boolean, default=False)
     # Last bought service/country, for the one-tap "Buy again".
     last_service: Mapped[str | None] = mapped_column(String(16), nullable=True)
@@ -97,6 +109,11 @@ class Member(Base):
     @property
     def available(self) -> Decimal:
         return Decimal(self.balance or 0) - Decimal(self.held or 0)
+
+    @property
+    def by_hand(self) -> Decimal:
+        """The part of the balance that was not paid in with built-in payments."""
+        return max(Decimal("0"), Decimal(self.balance or 0) - Decimal(self.paid_left or 0))
 
 
 class MemberTx(Base):

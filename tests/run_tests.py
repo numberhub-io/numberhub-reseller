@@ -69,6 +69,15 @@ async def member(r, tg, credit="0"):
     return await repo.get_member(m.id)
 
 
+async def forget_paid_in():
+    """One owner's shops share one wallet, so paid-in money a test leaves behind would
+    count against the wallet of the next test's shop. Each test is its own world."""
+    from sqlalchemy import text as sql_text
+    from app import db as app_db
+    async with app_db.engine.begin() as conn:
+        await conn.execute(sql_text("UPDATE members SET paid_left = 0"))
+
+
 # ─── pure ────────────────────────────────────────────────────────────────────
 def test_prices():
     print("prices")
@@ -649,6 +658,8 @@ async def test_provision():
         check("a shop the platform suspended can't be resumed by its owner",
               r.status == 409 and (await repo.get_reseller(rid)).status == Reseller.SUSPENDED)
         # ── what each shop owes its built-in customers (read by the wallet service) ──
+        from sqlalchemy import update as sql_update
+        from app.db import session_factory
         from app.models import Payment
         resp = await client.get("/internal/reserves", headers={"X-Provision-Secret": "wrong"})
         check("the figures need the shared secret too", resp.status == 403)
@@ -658,34 +669,69 @@ async def test_provision():
         m1 = await repo.get_or_create_member(rid, 88001, None, None)
         m2 = await repo.get_or_create_member(rid, 88002, None, None)
         m3 = await repo.get_or_create_member(rid, 88003, None, None)
-        for member, amount in ((m1, "30"), (m2, "10")):
+        paid_rows = {}
+        for member, amount, deposit in ((m1, "30", "9301"), (m2, "10", "9302")):
             row = await repo.create_payment(rid, member.id, "numberhub", D(amount))
-            await repo.attach_invoice(row.id, str(900 + row.id), None, None)
+            await repo.attach_invoice(row.id, deposit, None, None)
             await repo.credit_payment(row.id, D(amount))
+            paid_rows[deposit] = row.id
         await repo.member_adjust(rid, m3.id, D("25"))        # a balance added by hand
-        fig = lambda: next(x for x in figures if x["shop_id"] == rid)     # noqa: E731
-        figures = (await (await client.get("/internal/reserves", headers=H)).json())["shops"]
+
+        async def read(query=""):
+            got = (await (await client.get("/internal/reserves" + query, headers=H)).json())["shops"]
+            return next(x for x in got if x["shop_id"] == rid)
+
+        async def spend(member, price):
+            """An order of this customer is charged, the way a delivered code charges it."""
+            o = await repo.create_order_with_hold(
+                reseller_id=rid, member_id=member.id, service="wa", service_name="WhatsApp", country="187",
+                country_name="Testland", country_iso=None, member_price=D(price), markup_pct_at_buy=D("30"),
+                ceiling_at_buy=D(price))
+            async with session_factory() as s:
+                await s.execute(sql_update(Order).where(Order.id == o.id).values(status="received"))
+                await s.commit()
+            return await repo.settle(o.id, True)
+
+        fig = await read()
         check("two customers paid $40 with built-in payments and hold it all",
-              fig() == {"shop_id": rid, "owner_id": 9101, "customers_hold": "40.00", "deposits_seen": "40.00"},
-              str(figures))
-        await repo.member_adjust(rid, m1.id, D("-12"))
-        figures = (await (await client.get("/internal/reserves", headers=H)).json())["shops"]
-        check("one spent $12: customers hold $28 of the $40 paid in",
-              fig()["customers_hold"] == "28.00" and fig()["deposits_seen"] == "40.00", str(figures))
+              fig["owner_id"] == 9101 and fig["customers_hold"] == "40.00" and fig["deposits_seen"] == "40.00", str(fig))
+        check("…and each payment the shop gave out is named with NumberHub's deposit number and the amount",
+              sorted((x["id"], x["amount"]) for x in fig["credited"]) == [(9301, "30.00"), (9302, "10.00")], str(fig))
+        check("the owner cannot take a customer's paid-in money away to lower what the shop owes",
+              not await repo.member_adjust(rid, m1.id, D("-12")) and (await read())["customers_hold"] == "40.00")
+        check("the customer spends $12", await spend(m1, "12"))
+        fig = await read()
+        check("…customers hold $28 of the $40 paid in", fig["customers_hold"] == "28.00" and fig["deposits_seen"] == "40.00",
+              str(fig))
         await repo.member_adjust(rid, m2.id, D("50"))
-        figures = (await (await client.get("/internal/reserves", headers=H)).json())["shops"]
-        check("a balance added by hand on top is not counted as paid in",
-              fig()["customers_hold"] == "28.00", str(figures))
+        check("a balance added by hand on top is not counted as paid in", (await read())["customers_hold"] == "28.00")
         pending = await repo.create_payment(rid, m3.id, "numberhub", D("9"))
-        await repo.attach_invoice(pending.id, "999", None, None)
-        figures = (await (await client.get("/internal/reserves", headers=H)).json())["shops"]
-        check("a payment that is not paid yet counts for nothing",
-              fig()["deposits_seen"] == "40.00" and (await repo.get_payment(pending.id)).status == Payment.PENDING)
+        await repo.attach_invoice(pending.id, "9399", None, None)
+        fig = await read()
+        check("a payment that is not paid yet counts for nothing and is not named",
+              fig["deposits_seen"] == "40.00" and len(fig["credited"]) == 2
+              and (await repo.get_payment(pending.id)).status == Payment.PENDING)
+        added = await repo.credit_payment_more(paid_rows["9302"], D("10"), D("11.50"))
+        fig = await read()
+        check("more arrives on a credited payment: it is named with its new amount, and the customer holds it",
+              added == D("1.50") and (9302, "11.50") in [(x["id"], x["amount"]) for x in fig["credited"]]
+              and fig["customers_hold"] == "29.50", str(fig))
+        async with session_factory() as s:
+            await s.execute(sql_update(Payment).where(Payment.id == paid_rows["9301"])
+                            .values(paid_at=dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=10)))
+            await s.commit()
+        fig, wide = await read(), await read("?days=30")
+        check("a payment given out ten days ago is no longer named by default, and is with ?days=30",
+              [x["id"] for x in fig["credited"]] == [9302] and sorted(x["id"] for x in wide["credited"]) == [9301, 9302]
+              and fig["customers_hold"] == wide["customers_hold"] == "29.50")
+        check("a days value that is not a number reads as the default",
+              [x["id"] for x in (await read("?days=abc"))["credited"]] == [9302])
         settings.provision_secret = "short"
         check("a short secret keeps the listener off", await provision.start_server() is None)
     finally:
         await client.close()
         rt.make_bot, rt.start, rt.restart, provision.NumberHub, settings.provision_secret = orig
+        await forget_paid_in()
 
 
 async def test_custom_prices():
@@ -861,10 +907,11 @@ async def test_custom_prices():
         cols = {row[1] for row in (await conn.execute(_text("PRAGMA table_info(orders)"))).all()}
         rcols = {row[1] for row in (await conn.execute(_text("PRAGMA table_info(resellers)"))).all()}
         pcols = {row[1] for row in (await conn.execute(_text("PRAGMA table_info(payments)"))).all()}
+        mcols = {row[1] for row in (await conn.execute(_text("PRAGMA table_info(members)"))).all()}
     check("start-up adds the new columns to a database from before",
           want[0] in cols and want[1] in rcols)
     check("every column a later release added is in the database",
-          all(col in {"resellers": rcols, "orders": cols, "payments": pcols}[tbl]
+          all(col in {"resellers": rcols, "orders": cols, "payments": pcols, "members": mcols}[tbl]
               for tbl, col, _kind in _db._ADDED_COLUMNS))
 
 
@@ -1704,6 +1751,7 @@ async def test_builtin_payments():
     payments.ASK_EVERY_FRESH, payments.ASK_EVERY_OLD, payments.ASK_EVERY_LATE = 20.0, 60.0, 3600.0
     payments._methods_cache = None
     payments.TRANSPORT = None
+    await forget_paid_in()
 
 
 async def test_owner_stats():
@@ -1991,6 +2039,185 @@ async def test_kasera_qris():
           and payments.KASERA not in payments.connected(gone))
     payments._methods_cache = None
     payments.TRANSPORT = None
+
+
+async def test_paid_left():
+    """What a customer paid in is theirs: the owner cannot take it away, and a balance
+    added by hand cannot buy with what OTHER customers paid in."""
+    print("paid-in money and balances added by hand")
+    from app import payments
+    from app.config import settings
+    own_a, own_b = 5127, 5128
+    api = FakeNumberHub(wallet="0.00")
+    r = await make_reseller(api, owner=own_a, bot_id=86401)
+    session = FakeSession(bot_id=86401)
+    runtime._bots[r.id] = fake_bot(session)
+    told = lambda words: [x for x in session.texts() if words in x]      # noqa: E731
+
+    async def pay_in(m, amount, deposit):
+        """A built-in payment of this customer arrives: in the wallet and on their balance."""
+        row = await repo.create_payment(r.id, m.id, "numberhub", D(amount))
+        await repo.attach_invoice(row.id, deposit, None, None)
+        await repo.credit_payment(row.id, D(amount))
+        api.wallet += D(amount)
+        return row
+
+    async def try_buy(m):
+        try:
+            return await selling.buy(r, await repo.get_member(m.id), "wa", "187", None)
+        except SellError as e:
+            return e.reason
+
+    payer = await member(r, 91001)
+    await pay_in(payer, "10", "9401")
+    p = await repo.get_member(payer.id)
+    check("a built-in payment is the customer's own money: all of the balance is paid in",
+          p.balance == D("10") and p.paid_left == D("10") and p.by_hand == 0
+          and await repo.builtin_unspent(r.id) == D("10.00") and await repo.owner_paid_left(own_a) == D("10.00"))
+    await repo.member_adjust(r.id, payer.id, D("2"))
+    p = await repo.get_member(payer.id)
+    check("a bonus the owner adds is not: $12 balance, $10 paid in, $2 by hand",
+          p.balance == D("12") and p.paid_left == D("10") and p.by_hand == D("2"))
+    from app.bots.callbacks import Adm
+    from app.bots.reseller import build_router
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(build_router(r.id))
+    bot = runtime._bots[r.id]
+    await dp.feed_update(bot, msg(own_a, "/admin"))
+    await dp.feed_update(bot, tap(own_a, Adm(a="remove").pack()))
+    await dp.feed_update(bot, msg(own_a, f"{payer.telegram_id} 5"))
+    check("the owner asking to remove $5 is told what can be removed and why, and nothing is taken",
+          "at most <b>$2.00</b>" in session.last_text() and "<b>$10.00</b> of their balance" in session.last_text()
+          and "paid in themselves" in session.last_text() and (await repo.get_member(payer.id)).balance == D("12"),
+          session.last_text()[:200])
+    await dp.feed_update(bot, msg(own_a, "-"))
+    check("the owner can take back only what they added by hand",
+          not await repo.member_adjust(r.id, payer.id, D("-3")) and await repo.member_adjust(r.id, payer.id, D("-2"))
+          and not await repo.member_adjust(r.id, payer.id, D("-0.01")) and (await repo.get_member(payer.id)).balance == D("10"))
+
+    hand1 = await member(r, 91002, "5")
+    got = await try_buy(hand1)
+    await asyncio.sleep(0.05)
+    h = await repo.get_member(hand1.id)
+    check("a customer with a hand-added balance cannot buy while the wallet holds only other customers' money",
+          got == "paused" and h.held == 0 and not api.orders, f"{got}")
+    check("…and the owner is told why, in their own bot", len(told("added by hand")) == 1, str(session.texts()[-1:]))
+    o1 = await try_buy(payer)
+    check("the customer who paid buys as always", isinstance(o1, Order) and api.held == D("0.30"), str(o1))
+    api.owner_topup("1")                                           # the owner puts $1 of their own in the wallet
+    o2 = await try_buy(hand1)
+    hand2, hand3 = await member(r, 91003, "5"), await member(r, 91004, "5")
+    o3, o4 = await try_buy(hand2), await try_buy(hand3)
+    check("with $1 of the owner's own money behind them, hand-added balances buy until it is used up",
+          isinstance(o2, Order) and isinstance(o3, Order) and o4 == "paused" and api.held == D("0.90"),
+          f"{o2} {o3} {o4} held {api.held}")
+
+    api.set_status(o1.nh_id, "received", "111222")
+    await selling.sync_reseller(r)
+    p = await repo.get_member(payer.id)
+    check("a code arrives for the paying customer: charged from their paid-in money",
+          p.balance == D("9.61") and p.paid_left == D("9.61") and await repo.builtin_unspent(r.id) == D("9.61"))
+    await repo.member_adjust(r.id, payer.id, D("3"))
+    p = await repo.get_member(payer.id)
+    check("paid-in money is spent first: with $9.61 paid in and $3 by hand, a $0.39 number is all paid-in money",
+          selling.by_hand_part(p, D("0.39")) == 0 and selling.by_hand_part(p, D("10.00")) == D("0.39"))
+
+    mixed = await member(r, 91005, "1")
+    await pay_in(mixed, "0.20", "9402")
+    x = await repo.get_member(mixed.id)
+    check("a customer with $0.20 paid in and $1 by hand: $0.19 of a $0.39 number is by hand",
+          x.balance == D("1.20") and x.paid_left == D("0.20") and selling.by_hand_part(x, D("0.39")) == D("0.19"))
+    api.owner_topup("0.50")
+    o5 = await try_buy(mixed)
+    api.set_status(o5.nh_id, "received", "333444")
+    await selling.sync_reseller(r)
+    x = await repo.get_member(mixed.id)
+    check("…bought, charged: the paid-in part is gone first, what is left was added by hand",
+          isinstance(o5, Order) and x.balance == D("0.81") and x.paid_left == 0 and x.by_hand == D("0.81"))
+
+    # several at once: the owner's own money covers exactly one more number
+    for o in (o2, o3):
+        api.set_status(o.nh_id, "expired")
+    await selling.sync_reseller(r)
+    owed = await repo.owner_paid_left(own_a)
+    api.wallet = owed + api.held + D("0.30")
+    crowd = [await member(r, 91010 + i, "5") for i in range(6)]
+    got = await asyncio.gather(*(try_buy(m) for m in crowd))
+    check("six hand-added balances buying at once with the owner's money for one: exactly one buys",
+          sum(isinstance(g, Order) for g in got) == 1 and sum(g == "paused" for g in got) == 5,
+          str([g if isinstance(g, str) else "bought" for g in got]))
+    waiting = next(m for m, g in zip(crowd, got) if g == "paused")      # one who has no order open
+    orders_before = len(api.orders)
+    api.scopes.discard("wallet:read")
+    got = await try_buy(waiting)
+    api.scopes.add("wallet:read")
+    check("the wallet cannot be read: nothing is bought, and nothing is blamed on the owner",
+          got == "busy" and (await repo.get_member(waiting.id)).held == 0 and len(api.orders) == orders_before,
+          str(got))
+
+    # a shop whose customers paid nothing in: nothing changes
+    api_b = FakeNumberHub(wallet="0.10")
+    rb = await make_reseller(api_b, owner=own_b, bot_id=86402)
+    session_b = FakeSession(bot_id=86402)
+    runtime._bots[rb.id] = fake_bot(session_b)
+    mb = await member(rb, 91020, "5")
+    try:
+        await selling.buy(rb, mb, "wa", "187", None)
+        got = "bought"
+    except SellError as e:
+        got = e.reason
+    await asyncio.sleep(0.05)
+    check("no paid-in money anywhere in the owner's shops: the wallet is not even asked, NumberHub decides as before",
+          got == "paused" and ("GET", "/balance") not in api_b.calls
+          and any("balance is too low" in x for x in session_b.texts()), f"{got} {api_b.calls[-3:]}")
+
+    # the figures the wallet service reads are exact now
+    figures = {f["shop_id"]: f for f in await repo.builtin_figures()}
+    check("what the shop owes is what its customers have left of their paid-in money, to the cent",
+          figures[r.id]["customers_hold"] == str(await repo.builtin_unspent(r.id)) == "9.61"
+          and rb.id not in figures, str(figures.get(r.id)))
+
+    # a shop on a key its owner pasted, on a platform run for others
+    keep = settings.provision_secret
+    try:
+        await repo.update_reseller(r.id, key_by_owner=1, nh_pay=1)
+        pasted = await repo.get_reseller(r.id)
+        settings.provision_secret = ""
+        check("running the platform for yourself: built-in payments work on your own key", payments.builtin_on(pasted))
+        settings.provision_secret = "s" * 40
+        check("on a platform run for others, a shop on a key its owner pasted offers no built-in payments",
+              not payments.builtin_allowed(pasted) and not payments.builtin_on(pasted)
+              and payments.NUMBERHUB not in payments.connected(pasted))
+        refused = ""
+        try:
+            await payments.open_link(pasted, payer.id, payments.NUMBERHUB, D("5"), "usdt_bsc")
+        except payments.PayError as exc:
+            refused = str(exc)
+        check("…opening one by hand is refused", "off" in refused, refused)
+        from app.bots.admin import deposits_screen
+        text, markup = await deposits_screen(pasted)
+        labels = [b.text for row in markup.inline_keyboard for b in row]
+        check("…and the owner's Payments screen says why, with no switch",
+              "pasted yourself" in text and not any("built-in crypto" in x for x in labels), str(labels))
+        await repo.update_reseller(r.id, key_by_owner=0)
+        handed = await repo.get_reseller(r.id)
+        check("the same shop on a key the wallet service handed over: built-in payments as chosen",
+              payments.builtin_allowed(handed) and payments.builtin_on(handed))
+    finally:
+        settings.provision_secret = keep
+    runtime._bots.pop(r.id, None)
+    runtime._bots.pop(rb.id, None)
+
+    # an installation from before: the estimate each customer starts with
+    from sqlalchemy import text as sql_text
+    from app import db as app_db
+    async with app_db.engine.begin() as conn:
+        await conn.execute(sql_text("UPDATE members SET paid_left = 0 WHERE id = :m"), {"m": payer.id})
+        await conn.execute(sql_text(app_db._FILL_NEW_COLUMN[("members", "paid_left")]))
+    p, h = await repo.get_member(payer.id), await repo.get_member(hand1.id)
+    check("upgrading an older installation: a customer starts with the smaller of their balance and all they paid in",
+          p.paid_left == D("10.00") and p.balance == D("12.61") and h.paid_left == 0, f"{p.paid_left} {p.balance}")
+    await forget_paid_in()
 
 
 async def test_paused_shop():
@@ -2348,7 +2575,7 @@ async def main():
     test_prices()
     test_i18n()
     for fn in (test_buy_and_code, test_no_code_refund, test_failures, test_lost_reply, test_cancel,
-               test_races_and_limits, test_bot_flow, test_builder, test_provision, test_custom_prices, test_picker_pages, test_rank_order, test_dead_token, test_rejected_key, test_deposits, test_auto_payments, test_builtin_payments, test_owner_stats, test_kasera_qris, test_paused_shop, test_review_money,
+               test_races_and_limits, test_bot_flow, test_builder, test_provision, test_custom_prices, test_picker_pages, test_rank_order, test_dead_token, test_rejected_key, test_deposits, test_auto_payments, test_builtin_payments, test_owner_stats, test_kasera_qris, test_paid_left, test_paused_shop, test_review_money,
                test_review_sync, test_review_bots, test_review_runtime, test_cards_render):
         try:
             await fn()

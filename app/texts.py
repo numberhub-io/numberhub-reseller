@@ -149,6 +149,12 @@ OWNER_ALERTS = {
     "key_ip": ("⚠️ <b>Your NumberHub API key only works from certain IP addresses</b>, and this "
                "server is not one of them, so sales are paused.\nRemove the IP limit on the key at "
                "numberhub.io → Account → API keys, or " + _NEW_KEY[0].lower() + _NEW_KEY[1:]),
+    "by_hand_unbacked": ("⚠️ <b>A customer could not buy: their balance was added by hand, and your "
+                         "NumberHub wallet has none of your own money behind it.</b>\n"
+                         "What is in your wallet now was paid in by customers through built-in payments "
+                         "and is kept for them. Top up your wallet at numberhub.io or in @TheNumberHubBot: "
+                         "then a balance you add by hand, approve as a deposit or take through your own "
+                         "gateway can buy."),
     "route_cap": ("⚠️ <b>A customer could not buy: your NumberHub account has the most open orders it "
                   "may have for one app and country</b> (all your shops count together). It frees up "
                   "as those orders finish."),
