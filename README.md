@@ -156,7 +156,7 @@ Connect your own payment account and customers top up without waiting for you. �
 - **🔑 Connect 🪙 OxaPay**: sign up at oxapay.com, create a merchant API key (Merchant Service) and send it to your bot. Customers pay in BTC, ETH, USDT and many more coins; the gateway fee is added to what they pay, so you receive the full amount.
 - **🔑 Connect 🤖 @CryptoBot**: in @CryptoBot open Crypto Pay → Create App, copy the API token and send it to your bot. Customers pay inside Telegram with USDT, TON, BTC and more.
 
-- **🔑 Connect 🇮🇩 KaseraPay (QRIS)**, for customers in Indonesia: sign up at pay.kasera.id, verify your account, create an API key under Developer and send it to your bot, then set how many rupiah one dollar costs in your shop. Customers pick an amount in dollars, get a QR in the chat with the rupiah to pay, and scan it with any Indonesian bank or wallet app. One payment can be up to Rp 1,000,000. A test key (`kp_test_…`) lets you try it first: test payments are reported as working and add no balance.
+- **🔑 Connect 🇮🇩 KaseraPay (QRIS)**, for customers in Indonesia: sign up at pay.kasera.id, verify your account, create an API key under Developer and send it to your bot. Balances are in dollars and QRIS is paid in rupiah: dollars turn into rupiah at **today's rate by itself** (read from two public sources a few times a day; nothing about your customers is sent), so there is nothing to type. Under 💱 Rupiah for $1 you can add a percent on top, for example to cover the gateway's fee, or set a fixed rate of your own. One QRIS payment is Rp 5.000 to Rp 1.000.000. Customers pick an amount in dollars, get a QR in the chat with the rupiah to pay, and scan it with any Indonesian bank or wallet app. One payment can be up to Rp 1,000,000. A test key (`kp_test_…`) lets you try it first: test payments are reported as working and add no balance.
 
 The bot checks the key with the gateway before keeping it (OxaPay with a sandbox invoice, so nothing is charged), deletes your message at once and stores the key encrypted. Connect one or both; with both, the customer picks.
 
@@ -345,6 +345,7 @@ It loads the catalog, buys the cheapest WhatsApp number in stock, checks the hol
 | `app/repo.py` | All database reads and writes, including the atomic balance updates |
 | `app/models.py` | Tables: `resellers`, `members`, `member_tx`, `orders`, `price_rules`, `deposits`, `payments` |
 | `app/payments.py` | Automatic top-ups: built-in USDT into the shop's NumberHub wallet, and the owner's own OxaPay or @CryptoBot |
+| `app/fx.py` | Today's dollar-to-rupiah rate for QRIS payments: two public sources, kept in the database |
 | `app/numberhub.py` | NumberHub API client (retries, idempotency, error mapping) |
 | `app/bots/builder.py` | The builder bot: create a shop, my bots, operator commands |
 | `app/bots/reseller.py` | The shop bot's customer screens |

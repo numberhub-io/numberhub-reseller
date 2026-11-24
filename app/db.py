@@ -45,6 +45,8 @@ _ADDED_COLUMNS = (
     ("resellers", "key_by_owner", "INTEGER"),
     ("orders", "kind", "VARCHAR(8) NOT NULL DEFAULT 'sms'"),
     ("resellers", "email_on", "INTEGER"),
+    ("resellers", "kasera_auto", "INTEGER"),
+    ("resellers", "kasera_extra", "NUMERIC(5, 2)"),
 )
 # Run once, right after its column is added: what each customer paid in and still
 # holds, as it was estimated until then (the smaller of the balance and everything

@@ -247,12 +247,15 @@ async def deposits_screen(reseller: Reseller, note: str = ""):
         f"🤖 @CryptoBot: <b>{'✅ connected' if payments.CRYPTOBOT in gates else '— not connected'}</b>"
         " · USDT, TON, BTC and more, inside Telegram",
         "🇮🇩 KaseraPay (QRIS): <b>" + (
-            f"✅ connected · Rp {int(payments.kasera_rate(reseller)):,} = $1".replace(",", ".")
+            f"✅ connected · {_kasera_mode(reseller)}: {rp(payments.kasera_rate(reseller))} = $1"
             if payments.KASERA in gates else
+            "⚠️ today's rate could not be read yet: QRIS starts by itself as soon as it is"
+            if payments.has_key(reseller, payments.KASERA) and payments.kasera_auto(reseller) else
             "⚠️ key saved: set the rupiah rate" if payments.has_key(reseller, payments.KASERA) else "— not connected")
         + "</b> · customers in Indonesia pay by QR from any bank or wallet app",
     ]
-    if payments.KASERA in gates and payments.kasera_rate_odd(payments.kasera_rate(reseller)):
+    if (payments.KASERA in gates and not payments.kasera_auto(reseller)
+            and payments.kasera_rate_odd(payments.kasera_rate(reseller))):
         lines.append(kasera_rate_warning(payments.kasera_rate(reseller)))
     recent = await repo.recent_payments(reseller.id, limit=6) if gates else []
     if recent:
@@ -303,8 +306,54 @@ async def deposits_screen(reseller: Reseller, note: str = ""):
         sizes.append(2)
     kb.button(text="✏️ Payment details", callback_data=Adm(a="dep_info"))
     kb.button(text="📉 Minimum", callback_data=Adm(a="dep_min"))
+    if on:
+        # One tap instead of sending "-" as the payment details.
+        kb.button(text="🗑 Turn off manual deposits", callback_data=Adm(a="dep_off"))
     kb.button(text="⬅️ Admin panel", callback_data=Adm(a="home"))
-    kb.adjust(*sizes, 2, 1)
+    kb.adjust(*sizes, 2, *([1] if on else []), 1)
+    return "\n".join(lines), kb.as_markup()
+
+
+def rp(n) -> str:
+    return "Rp " + f"{int(n):,}".replace(",", ".")
+
+
+def _kasera_mode(reseller: Reseller) -> str:
+    if not payments.kasera_auto(reseller):
+        return "your own rate"
+    extra = Decimal(getattr(reseller, "kasera_extra", None) or 0)
+    return "today's rate" + (f" + {extra.normalize():f}%" if extra else "")
+
+
+def kasera_rate_screen(reseller: Reseller, note: str = ""):
+    """How dollars turn into rupiah for QRIS in this shop: today's rate by itself
+    (the default), with a percent on top if the owner wants, or a rate they type."""
+    from app import fx
+    auto, rate, market = payments.kasera_auto(reseller), payments.kasera_rate(reseller), fx.current()
+    lines = ([note, ""] if note else []) + ["💱 <b>Rupiah for $1</b>", ""]
+    if rate is not None:
+        lines.append(f"Now: <b>{rp(rate)} = $1</b> ({_kasera_mode(reseller)}). A customer who adds $5.00 pays "
+                     f"<b>{rp(rate * 5)}</b> by QRIS.")
+    elif auto:
+        lines.append("Today's rate could not be read yet. QRIS starts by itself as soon as it is.")
+    else:
+        lines.append("No rate is set yet.")
+    if market is not None:
+        lines.append(f"Today a dollar costs <b>{rp(market)}</b>.")
+    if not auto and payments.kasera_rate_odd(rate):
+        lines += ["", kasera_rate_warning(rate)]
+    lines += ["", "<b>📈 Today's rate</b>: read by itself a few times a day; nothing to type. You can add a "
+                  "percent on top, for example to cover KaseraPay's fee.",
+              "<b>✏️ Your own rate</b>: a fixed number of rupiah for one dollar, until you change it.",
+              "", "<i>A QR already shown keeps the rate it was made with.</i>"]
+    kb = InlineKeyboardBuilder()
+    if not auto:
+        kb.button(text="📈 Use today's rate", callback_data=Adm(a="kasera_auto"))
+    else:
+        kb.button(text="➕ Percent on top", callback_data=Adm(a="kasera_extra"))
+    kb.button(text="✏️ Set my own rate", callback_data=Adm(a="kasera_own"))
+    kb.button(text="⬅️ Payments", callback_data=Adm(a="deposits"))
+    kb.adjust(1)
     return "\n".join(lines), kb.as_markup()
 
 
@@ -573,8 +622,25 @@ def register(r: Router) -> None:
             await state.update_data(provider=callback_data.arg)
             await show(c, GATEWAY_HOWTO[callback_data.arg], _cancel_kb())
         elif a == "kasera_rate" and payments.has_key(reseller, payments.KASERA):
+            await show(c, *kasera_rate_screen(reseller))
+        elif a == "kasera_auto" and payments.has_key(reseller, payments.KASERA):
+            await repo.update_reseller(reseller.id, kasera_auto=1)
+            fresh = await repo.get_reseller(reseller.id)
+            await show(c, *kasera_rate_screen(fresh, "✅ QRIS now follows today's rate."))
+        elif a == "kasera_own" and payments.has_key(reseller, payments.KASERA):
             await state.set_state(AdminForm.kasera_rate)
             await show(c, KASERA_RATE_ASK, _cancel_kb())
+        elif a == "kasera_extra" and payments.has_key(reseller, payments.KASERA):
+            await state.set_state(AdminForm.kasera_extra)
+            await show(c, "➕ <b>Percent on top of today's rate</b>\n\nSend a number from 0 to 20, for example "
+                          "<code>3</code>. With 3, a dollar that costs Rp 18.000 today is Rp 18.540 in your shop. "
+                          "Send <code>0</code> for the plain rate.", _cancel_kb())
+        elif a == "dep_off":
+            await repo.update_reseller(reseller.id, deposit_info=None)
+            await show(c, *await deposits_screen(
+                await repo.get_reseller(reseller.id),
+                "⏸ Manual deposits are off: your customers no longer see that way to pay. Turn them on again "
+                "with ✏️ Payment details."))
         elif a == "nhpay" and callback_data.arg in ("on", "off"):
             turn_on = callback_data.arg == "on"
             await payments.set_builtin(reseller.id, turn_on)
@@ -816,9 +882,16 @@ def register(r: Router) -> None:
             return
         await state.clear()
         if provider == payments.KASERA:
-            # Balances are in dollars and QRIS is paid in rupiah: the shop needs its rate.
-            await state.set_state(AdminForm.kasera_rate)
-            await m.answer(f"✅ <b>{label} connected</b> ({esc(name)}).\n\n" + KASERA_RATE_ASK, reply_markup=_cancel_kb())
+            # Balances are in dollars and QRIS is paid in rupiah. Unless the owner typed
+            # a rate of their own before, dollars turn into rupiah at today's rate: nothing
+            # to type, and nothing to type wrong (a shop saved the gateway's minimum
+            # payment, 5,000, as its rate and sold $1 for Rp 5.000).
+            fresh = await repo.get_reseller(reseller.id)
+            if getattr(fresh, "kasera_rate", None) is None:
+                await repo.update_reseller(reseller.id, kasera_auto=1)
+                fresh = await repo.get_reseller(reseller.id)
+            await reply(m, kasera_rate_screen(
+                fresh, f"✅ <b>{label} connected</b> ({esc(name)}). Customers can now add balance by QRIS."))
             return
         await reply(m, await deposits_screen(await repo.get_reseller(reseller.id),
                                              f"✅ <b>{label} connected</b> ({esc(name)}). Customers can now "
@@ -832,12 +905,29 @@ def register(r: Router) -> None:
             await m.answer("❌ Send the rupiah for one dollar as a number from 1000 to 100000, for example "
                            "<code>16500</code>.", reply_markup=_cancel_kb())
             return
-        await repo.update_reseller(reseller.id, kasera_rate=Decimal(raw))
+        await repo.update_reseller(reseller.id, kasera_rate=Decimal(raw), kasera_auto=0)
         await state.clear()
         fresh = await repo.get_reseller(reseller.id)
         low, high = payments.kasera_limits(fresh)
         await reply(m, await deposits_screen(fresh, f"✅ Rate saved: Rp {int(raw):,} = $1.".replace(",", ".")
                                              + f" Customers can pay by QRIS from {money(low)} to {money(high)} at a time."))
+
+    @r.message(StateFilter(AdminForm.kasera_extra), F.text)
+    @owner_only
+    async def f_kasera_extra(m: Message, reseller: Reseller, state: FSMContext, is_owner: bool = False):
+        raw = (m.text or "").strip().replace("%", "").replace(",", ".")
+        try:
+            extra = Decimal(raw).quantize(Decimal("0.01"))
+        except Exception:  # noqa: BLE001
+            extra = None
+        if extra is None or not extra.is_finite() or not 0 <= extra <= 20:
+            await m.answer("❌ Send a number from 0 to 20, for example <code>3</code>.", reply_markup=_cancel_kb())
+            return
+        await repo.update_reseller(reseller.id, kasera_extra=extra, kasera_auto=1)
+        await state.clear()
+        await reply(m, kasera_rate_screen(await repo.get_reseller(reseller.id),
+                                          f"✅ Saved: today's rate + {extra.normalize():f}%." if extra
+                                          else "✅ Saved: the plain rate of the day."))
 
     @r.message(StateFilter(AdminForm.dep_min), F.text)
     @owner_only

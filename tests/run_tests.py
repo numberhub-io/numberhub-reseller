@@ -1865,9 +1865,13 @@ async def test_kasera_qris():
     from app.bots.callbacks import Pay
     from app.bots.reseller import build_router
     from app.models import Payment
-    from fakes import FakeGateways
+    from fakes import FakeFx, FakeGateways
+    from app import fx
     gw = FakeGateways()
     payments.TRANSPORT = gw.transport()
+    fakefx = FakeFx()
+    fx.TRANSPORT, fx._rate = fakefx.transport(), None
+    await fx.refresh()
     api = FakeNumberHub()
     r = await make_reseller(api, bot_id=86301)
     session = FakeSession()
@@ -1905,35 +1909,115 @@ async def test_kasera_qris():
           and (await repo.get_reseller(r.id)).kasera_key_enc is None)
     await dp.feed_update(bot, msg(OWNER, gw.ks_key))
     fresh = await repo.get_reseller(r.id)
-    check("the right key is checked without making a payment, stored encrypted, and the rate is asked",
-          fresh.kasera_key_enc and gw.ks_key not in fresh.kasera_key_enc and gw.ks == {}
-          and "How many rupiah is one dollar" in session.last_text() and payments.connected(fresh) == [])
-    await dp.feed_update(bot, msg(OWNER, "abc"))
+    check("the right key is checked without making a payment and stored encrypted",
+          fresh.kasera_key_enc and gw.ks_key not in fresh.kasera_key_enc and gw.ks == {})
+    check("no rate is asked: dollars turn into rupiah at today's rate, and QRIS is on at once",
+          fresh.kasera_auto == 1 and fresh.kasera_rate is None and payments.connected(fresh) == [payments.KASERA]
+          and payments.kasera_rate(fresh) == D("18196") and "How many rupiah" not in session.last_text()
+          and "connected" in session.last_text() and "Rp 18.196 = $1</b> (today's rate)" in session.last_text()
+          and "pays <b>Rp 90.980</b>" in session.last_text() and "Today a dollar costs <b>Rp 18.195</b>" in session.last_text(),
+          session.last_text()[:260])
+    await add(9803, "$5.00")
+    check("a customer adding $5.00 gets a QR for today's rupiah (Rp 18.196 for each dollar)",
+          len(photos(9803)) == 1 and "Rp 90.980" in photos(9803)[0].caption and "$5.00" in photos(9803)[0].caption
+          and gw.ks_bodies[-1]["amount"] == 90980, str(photos(9803)[0].caption if photos(9803) else None)[:120])
+
+    async def rate_screen():
+        await dp.feed_update(bot, msg(OWNER, "/admin"))
+        await dp.feed_update(bot, tap(OWNER, button(session, "Payments")))
+        await dp.feed_update(bot, tap(OWNER, button(session, "Rupiah for $1")))
+
+    async def own_rate(value):
+        await rate_screen()
+        await dp.feed_update(bot, tap(OWNER, button(session, "Set my own rate")))
+        await dp.feed_update(bot, msg(OWNER, value))
+
+    await rate_screen()
+    check("the rate screen offers a percent on top and an own rate, and not what is already on",
+          button(session, "Percent on top") is not None and button(session, "Set my own rate") is not None
+          and button(session, "Use today's rate") is None)
+    await dp.feed_update(bot, tap(OWNER, button(session, "Percent on top")))
+    await dp.feed_update(bot, msg(OWNER, "many"))
+    check("a percent that is not a number is asked again", "from 0 to 20" in session.last_text())
+    await dp.feed_update(bot, msg(OWNER, "25"))
+    check("…and so is one over 20", "from 0 to 20" in session.last_text()
+          and (await repo.get_reseller(r.id)).kasera_extra is None)
+    await dp.feed_update(bot, msg(OWNER, "3"))
+    fresh = await repo.get_reseller(r.id)
+    check("3% on top of today's rate: Rp 18.742 for $1",
+          fresh.kasera_extra == D("3") and payments.kasera_rate(fresh) == D("18742")
+          and "today's rate + 3%" in session.last_text() and "Rp 18.742 = $1" in session.last_text(), session.last_text()[:200])
+    await dp.feed_update(bot, tap(OWNER, button(session, "Percent on top")))
+    await dp.feed_update(bot, msg(OWNER, "0"))
+    check("back to the plain rate of the day", payments.kasera_rate(await repo.get_reseller(r.id)) == D("18196"))
+
+    # ── where today's rate comes from ──
+    check("the rate was read from the first source and kept in the database",
+          fx.current() == D("18195.480115") and fakefx.calls == ["open.er-api.com"])
+    fakefx.down = {"open.er-api.com"}
+    await fx.refresh()
+    check("the first source is down: the second one is asked", fx.current() == D("18190.1")
+          and fakefx.calls[-2:] == ["open.er-api.com", "cdn.jsdelivr.net"])
+    fakefx.down = {"open.er-api.com", "cdn.jsdelivr.net"}
+    check("both are down: the rate read before stays", await fx.refresh() == D("18190.1") and fx.current() == D("18190.1"))
+    fx._rate = None
+    check("after a restart the kept rate is there before anything is read", await fx.load() == D("18190.1"))
+    fakefx.down, fakefx.first = set(), 5.25
+    await fx.refresh()
+    check("an answer that cannot be a rupiah rate is not believed: the next source is used",
+          fx.current() == D("18190.1") and fakefx.calls[-2:] == ["open.er-api.com", "cdn.jsdelivr.net"])
+    fakefx.first = 18195.480115
+    kept = fx._rate
+    fx._rate = (kept[0] - fx.MAX_AGE_SEC - 60, kept[1])
+    fresh = await repo.get_reseller(r.id)
+    check("a rate older than four days is not used: no QRIS is offered until a new one is read",
+          fx.current() is None and payments.kasera_rate(fresh) is None and payments.connected(fresh) == [])
+    await dp.feed_update(bot, msg(OWNER, "/admin"))
+    await dp.feed_update(bot, tap(OWNER, button(session, "Payments")))
+    check("…and the owner's Payments screen says so", "could not be read yet" in session.last_text())
+    await fx.refresh()
+    check("read again: QRIS is back", payments.connected(await repo.get_reseller(r.id)) == [payments.KASERA])
+
+    # ── the owner's own rate ──
+    await own_rate("abc")
     check("a rate that is not a number is asked again", "from 1000 to 100000" in session.last_text())
     await dp.feed_update(bot, msg(OWNER, "16.500"))
     r = await repo.get_reseller(r.id)
-    check("the rate is saved and QRIS is on: from $0.07 to $60.60 at a time",
-          r.kasera_rate == D("16500") and payments.connected(r) == [payments.KASERA]
-          and payments.kasera_limits(r) == (D("0.07"), D("60.60")) and "Rp 16.500 = $1" in session.last_text(),
-          session.last_text()[:160])
+    check("an own rate is saved and used instead of today's: from $0.31 to $60.60 at a time",
+          r.kasera_rate == D("16500") and r.kasera_auto == 0 and payments.connected(r) == [payments.KASERA]
+          and payments.kasera_rate(r) == D("16500") and payments.kasera_limits(r) == (D("0.31"), D("60.60"))
+          and "your own rate: Rp 16.500 = $1" in session.last_text(), session.last_text()[:260])
     check("a usual rate gets no warning", "Check this rate" not in session.last_text())
-    await dp.feed_update(bot, tap(OWNER, button(session, "Rupiah for $1")))
-    await dp.feed_update(bot, msg(OWNER, "5000"))
+    await own_rate("5000")
     check("a rate far under what a dollar costs is saved, and the owner is told what it means in their numbers",
           (await repo.get_reseller(r.id)).kasera_rate == D("5000") and "Check this rate" in session.last_text()
           and "pays Rp 5.000 gets $1.00" in session.last_text(), session.last_text()[:200])
-    await dp.feed_update(bot, msg(OWNER, "/admin"))
-    await dp.feed_update(bot, tap(OWNER, button(session, "Payments")))
-    check("…and the Payments screen keeps saying so", "Check this rate" in session.last_text())
-    await dp.feed_update(bot, tap(OWNER, button(session, "Rupiah for $1")))
-    await dp.feed_update(bot, msg(OWNER, "30000"))
+    await rate_screen()
+    check("…the rate screen says so too, next to what a dollar costs today, and offers today's rate",
+          "Check this rate" in session.last_text() and "Today a dollar costs" in session.last_text()
+          and button(session, "Use today's rate") is not None)
+    await dp.feed_update(bot, tap(OWNER, button(session, "Use today's rate")))
+    fresh = await repo.get_reseller(r.id)
+    check("one tap puts the shop on today's rate; the typed rate is kept but not used",
+          fresh.kasera_auto == 1 and fresh.kasera_rate == D("5000") and payments.kasera_rate(fresh) == D("18196")
+          and "Check this rate" not in session.last_text())
+    await own_rate("30000")
     check("a rate far over it is told the other way round",
           "pays Rp 30.000 for $1.00" in session.last_text(), session.last_text()[:200])
-    await dp.feed_update(bot, tap(OWNER, button(session, "Rupiah for $1")))
-    await dp.feed_update(bot, msg(OWNER, "16500"))
+    await own_rate("16500")
     r = await repo.get_reseller(r.id)
     check("back to a usual rate: saved, no warning",
-          r.kasera_rate == D("16500") and "Check this rate" not in session.last_text())
+          r.kasera_rate == D("16500") and r.kasera_auto == 0 and "Check this rate" not in session.last_text())
+
+    # ── manual deposits go away with one tap ──
+    await repo.update_reseller(r.id, deposit_info="Pay me at the bank, then send the receipt")
+    await dp.feed_update(bot, msg(OWNER, "/admin"))
+    await dp.feed_update(bot, tap(OWNER, button(session, "Payments")))
+    await dp.feed_update(bot, tap(OWNER, button(session, "Turn off manual deposits")))
+    r = await repo.get_reseller(r.id)
+    check("manual deposits are switched off with one tap, and the button goes",
+          r.deposit_info is None and "Manual deposits are off" in session.last_text()
+          and button(session, "Turn off manual deposits") is None)
 
     # ── a customer adds $5 ──
     await add(cust, "$5.00")
@@ -1947,7 +2031,8 @@ async def test_kasera_qris():
           str(shot[0].caption if shot else None)[:200])
     check("the gateway was asked for exactly that: rupiah, QRIS only, one payment per request",
           gw.ks_bodies[-1]["amount"] == 82500 and gw.ks_bodies[-1]["payment_methods"] == ["qris"]
-          and gw.ks_bodies[-1]["merchant_ref"] == f"s{r.id}-p{p1.id}" and list(gw.ks_idem) == [f"s{r.id}-p{p1.id}"])
+          and gw.ks_bodies[-1]["merchant_ref"] == f"s{r.id}-p{p1.id}" and list(gw.ks_idem)[-1] == f"s{r.id}-p{p1.id}"
+          and len(gw.ks_idem) == len(gw.ks_bodies))
     check("the picture is a real PNG", payments.qr_png(d1["qr"])[:8] == b"\x89PNG\r\n\x1a\n")
     left = (p1.expires_at.replace(tzinfo=dt.timezone.utc) - dt.datetime.now(dt.timezone.utc)).total_seconds() / 60
     check("the gateway's Jakarta time is stored as UTC: open for 60 minutes, not for 8 hours", 58 < left <= 60.1,
@@ -1990,8 +2075,8 @@ async def test_kasera_qris():
     await payments.poll_all()
     check("…and credited when it does", (await repo.get_member(mem.id)).balance == D("15.00"))
     check("too small or too large for one QRIS payment is refused before the gateway is asked",
-          "from $0.07 to $60.60" in await refused(payments.open_link(r, mem.id, payments.KASERA, D("100")))
-          and "from $0.07" in await refused(payments.open_link(r, mem.id, payments.KASERA, D("0.05"))))
+          "from $0.31 to $60.60" in await refused(payments.open_link(r, mem.id, payments.KASERA, D("100")))
+          and "from $0.31" in await refused(payments.open_link(r, mem.id, payments.KASERA, D("0.05"))))
     gw.refuse_create = True
     n_owner = len(to(OWNER))
     await add(cust, "$10.00")
@@ -2039,6 +2124,7 @@ async def test_kasera_qris():
           and payments.KASERA not in payments.connected(gone))
     payments._methods_cache = None
     payments.TRANSPORT = None
+    fx.TRANSPORT = None
 
 
 async def test_paid_left():

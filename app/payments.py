@@ -285,7 +285,9 @@ class Kasera:
     Amounts are whole rupiah. A kp_test_ key makes test payments: they are reported
     as working and never add balance."""
     BASE = "https://pay.kasera.id/v1"
-    MIN_IDR, MAX_IDR = 1000, 1_000_000     # above 1,000,000 the gateway wants buyer and delivery details
+    # Under 5,000 the gateway refuses a QRIS payment (a shop owner using it, 2026-11-24;
+    # its docs say 1,000). Above 1,000,000 it wants buyer and delivery details.
+    MIN_IDR, MAX_IDR = 5000, 1_000_000
     USUAL_RATE = (13_000, 22_000)          # rupiah for a dollar: outside it the owner is asked to check
 
     def __init__(self, key: str):
@@ -373,8 +375,22 @@ def qr_png(text: str) -> bytes:
     return buf.getvalue()
 
 
+def kasera_auto(reseller: Reseller) -> bool:
+    """Whether this shop turns dollars into rupiah at today's rate by itself."""
+    return bool(getattr(reseller, "kasera_auto", None))
+
+
 def kasera_rate(reseller: Reseller) -> Decimal | None:
-    """Rupiah for one dollar in this shop, as its owner set it."""
+    """Rupiah for one dollar in this shop: today's rate (plus the percent the owner
+    adds on top, if any) when the shop follows it, else the rate its owner typed.
+    None = no rate yet, and no QRIS until there is one."""
+    if kasera_auto(reseller):
+        from app import fx
+        market = fx.current()
+        if market is None:
+            return None
+        extra = Decimal(getattr(reseller, "kasera_extra", None) or 0)
+        return (market * (1 + extra / 100)).quantize(Decimal("1"), rounding="ROUND_UP")
     rate = getattr(reseller, "kasera_rate", None)
     return Decimal(rate) if rate is not None and Decimal(rate) > 0 else None
 

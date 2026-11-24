@@ -48,6 +48,7 @@ class AdminForm(StatesGroup):
     dep_amount = State()       # approve a deposit with another amount (deposit id in state data)
     pay_key = State()          # an OxaPay key / @CryptoBot token / KaseraPay key (provider in state data)
     kasera_rate = State()      # rupiah for one dollar in this shop
+    kasera_extra = State()     # percent on top of today's rate
 
 
 class DepositForm(StatesGroup):

@@ -374,6 +374,29 @@ class FakeNumberHub:
         return 201, {"number": self.public(o)}
 
 
+class FakeFx:
+    """The two public sources of the dollar-to-rupiah rate (app/fx.py)."""
+
+    def __init__(self):
+        self.first, self.second = 18195.480115, 18190.1
+        self.down: set[str] = set()
+        self.calls: list[str] = []
+
+    def transport(self) -> httpx.MockTransport:
+        return httpx.MockTransport(self.handle)
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        host = request.url.host
+        self.calls.append(host)
+        if host in self.down:
+            return httpx.Response(503, text="down")
+        if host == "open.er-api.com":
+            return httpx.Response(200, json={"result": "success", "base_code": "USD", "rates": {"IDR": self.first, "EUR": 0.9}})
+        if host == "cdn.jsdelivr.net":
+            return httpx.Response(200, json={"date": "2026-11-23", "usd": {"idr": self.second, "eur": 0.9}})
+        return httpx.Response(404, text="?")
+
+
 # ─── Telegram ────────────────────────────────────────────────────────────────
 class FakeSession(BaseSession):
     """Records every Bot API call and answers with plausible objects."""

@@ -59,6 +59,10 @@ class Reseller(Base):
     # rupiah one dollar costs in this shop (balances are in dollars; the owner sets it).
     kasera_key_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
     kasera_rate: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    # 1 = dollars turn into rupiah at today's rate (app/fx.py), plus kasera_extra
+    # percent when the owner set one; otherwise the fixed kasera_rate above is used.
+    kasera_auto: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    kasera_extra: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
     # Built-in USDT payments (app/payments.py, provider "numberhub"): the customer
     # pays to an address NumberHub opens with the shop's own API key, and the money
     # is added to the shop's NumberHub wallet. 1 = on, 0 = off, None = the
@@ -79,6 +83,15 @@ class Reseller(Base):
     support_contact: Mapped[str | None] = mapped_column(String(128), nullable=True)
     status: Mapped[str] = mapped_column(String(16), default=ACTIVE, index=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class Setting(Base):
+    """A value the platform keeps for itself across restarts (today's exchange rate)."""
+    __tablename__ = "settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
 
 class Member(Base):

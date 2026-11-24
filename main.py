@@ -81,6 +81,25 @@ async def payments_loop() -> None:
         await asyncio.sleep(20)
 
 
+async def fx_loop() -> None:
+    """Today's dollar-to-rupiah rate (app/fx.py), for shops whose QRIS payments follow
+    it. The rate kept from before is loaded first; a new one is read every few hours,
+    sooner while none is known. Nothing is asked while no shop takes QRIS."""
+    from app import fx
+    await fx.load()
+    while True:
+        try:
+            if await repo.any_qris_shop():
+                await fx.refresh()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            if _cancelling():
+                raise
+            log.exception("reading the exchange rate failed")
+        await asyncio.sleep(fx.REFRESH_SEC if fx.current() is not None and (fx.age_hours() or 0) < 6 else 600)
+
+
 async def reports_loop() -> None:
     """The owners' morning reports (app/reports.py), looked at every ten minutes."""
     from app import reports
@@ -148,7 +167,7 @@ async def main() -> int:
     provisioning = await provision.start_server()
     loops = [asyncio.create_task(sync_loop()), asyncio.create_task(sweep_loop()),
              asyncio.create_task(warm_loop()), asyncio.create_task(payments_loop()),
-             asyncio.create_task(reports_loop())]
+             asyncio.create_task(reports_loop()), asyncio.create_task(fx_loop())]
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
