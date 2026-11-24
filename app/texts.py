@@ -269,6 +269,12 @@ OWNER_ALERTS = {
                           "your customer got their money back.\nIf a package from that time shows in your "
                           "NumberHub account under your orders, your wallet paid for it: pass its details to "
                           "the customer once they have paid you, or use it yourself."),
+    "number_cycler": ("⚠️ <b>New numbers are paused for one customer until tomorrow.</b>\n"
+                      "Customer {who}<code>{id}</code> took {n} numbers in a day and {got} got a code. Your "
+                      "NumberHub account is judged on how many of your numbers get a code, and it pauses new "
+                      "numbers for ALL your customers when that falls too low. This keeps one customer from "
+                      "using that up. Nothing was charged to them, and it lifts by itself as the day passes: "
+                      "you do not need to do anything. Email codes and proxy data still work for them."),
     "route_cap": ("⚠️ <b>A customer could not buy: your NumberHub account has the most open orders it "
                   "may have for one app and country</b> (all your shops count together). It frees up "
                   "as those orders finish."),

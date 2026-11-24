@@ -642,7 +642,7 @@ def error_text(exc: SellError, reseller: Reseller, member: Member, lang: str) ->
                  id=member.telegram_id, support=support_label(reseller, lang))
     key = {"paused": "err_paused", "sold_out": "err_sold_out", "too_many_open": "err_too_many",
            "busy": "err_busy", "processing": "err_processing", "blocked": "blocked",
-           "email_limit": "err_email_limit"}.get(exc.reason, "err_failed")
+           "email_limit": "err_email_limit", "number_limit": "err_number_limit"}.get(exc.reason, "err_failed")
     return t(lang, key)
 
 

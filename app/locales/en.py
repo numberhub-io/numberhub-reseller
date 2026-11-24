@@ -167,6 +167,7 @@ T = {
     'email_msg_mail': '📧 <b>{site}</b> sent a mail to <code>{address}</code>.',
     'email_msg_link': '🔗 Open this link to confirm: {link}',
     'err_email_limit': 'You asked for many mailboxes in a short time. Please wait a little, then try again.',
+    'err_number_limit': 'You took many numbers today and none got a code, so new numbers are paused for you until tomorrow. Nothing was charged. Try another app or country then.',
     'btn_email_again': '📧 Another mailbox',
     'email_st_waiting': '⏳ Waiting for the mail — <b>{left}</b> left',
     'email_st_received': '✅ <b>Mail received</b>',

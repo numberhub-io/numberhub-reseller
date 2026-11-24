@@ -3676,6 +3676,83 @@ async def test_review_2026_11_24():
     runtime._bots.pop(shop_b.id, None)
 
 
+async def test_number_cycling():
+    """One customer taking number after number that never gets a code costs them
+    nothing, and gets the owner's whole wallet account paused for every shop."""
+    print("a customer who cycles numbers is paused for the day")
+    from aiogram.methods import SendMessage
+    from app.bots.callbacks import Buy
+    from app.bots.reseller import build_router
+    from app.db import session_factory
+    own = 5161
+    api = FakeNumberHub()
+    r = await make_reseller(api, owner=own, bot_id=86801)
+    session = FakeSession(bot_id=86801)
+    bot = fake_bot(session)
+    runtime._bots[r.id] = bot
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(build_router(r.id))
+    m = await member(r, 96001, "5.00")
+    good = await member(r, 96002, "5.00")
+    check("the rule: 30 with no code at all, or 100 with under 3%; an honest heavy day is not cycling",
+          selling.cycling(30, 0) and not selling.cycling(29, 0) and not selling.cycling(66, 6)
+          and not selling.cycling(39, 1) and selling.cycling(98, 2) and not selling.cycling(97, 3)
+          and not selling.cycling(500, 16) and not selling.cycling(0, 0))
+
+    async def past(mem, n, settled, hours=2):
+        """n finished numbers of this customer, bought `hours` ago."""
+        when = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=hours)
+        async with session_factory() as s:
+            for _ in range(n):
+                s.add(Order(reseller_id=r.id, member_id=mem.id, kind="sms", service="wa", service_name="WhatsApp",
+                            country="187", country_name="USA", country_iso="US", member_price=D("0.39"),
+                            markup_pct_at_buy=D("30"), ceiling_at_buy=D("0.30"), codes="[]",
+                            status="completed" if settled == Order.CHARGED else "canceled", settled=settled,
+                            created_at=when, updated_at=when))
+            await s.commit()
+
+    await past(m, 29, Order.RELEASED)
+    o = await selling.buy(r, m, "wa", "187", D("0.39"))
+    check("29 numbers with no code today: the next one is still sold", o.status == "waiting")
+    await selling.cancel(r, await repo.get_member(m.id), o.id)       # the fake has no cancel lock: it ends with no code
+    check("…and it ends with no code too: 30 now", await repo.number_outcomes(m.id) == (30, 0),
+          str(await repo.number_outcomes(m.id)))
+    n = len(api.orders)
+    try:
+        await selling.buy(r, m, "wa", "187", D("0.39"))
+        check("the 31st is refused", False)
+    except SellError as e:
+        check("the next number is refused before anything is asked of the wallet or held",
+              e.reason == "number_limit" and len(api.orders) == n and (await repo.get_member(m.id)).held == 0)
+    await asyncio.sleep(0.2)
+    told = [x.text or "" for x in session.requests if isinstance(x, SendMessage) and x.chat_id == own]
+    check("the owner is told once, with the customer's ID and the figures",
+          len([x for x in told if "paused for one customer" in x]) == 1 and "<code>96001</code>" in told[-1]
+          and "took 30 numbers in a day and 0 got a code" in told[-1], str(told[-1:])[:160])
+    await dp.feed_update(bot, tap(96001, Buy(code="wa", cc="187", cents=39).pack()))
+    await asyncio.sleep(0.2)
+    told = [x.text or "" for x in session.requests if isinstance(x, SendMessage) and x.chat_id == own]
+    check("in the bot the customer is told plainly, and the owner is not told again",
+          "paused for you until tomorrow" in session.last_text() and "Nothing was charged" in session.last_text()
+          and len([x for x in told if "paused for one customer" in x]) == 1, session.last_text()[:120])
+    box = await selling.buy_email(r, m, "openai.com", "OpenAI", "gmx.com", D("0.04"))
+    check("only numbers are paused: an email code can still be bought", box.kind == "email" and box.status == "waiting")
+    o2 = await selling.buy(r, good, "wa", "187", D("0.39"))
+    check("another customer of the same shop buys as usual", o2.status == "waiting")
+    await past(good, 40, Order.RELEASED)
+    await past(good, 1, Order.CHARGED)
+    o3 = await selling.buy(r, good, "tg", "187", None)
+    check("40 numbers and one code is a bad day, not cycling: still sold", o3.status == "waiting")
+    old = await member(r, 96003, "5.00")
+    await past(old, 60, Order.RELEASED, hours=30)
+    o4 = await selling.buy(r, old, "wa", "187", D("0.39"))
+    check("numbers from more than a day ago do not count: it lifts by itself", o4.status == "waiting")
+    missing = [lang for lang in LANGS if "err_number_limit" not in _table(lang)]
+    same = [lang for lang in LANGS if lang != "en" and _table(lang).get("err_number_limit") == _table("en")["err_number_limit"]]
+    check("the customer's text exists in all 14 languages, translated", not missing and not same, f"{missing} {same}")
+    runtime._bots.pop(r.id, None)
+
+
 async def main():
     await init_db()
     test_prices()
@@ -3683,7 +3760,7 @@ async def main():
     for fn in (test_buy_and_code, test_no_code_refund, test_failures, test_lost_reply, test_cancel,
                test_races_and_limits, test_bot_flow, test_builder, test_provision, test_custom_prices, test_picker_pages, test_rank_order, test_dead_token, test_rejected_key, test_deposits, test_auto_payments, test_builtin_payments, test_owner_stats, test_kasera_qris, test_paid_left, test_email_codes, test_paused_shop, test_review_money,
                test_review_sync, test_review_bots, test_review_runtime, test_small_topups_and_rupiah,
-               test_proxy_data, test_review_2026_11_24,
+               test_proxy_data, test_review_2026_11_24, test_number_cycling,
                test_cards_render):
         try:
             await fn()

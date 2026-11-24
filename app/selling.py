@@ -382,8 +382,45 @@ async def buy(reseller: Reseller, member: Member, service: str, country: str,
         _members_buying.discard(member.id)
 
 
+# A number that gets no code costs its buyer nothing, so nothing slows a customer (or a
+# script) that takes one after another. NumberHub judges the OWNER's whole account on
+# how many numbers get a code, and pauses new numbers for all of that owner's shops when
+# a day holds 150 with under 3%. One customer must not use that up. Sized on 30 days of
+# all shops (2026-11-24: 646 numbers by 39 customers): the most numbers with no code at
+# all in one customer's day was 21, and the busiest honest day was 72 numbers with 6 codes.
+CYCLE_NO_CODE = 30              # numbers in 24 h that ended with no code, when none got one
+CYCLE_MANY = 100                # ...or this many, when under CYCLE_PCT percent got one
+CYCLE_PCT = 3
+_cycler_told: dict[tuple[int, int], float] = {}
+
+
+def cycling(no_code: int, got: int) -> bool:
+    """Whether a day of this customer's numbers reads as cycling, not as buying."""
+    if got == 0:
+        return no_code >= CYCLE_NO_CODE
+    return no_code + got >= CYCLE_MANY and got * 100 < CYCLE_PCT * (no_code + got)
+
+
+async def _tell_owner_cycler(reseller: Reseller, member: Member, no_code: int, got: int) -> None:
+    """Once a day per customer, in the owner's own bot."""
+    key, now = (reseller.id, member.id), time.monotonic()
+    if now - _cycler_told.get(key, float("-inf")) < 86400:
+        return
+    _cycler_told[key] = now
+    from app import runtime, texts
+    bot = runtime.bot_for(reseller.id)
+    if bot is not None:
+        who = f"@{texts.esc(member.username)} " if member.username else ""
+        await send(bot, reseller.owner_id, texts.owner_alert("number_cycler").format(
+            who=who, id=member.telegram_id, n=no_code + got, got=got))
+
+
 async def _buy(reseller: Reseller, member: Member, service: str, country: str,
                shown_price: Decimal | None) -> Order:
+    no_code, got = await repo.number_outcomes(member.id, 24)
+    if cycling(no_code, got):
+        asyncio.ensure_future(_tell_owner_cycler(reseller, member, no_code, got))
+        raise SellError("number_limit")
     if await repo.member_open_count(member.id) >= settings.max_open_per_member:
         raise SellError("too_many_open")
     if await repo.member_open_count(member.id, service, country) >= settings.max_open_per_route:

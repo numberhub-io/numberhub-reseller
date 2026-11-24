@@ -118,6 +118,10 @@ Open your own shop bot and send `/admin`, or tap ⚙️ Admin panel in the menu 
 
 Your commission is a percentage added on top of NumberHub's price for each country. With a 30% commission, a number NumberHub prices at $0.25 costs your customer $0.33 (rounded up to the cent) and you keep $0.08. The bot uses NumberHub's highest price for that route (`price_max`) as the base, so NumberHub can never charge you more for a sale than the customer paid.
 
+### One customer cannot use up your account
+
+A number that gets no code costs its buyer nothing, so nothing slows a customer (or a script) that takes one after another. NumberHub judges your whole account on how many of your numbers get a code and pauses new numbers for all your customers when that falls too low. So a customer whose day holds 30 numbers and not one code, or 100 numbers with under 3% codes, gets no new numbers until the day has passed. Nothing is charged, email codes and proxy data still work for them, and you get one message with their ID. Sized on a month of all shops: the most numbers with no code at all in one customer's day was 21, and a busy honest day was 72 numbers with 6 codes.
+
 ### Email codes
 
 Besides phone numbers, every shop sells **email codes**: a mailbox that receives one verification mail from one site. A customer taps 📧 Email codes, picks the site that sends the code (the most asked for are buttons, or they type its name, or **any website's address**, such as `example.com` or a pasted link: a mailbox can be opened for any site, and a typed address is shown back with a spelling check), picks a mail domain (✅ marks the ones that deliver best for that site) and confirms the price. They get an address to enter on the site; the code, and the confirmation link when the mail has one, arrive in the chat.

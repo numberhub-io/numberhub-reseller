@@ -158,6 +158,7 @@ T = {
     'email_msg_mail': '📧 <b>{site}</b> envió un correo a <code>{address}</code>.',
     'email_msg_link': '🔗 Abre este enlace para confirmar: {link}',
     'err_email_limit': 'Pediste muchos buzones en poco tiempo. Espera un poco e inténtalo de nuevo.',
+    'err_number_limit': 'Hoy has tomado muchos números y ninguno recibió un código, así que los números nuevos quedan en pausa para ti hasta mañana. No se cobró nada. Prueba entonces otra app u otro país.',
     'btn_email_again': '📧 Otro buzón',
     'email_st_waiting': '⏳ Esperando el correo — quedan <b>{left}</b>',
     'email_st_received': '✅ <b>Correo recibido</b>',
