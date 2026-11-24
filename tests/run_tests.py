@@ -2452,6 +2452,41 @@ async def test_email_codes():
     await dp.feed_update(bot, msg(cust, "zzzzqq"))
     check("a name nothing matches: asked again, the list stays",
           "Nothing found for that name" in session.last_text() and len(labels()) >= 2)
+    check("the picker says any website can be typed", "Any website works" in session.last_text()
+          and "example.com" in session.last_text())
+
+    # ── any website (owner, 2026-11-24: "email must input any website") ──
+    check("a typed website is read as its bare address; a plain word is not an address",
+          selling.email_site("https://www.MyShop.io/signup?x=1") == "myshop.io" and selling.email_site("@mail.myshop.io") == "mail.myshop.io"
+          and selling.email_site("me@myshop.io") == "myshop.io" and selling.email_site("myshop.io/") == "myshop.io"
+          and selling.email_site("myshop") is None and selling.email_site("my shop.io") is None
+          and selling.email_site("") is None and selling.email_site("-bad.io") is None and selling.email_site("x." + "a" * 300) is None)
+    api.email_domains["myshop.io"] = [{"domain": "gmx.com", "price": "0.03", "in_stock": True, "delivery": None}]
+    await dp.feed_update(bot, msg(cust, "https://www.MyShop.io/signup"))
+    check("a website the list does not know goes straight to its mailboxes, with a spelling check",
+          "<b>myshop.io</b>" in session.last_text() and button(session, "gmx.com") is not None
+          and "You typed <b>myshop.io</b>" in session.last_text() and "Nothing found" not in session.last_text(),
+          session.last_text()[:200])
+    await dp.feed_update(bot, tap(cust, button(session, "gmx.com")))
+    n_bodies = len(api.email_bodies)
+    await dp.feed_update(bot, tap(cust, button(session, "Get the address")))
+    typed_order = (await repo.member_orders(m.id, 1))[0]
+    check("…and a mailbox is bought for exactly that site",
+          len(api.email_bodies) == n_bodies + 1 and api.email_bodies[-1]["site"] == "myshop.io"
+          and typed_order.kind == "email" and typed_order.service == "myshop.io" and typed_order.status == "waiting",
+          str(api.email_bodies[-1]))
+    await selling.cancel(r, await repo.get_member(m.id), typed_order.id)
+    await dp.feed_update(bot, msg(cust, "/start"))
+    await dp.feed_update(bot, tap(cust, button(session, "Email codes")))
+    await dp.feed_update(bot, msg(cust, "openai.com"))
+    check("the address of a site the list knows opens it under its name, without the spelling warning",
+          "<b>OpenAI</b>" in session.last_text() and "You typed" not in session.last_text()
+          and button(session, "gmx.com") is not None)
+    await dp.feed_update(bot, tap(cust, button(session, "Back")))
+    await dp.feed_update(bot, msg(cust, "nothing-here.example"))
+    check("a website with no mailbox right now says so, with a way back",
+          "No mailbox is available for <b>nothing-here.example</b>" in session.last_text()
+          and button(session, "Back") is not None)
 
     # ── a price that moved ──
     await to_site(cust, "OpenAI")
@@ -2589,7 +2624,8 @@ async def test_email_codes():
           and button(session2, "Buy") is not None)
 
     # ── every language ──
-    keys = ["btn_email", "email_pick_site", "email_none_found", "email_pick_domain", "email_no_domains",
+    keys = ["btn_email", "email_pick_site", "email_none_found", "email_type_any", "email_typed_site",
+            "email_pick_domain", "email_no_domains",
             "email_confirm", "btn_email_buy", "email_card_title", "email_card_address", "email_card_howto",
             "email_msg_code", "email_msg_mail", "email_msg_link", "err_email_limit", "btn_email_again",
             "email_st_waiting", "email_st_received", "email_st_expired", "email_card_held", "email_msg_refunded",
@@ -2952,13 +2988,243 @@ async def test_cards_render():
     check("renders cleanly everywhere", not errs, str(errs[:5]))
 
 
+async def test_small_topups_and_rupiah():
+    """A shop owner in Indonesia (2026-11-24): top-ups from $0.50, amounts typed in
+    rupiah ("13,000" was read as $13.00), a top-up screen that says dollars and shows
+    rupiah, and the owner's own note on it."""
+    print("small top-ups, rupiah amounts, a clearer top-up screen")
+    from aiogram.methods import SendPhoto
+    from app import fx, payments
+    from app.bots.callbacks import Pay
+    from app.bots.reseller import build_router
+    from app.models import Payment
+    from fakes import FakeFx, FakeGateways
+    gw = FakeGateways()
+    gw.next = 7000                    # payment ids of its own: the QRIS test before this one starts at 1 too
+    payments.TRANSPORT = gw.transport()
+    fakefx = FakeFx()
+    fx.TRANSPORT, fx._rate = fakefx.transport(), None
+    await fx.refresh()
+    api = FakeNumberHub()
+    r = await make_reseller(api, bot_id=86451)
+    session = FakeSession()
+    bot = fake_bot(session)
+    runtime._bots[r.id] = bot
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(build_router(r.id))
+    photos = lambda uid: [m for m in session.requests if isinstance(m, SendPhoto) and m.chat_id == uid]  # noqa: E731
+
+    # ── how a typed amount is read ──
+    want = {"15": (None, "15", False), "0.5": (None, "0.5", False), "0,5": (None, "0.5", False),
+            "2.50": (None, "2.50", False), "$2": ("usd", "2", False), "2 usd": ("usd", "2", False),
+            "13,000": (None, "13000", True), "13.000": (None, "13000", True), "13000": (None, "13000", False),
+            "5 000": (None, "5000", True), "Rp 13.000": ("idr", "13000", True), "rp13.000": ("idr", "13000", True),
+            "13000 IDR": ("idr", "13000", False), "13,000.IDR": ("idr", "13000", True), "13rb": ("idr", "13000", False),
+            "13 ribu": ("idr", "13000", False), "13k": ("idr", "13000", False), "13.5k": ("idr", "13500", False),
+            "1,5jt": ("idr", "1500000", False), "1.000.000": (None, "1000000", True), "0.500": (None, "0.5", False)}
+    got = {raw: payments.read_amount(raw) for raw in want}
+    bad = [raw for raw, (cur, num, grp) in want.items()
+           if got[raw] is None or got[raw][0] != cur or got[raw][1] != D(num) or got[raw][2] != grp]
+    check("typed amounts are read as written: thousands are thousands, rupiah words name rupiah", not bad,
+          str([(raw, got[raw]) for raw in bad]))
+    check("what is not an amount is not guessed",
+          all(payments.read_amount(x) is None for x in ("abc", "$5 idr", "-5", "IDR", "12.345,67", "", "1e5", "5..0")))
+    check("a shop with no way to pay keeps the old range", payments.limits(r) == (D("1"), D("1000")))
+
+    async def top_up(uid):
+        await dp.feed_update(bot, msg(uid, "/start"))
+        await dp.feed_update(bot, tap(uid, button(session, "Balance")))
+        await dp.feed_update(bot, tap(uid, button(session, "Add balance")))
+
+    async def typed(uid, text):
+        """Other amount -> the text. Returns (QRIS payments made by it, the answer)."""
+        before = len(gw.ks_bodies)
+        await top_up(uid)
+        await dp.feed_update(bot, tap(uid, button(session, "Other amount")))
+        await dp.feed_update(bot, msg(uid, text))
+        return len(gw.ks_bodies) - before, session.last_text()
+
+    # ── a shop paid by QRIS only ──
+    await dp.feed_update(bot, msg(OWNER, "/admin"))
+    await dp.feed_update(bot, tap(OWNER, button(session, "Payments")))
+    await dp.feed_update(bot, tap(OWNER, button(session, "Connect 🇮🇩 KaseraPay")))
+    await dp.feed_update(bot, msg(OWNER, gw.ks_key))
+    await repo.update_reseller(r.id, kasera_rate=D("16500"), kasera_auto=0)
+    r = await repo.get_reseller(r.id)
+    check("QRIS starts at $0.50 (the gateway's own floor is Rp 5.000) and ends at what one QR can carry",
+          payments.limits(r) == (D("0.50"), D("60.60")) and payments.method_limits(r, payments.KASERA) == (D("0.50"), D("60.60"))
+          and payments.presets(r) == [D("0.5"), D("1"), D("2"), D("5"), D("10"), D("20"), D("50")], str(payments.limits(r)))
+    await top_up(9901)
+    text = session.last_text()
+    check("the screen says how THIS shop is paid, that amounts are dollars, and what a dollar is in rupiah",
+          "You pay in rupiah by QRIS" in text and "crypto" not in text and "Amounts are in US dollars ($)." in text
+          and "Here $1.00 = Rp 16.500." in text and "Minimum: <b>$0.50</b>" in text, text[:300])
+    check("each amount button carries its rupiah, from $0.50 up to what one QR can carry",
+          button(session, "$0.50 · Rp 8.250") is not None and button(session, "$50.00 · Rp 825.000") is not None
+          and button(session, "$100") is None)
+    await dp.feed_update(bot, tap(9901, button(session, "$0.50")))
+    check("a $0.50 top-up: a QR for Rp 8.250", len(photos(9901)) == 1 and "Rp 8.250" in photos(9901)[0].caption
+          and "$0.50" in photos(9901)[0].caption and gw.ks_bodies[-1]["amount"] == 8250)
+    await top_up(9902)
+    await dp.feed_update(bot, tap(9902, button(session, "Other amount")))
+    check("'Other amount' asks for dollars or rupiah, with an example of each",
+          "in dollars" in session.last_text() and "or in rupiah" in session.last_text()
+          and "Rp 30.000" in session.last_text() and "Minimum: <b>$0.50</b>" in session.last_text())
+    await dp.feed_update(bot, msg(9902, "13.000"))
+    mem = await repo.get_or_create_member(r.id, 9902, None, None)
+    p = (await repo.open_payments(mem.id))[0]
+    check("'13.000' is Rp 13.000, not $13: the QR asks exactly that and adds its dollars rounded down",
+          len(photos(9902)) == 1 and "Rp 13.000" in photos(9902)[0].caption and "$0.78" in photos(9902)[0].caption
+          and gw.ks_bodies[-1]["amount"] == 13000 and p.amount == D("0.78") and payments.details(p)["idr"] == 13000,
+          str(photos(9902)[0].caption if photos(9902) else session.last_text())[:160])
+    gw.ks[p.invoice_id]["status"] = "succeeded"
+    await asyncio.gather(payments.poll_all(), payments.poll_all())
+    check("paid: exactly $0.78 is added, once",
+          (await repo.get_member(mem.id)).balance == D("0.78") and (await repo.get_payment(p.id)).status == Payment.PAID)
+    forms = {"13,000": 13000, "Rp 50.000": 50000, "13rb": 13000, "13k": 13000, "100000 idr": 100000,
+             "13,000.IDR": 13000, "25 ribu": 25000}
+    wrong = []
+    for i, (text, idr) in enumerate(forms.items()):
+        made, _ = await typed(9910 + i, text)
+        if made != 1 or gw.ks_bodies[-1]["amount"] != idr or f"Rp {idr:,}".replace(",", ".") not in photos(9910 + i)[-1].caption:
+            wrong.append((text, made, gw.ks_bodies[-1]["amount"]))
+    check("every way of writing rupiah makes a QR for exactly those rupiah", not wrong, str(wrong))
+    made, _ = await typed(9920, "0,5")
+    check("dollars still work, with a comma too: $0.50", made == 1 and gw.ks_bodies[-1]["amount"] == 8250)
+    made, text = await typed(9921, "4.000")
+    check("under the gateway's Rp 5.000: asked again with both ranges, nothing opened",
+          made == 0 and "from <b>$0.50</b> to <b>$60.60</b>" in text and "from <b>Rp 8.250</b> to <b>Rp 999.900</b>" in text,
+          text[:200])
+    for text in ("5.000", "2.000.000", "0.40", "100", "$5 idr", "abc", "Rp 13.000,50"):
+        made, answer = await typed(9921, text)
+        if made or "from <b>$0.50</b>" not in answer:
+            wrong.append((text, made, answer[:60]))
+    check("too little, too much, two currencies, not a number: asked again, nothing opened", not wrong, str(wrong))
+
+    # ── the owner's own minimum and note ──
+    await dp.feed_update(bot, msg(OWNER, "/admin"))
+    await dp.feed_update(bot, tap(OWNER, button(session, "Payments")))
+    check("the owner sees what applies now", "from <b>$0.50</b> to <b>$60.60</b> at a time" in session.last_text()
+          and button(session, "Note for customers") is not None)
+    await dp.feed_update(bot, tap(OWNER, button(session, "Minimum")))
+    check("…and is told the floors when setting a minimum", "<b>$0.50</b> by QRIS" in session.last_text())
+    await dp.feed_update(bot, msg(OWNER, "2"))
+    r = await repo.get_reseller(r.id)
+    check("the owner's own minimum counts when it is higher", payments.limits(r) == (D("2.00"), D("60.60"))
+          and payments.presets(r) == [D("5"), D("10"), D("20"), D("50")])
+    made, text = await typed(9922, "Rp 20.000")
+    check("…for rupiah too: Rp 20.000 is $1.21, under $2", made == 0 and "from <b>Rp 33.000</b>" in text, text[:200])
+    await dp.feed_update(bot, msg(OWNER, "/admin"))
+    await dp.feed_update(bot, tap(OWNER, button(session, "Payments")))
+    await dp.feed_update(bot, tap(OWNER, button(session, "Minimum")))
+    await dp.feed_update(bot, msg(OWNER, "-"))
+    await dp.feed_update(bot, tap(OWNER, button(session, "Note for customers")))
+    check("the note is explained", "up to 300 characters" in session.last_text())
+    await dp.feed_update(bot, msg(OWNER, "x" * 301))
+    check("a note that is too long is asked again", "Up to 300 characters" in session.last_text()
+          and (await repo.get_reseller(r.id)).pay_note is None)
+    await dp.feed_update(bot, msg(OWNER, "Type rupiah like 20.000 <b>or</b> tap an amount"))
+    check("the note is saved and shown back to the owner as plain text",
+          (await repo.get_reseller(r.id)).pay_note == "Type rupiah like 20.000 <b>or</b> tap an amount"
+          and "Your note on the top-up screen" in session.last_text() and "&lt;b&gt;or&lt;/b&gt;" in session.last_text())
+    await top_up(9923)
+    check("customers see the note on the top-up screen, as plain text",
+          "Type rupiah like 20.000 &lt;b&gt;or&lt;/b&gt; tap an amount" in session.last_text())
+    await dp.feed_update(bot, msg(OWNER, "/admin"))
+    await dp.feed_update(bot, tap(OWNER, button(session, "Payments")))
+    await dp.feed_update(bot, tap(OWNER, button(session, "Note for customers")))
+    await dp.feed_update(bot, msg(OWNER, "-"))
+    await top_up(9923)
+    check("'-' removes it", (await repo.get_reseller(r.id)).pay_note is None and "Type rupiah" not in session.last_text())
+
+    # ── QRIS and crypto in one shop ──
+    await dp.feed_update(bot, msg(OWNER, "/admin"))
+    await dp.feed_update(bot, tap(OWNER, button(session, "Payments")))
+    await dp.feed_update(bot, tap(OWNER, button(session, "Connect 🪙 OxaPay")))
+    await dp.feed_update(bot, msg(OWNER, gw.ox_key))
+    r = await repo.get_reseller(r.id)
+    n_ox = len(gw.ox)
+    check("with crypto too the shop takes $0.50 to $1000", payments.limits(r) == (D("0.50"), D("1000"))
+          and not payments.takes(r, payments.OXAPAY, D("0.50")) and payments.takes(r, payments.OXAPAY, D("1"))
+          and not payments.takes(r, payments.KASERA, D("100")))
+    await top_up(9930)
+    text = session.last_text()
+    check("the screen names both ways; the buttons are plain dollars",
+          "by QRIS (rupiah) or by crypto" in text and "Here $1.00 = Rp 16.500." in text
+          and button(session, "$0.50") is not None and button(session, "Rp") is None, text[:260])
+    await dp.feed_update(bot, tap(9930, button(session, "$0.50")))
+    check("$0.50 can only be QRIS: the QR comes at once, no crypto link is made",
+          len(photos(9930)) == 1 and "Rp 8.250" in photos(9930)[0].caption and len(gw.ox) == n_ox)
+    await top_up(9931)
+    await dp.feed_update(bot, tap(9931, button(session, "$5.00")))
+    check("$5.00: the customer picks, and the QRIS button says the rupiah",
+          button(session, "QRIS (Rupiah) · Rp 82.500") is not None and button(session, "BTC, ETH, USDT") is not None)
+    made, _ = await typed(9932, "100")
+    check("$100 is over what one QR carries: straight to the crypto link",
+          made == 0 and len(gw.ox) == n_ox + 1 and "$100.00" in session.last_text())
+    made, _ = await typed(9933, "Rp 50.000")
+    check("rupiah typed here still makes a QR", made == 1 and gw.ks_bodies[-1]["amount"] == 50000 and len(gw.ox) == n_ox + 1)
+    n_ks = len(gw.ks_bodies)
+    await dp.feed_update(bot, tap(9934, Pay(a="via", g="ox", c=50).pack()))
+    await dp.feed_update(bot, tap(9934, Pay(a="via", g="kq", c=10000).pack()))
+    check("a button made by hand for an amount a way cannot take opens nothing",
+          len(gw.ox) == n_ox + 1 and len(gw.ks_bodies) == n_ks)
+
+    # ── a shop paid by crypto only ──
+    r2 = await make_reseller(FakeNumberHub(), bot_id=86452)
+    session2 = FakeSession()
+    bot2 = fake_bot(session2)
+    runtime._bots[r2.id] = bot2
+    dp2 = Dispatcher(storage=MemoryStorage())
+    dp2.include_router(build_router(r2.id))
+    await dp2.feed_update(bot2, msg(OWNER, "/admin"))
+    await dp2.feed_update(bot2, tap(OWNER, button(session2, "Payments")))
+    await dp2.feed_update(bot2, tap(OWNER, button(session2, "Connect 🪙 OxaPay")))
+    await dp2.feed_update(bot2, msg(OWNER, gw.ox_key))
+    r2 = await repo.get_reseller(r2.id)
+    n_ox = len(gw.ox)
+
+    async def typed2(uid, text):
+        await dp2.feed_update(bot2, msg(uid, "/start"))
+        await dp2.feed_update(bot2, tap(uid, button(session2, "Balance")))
+        await dp2.feed_update(bot2, tap(uid, button(session2, "Add balance")))
+        first = session2.last_text()
+        await dp2.feed_update(bot2, tap(uid, button(session2, "Other amount")))
+        prompt = session2.last_text()
+        await dp2.feed_update(bot2, msg(uid, text))
+        return first, prompt, session2.last_text()
+
+    first, prompt, answer = await typed2(9940, "13,000")
+    check("crypto only: from $1.00, the old amounts, no rupiah anywhere",
+          payments.limits(r2) == (D("1"), D("1000")) and payments.presets(r2) == [D("5"), D("10"), D("20"), D("50")]
+          and "You pay by crypto" in first and "Amounts are in US dollars ($)." in first and "Rp" not in first
+          and "Minimum: <b>$1.00</b>" in first and "rupiah" not in prompt)
+    check("'13,000' is not $13.00 here either: asked again, no link made",
+          "Send an amount from <b>$1.00</b> to <b>$1000.00</b>" in answer and len(gw.ox) == n_ox, answer[:120])
+    _, _, answer = await typed2(9940, "Rp 20.000")
+    check("rupiah where no QRIS is taken: asked again", "Send an amount from <b>$1.00</b>" in answer and len(gw.ox) == n_ox)
+    _, _, answer = await typed2(9940, "13,5")
+    check("a decimal comma is a decimal: $13.50", len(gw.ox) == n_ox + 1 and "$13.50" in answer, answer[:120])
+
+    # ── a deposit the owner approves by hand is claimed in dollars ──
+    await repo.update_reseller(r2.id, deposit_info="Bank transfer, then send the receipt")
+    for text, ok in (("13,000", False), ("Rp 20.000", False), ("2,50", True)):
+        await dp2.feed_update(bot2, msg(9941, "/start"))
+        await dp2.feed_update(bot2, tap(9941, "n:deposit_manual"))
+        await dp2.feed_update(bot2, msg(9941, text))
+        if ("transaction ID" in session2.last_text()) != ok:
+            wrong.append((text, session2.last_text()[:60]))
+    check("a manual deposit: '13,000' and rupiah are asked again, '2,50' is $2.50", not wrong, str(wrong))
+
+
 async def main():
     await init_db()
     test_prices()
     test_i18n()
     for fn in (test_buy_and_code, test_no_code_refund, test_failures, test_lost_reply, test_cancel,
                test_races_and_limits, test_bot_flow, test_builder, test_provision, test_custom_prices, test_picker_pages, test_rank_order, test_dead_token, test_rejected_key, test_deposits, test_auto_payments, test_builtin_payments, test_owner_stats, test_kasera_qris, test_paid_left, test_email_codes, test_paused_shop, test_review_money,
-               test_review_sync, test_review_bots, test_review_runtime, test_cards_render):
+               test_review_sync, test_review_bots, test_review_runtime, test_small_topups_and_rupiah,
+               test_cards_render):
         try:
             await fn()
         except Exception as exc:  # noqa: BLE001

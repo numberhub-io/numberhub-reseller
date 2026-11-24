@@ -45,6 +45,7 @@ class AdminForm(StatesGroup):
     profit_cap = State()
     dep_info = State()         # the owner's payment details for deposits
     dep_min = State()
+    pay_note = State()         # the owner's own text on the automatic top-up screen
     dep_amount = State()       # approve a deposit with another amount (deposit id in state data)
     pay_key = State()          # an OxaPay key / @CryptoBot token / KaseraPay key (provider in state data)
     kasera_rate = State()      # rupiah for one dollar in this shop
@@ -456,16 +457,38 @@ def address_screen(p, lang: str):
 
 
 def pay_limits(reseller: Reseller) -> tuple[Decimal, Decimal]:
-    low = Decimal(reseller.deposit_min) if reseller.deposit_min else Decimal("1")
-    return max(low, Decimal("1")), payments.MAX_AMOUNT
+    """The smallest and the largest automatic top-up in this shop (payments.limits)."""
+    return payments.limits(reseller)
+
+
+def takes_rupiah(reseller: Reseller) -> bool:
+    return payments.KASERA in payments.connected(reseller) and payments.method_limits(reseller, payments.KASERA) is not None
+
+
+def rupiah_range(reseller: Reseller) -> tuple[int, int]:
+    """The rupiah one QRIS payment can be in this shop: the gateway's own range,
+    and never under the shop's smallest top-up."""
+    low, high = payments.method_limits(reseller, payments.KASERA)
+    low = max(low, pay_limits(reseller)[0])
+    return (max(payments.Kasera.MIN_IDR, payments.usd_to_idr(reseller, low) or 0),
+            min(payments.Kasera.MAX_IDR, int(high * payments.kasera_rate(reseller))))
 
 
 async def pay_amount_screen(reseller: Reseller, member: Member, lang: str):
     """Automatic top-up, step 1: the amount (and the link still open, if any)."""
     low, high = pay_limits(reseller)
-    text = t(lang, "pay_pick_amount")
-    if reseller.deposit_min:
-        text += "\n" + t(lang, "dep_min", min=money(low))
+    gates = payments.connected(reseller)
+    qris = takes_rupiah(reseller)
+    crypto = any(g != payments.KASERA for g in gates)
+    # How this shop is paid, in its own words: a shop that only takes QRIS said
+    # "You pay by crypto" until 2026-11-24.
+    text = t(lang, "pay_pick_amount_qris" if qris and not crypto else "pay_pick_amount_both" if qris else "pay_pick_amount")
+    text += "\n\n" + t(lang, "pay_usd_note")
+    if qris:
+        text += " " + t(lang, "pay_rate_note", usd=money(Decimal("1")), idr=rupiah(payments.kasera_rate(reseller)))
+    text += "\n" + t(lang, "dep_min", min=money(low))
+    if getattr(reseller, "pay_note", None):
+        text += "\n\n" + esc(reseller.pay_note)
     kb = InlineKeyboardBuilder()
     sizes = []
     open_ = await repo.open_payments(member.id)
@@ -482,9 +505,12 @@ async def pay_amount_screen(reseller: Reseller, member: Member, lang: str):
                   callback_data=Pay(a="show", id=open_[0].id))
         kb.button(text=t(lang, "btn_pay_check"), callback_data=Pay(a="chk", id=open_[0].id))
         sizes += [1, 1]
-    presets = [p for p in payments.PRESETS if low <= p <= high]
+    presets = payments.presets(reseller)
     for p in presets:
-        kb.button(text=money(p), callback_data=Pay(a="amt", c=int(p * 100)))
+        # A shop paid only by QRIS shows what each amount is in rupiah.
+        label = money(p) + (f" · {rupiah(payments.usd_to_idr(reseller, p))}" if qris and not crypto
+                            and payments.takes(reseller, payments.KASERA, p) else "")
+        kb.button(text=label, callback_data=Pay(a="amt", c=int(p * 100)))
     sizes += [2] * (len(presets) // 2) + ([1] if len(presets) % 2 else [])
     kb.button(text=t(lang, "btn_amount_other"), callback_data=Pay(a="other"))
     sizes.append(1)
@@ -511,7 +537,8 @@ def email_home_screen(lang: str, sites: list[dict], note: str = ""):
     n = len(sites[:EMAIL_SITES_SHOWN])
     kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
     kb.adjust(*([2] * (n // 2) + ([1] if n % 2 else []) + [1]))
-    return (note + "\n\n" if note else "") + t(lang, "email_pick_site"), kb.as_markup()
+    return ((note + "\n\n" if note else "") + t(lang, "email_pick_site") + "\n" + t(lang, "email_type_any"),
+            kb.as_markup())
 
 
 def email_domains_screen(lang: str, site: dict, rows: list[dict]):
@@ -522,7 +549,11 @@ def email_domains_screen(lang: str, site: dict, rows: list[dict]):
     kb.button(text=t(lang, "btn_back"), callback_data=Em(a="home"))
     kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
     kb.adjust(*([1] * len(rows[:EMAIL_DOMAINS_SHOWN]) + [2]))
-    return t(lang, "email_pick_domain", site=esc(site["name"])), kb.as_markup()
+    text = t(lang, "email_pick_domain", site=esc(site["name"]))
+    if site.get("typed"):
+        # An address the customer typed: a typo opens a mailbox for the wrong site.
+        text += "\n\n" + t(lang, "email_typed_site", site=esc(site["site"]))
+    return text, kb.as_markup()
 
 
 def email_confirm_screen(member: Member, lang: str, site: dict, row: dict, i: int, note: str = ""):
@@ -730,11 +761,17 @@ def build_router(reseller_id: int) -> Router:
         await _show(c, *email_home_screen(lang, sites))
         await c.answer()
 
-    async def _email_domains(c: CallbackQuery, reseller: Reseller, lang: str, state: FSMContext, site: dict) -> None:
+    async def _email_domains(c: CallbackQuery | Message, reseller: Reseller, lang: str, state: FSMContext,
+                             site: dict) -> None:
+        """The mailboxes for one site, after a tap or after the customer typed its address."""
+        tapped = isinstance(c, CallbackQuery)
         try:
             rows = _email_rows(await selling.email_domains(reseller, site["site"]))
         except SellError:
-            await c.answer(t(lang, "err_busy"), show_alert=True)
+            if tapped:
+                await c.answer(t(lang, "err_busy"), show_alert=True)
+            else:
+                await c.answer(t(lang, "err_busy"), reply_markup=_cancel_member(lang))
             return
         await state.update_data(em_site=site, em_domains=rows)
         if not rows:
@@ -745,7 +782,8 @@ def build_router(reseller_id: int) -> Router:
             await _show(c, t(lang, "email_no_domains", site=esc(site["name"])), kb.as_markup())
         else:
             await _show(c, *email_domains_screen(lang, site, rows))
-        await c.answer()
+        if tapped:
+            await c.answer()
 
     @r.callback_query(Em.filter())
     async def email(c: CallbackQuery, callback_data: Em, reseller: Reseller, member: Member, lang: str,
@@ -817,6 +855,12 @@ def build_router(reseller_id: int) -> Router:
 
     @r.message(StateFilter(EmailForm.site), F.text, ~F.text.startswith("/"))
     async def email_typed(m: Message, reseller: Reseller, lang: str, state: FSMContext):
+        site = selling.email_site(m.text) if selling.email_on(reseller) else None
+        if site:
+            # A website address: straight to its mailboxes, whether the list knows it or not.
+            known = next((s for s in await selling.email_search(reseller, site) if s["site"] == site), None)
+            await _email_domains(m, reseller, lang, state, known or {"site": site, "name": site, "typed": True})
+            return
         found = await selling.email_search(reseller, m.text) if selling.email_on(reseller) else []
         if not found:
             sites = (await state.get_data()).get("em_sites") or []
@@ -858,8 +902,11 @@ def build_router(reseller_id: int) -> Router:
     # ── deposits: the customer asks for balance, the owner approves ──
     @r.message(StateFilter(DepositForm.amount), F.text, ~F.text.startswith("/"))
     async def dep_amount(m: Message, reseller: Reseller, member: Member, lang: str, state: FSMContext):
-        amount = parse_amount(m.text)
-        if amount is None or amount > DEPOSIT_MAX:
+        # "13,000" is thirteen thousand, not 13.00 (payments.read_amount); a manual
+        # deposit is claimed in dollars, so an amount named in rupiah is asked again.
+        read = payments.read_amount(m.text)
+        amount = read[1].quantize(Decimal("0.01")) if read is not None and read[0] != "idr" else None
+        if amount is None or amount <= 0 or amount > DEPOSIT_MAX:
             await m.answer(t(lang, "dep_bad_amount"), reply_markup=_cancel_member(lang))
             return
         if reseller.deposit_min and amount < reseller.deposit_min:
@@ -904,9 +951,14 @@ def build_router(reseller_id: int) -> Router:
         return kb.as_markup()
 
     async def _after_amount(target, reseller: Reseller, member: Member, lang: str, amount: Decimal):
-        gates = payments.connected(reseller)
-        if not gates:
+        if not payments.connected(reseller):
             await _show(target, *balance_screen(reseller, member, lang))
+            return
+        # Only the ways that take this amount: QRIS starts lower than crypto, and
+        # one QRIS payment has a ceiling in rupiah.
+        gates = [g for g in payments.connected(reseller) if payments.takes(reseller, g, amount)]
+        if not gates:
+            await _show(target, *await pay_amount_screen(reseller, member, lang))
             return
         if len(gates) == 1 and gates[0] != payments.NUMBERHUB:
             await _make_link(target, reseller, member, lang, gates[0], amount)
@@ -918,9 +970,11 @@ def build_router(reseller_id: int) -> Router:
             kb.button(text=t(lang, "btn_pay_oxapay"), callback_data=Pay(a="via", g="ox", c=cents))
         if payments.CRYPTOBOT in gates:
             kb.button(text=t(lang, "btn_pay_cryptobot"), callback_data=Pay(a="via", g="cb", c=cents))
-        qris = payments.KASERA in gates and payments.kasera_fits(reseller, amount)
+        qris = payments.KASERA in gates
         if qris:
-            kb.button(text=t(lang, "btn_pay_qris"), callback_data=Pay(a="via", g="kq", c=cents))
+            # What this amount is in rupiah, before the QR.
+            kb.button(text=f'{t(lang, "btn_pay_qris")} · {rupiah(payments.usd_to_idr(reseller, amount))}',
+                      callback_data=Pay(a="via", g="kq", c=cents))
         sizes = [1] * (sum(1 for g in (payments.OXAPAY, payments.CRYPTOBOT) if g in gates) + (1 if qris else 0))
         if payments.NUMBERHUB in gates:
             # Every coin the shop can take, three to a row; the network comes next.
@@ -951,15 +1005,19 @@ def build_router(reseller_id: int) -> Router:
         await _show(target, t(lang, "pay_choose_method", amount=money(amount)), kb.as_markup())
 
     async def _make_link(target, reseller: Reseller, member: Member, lang: str, provider: str, amount: Decimal,
-                         method: str | None = None):
+                         method: str | None = None, idr: int | None = None):
         # One at a time per customer: taps sent together must not each see room under the limits.
         async with payments.member_lock(member.id):
-            await _make_link_locked(target, reseller, member, lang, provider, amount, method)
+            await _make_link_locked(target, reseller, member, lang, provider, amount, method, idr)
 
     async def _make_link_locked(target, reseller: Reseller, member: Member, lang: str, provider: str,
-                                amount: Decimal, method: str | None = None):
+                                amount: Decimal, method: str | None = None, idr: int | None = None):
         low, high = pay_limits(reseller)
-        if not low <= amount <= high or provider not in payments.connected(reseller):
+        if idr is not None:
+            # The customer named rupiah: the dollars follow from them at the rate of this moment.
+            amount = payments.idr_to_usd(reseller, idr) if provider == payments.KASERA else None
+        if (amount is None or not low <= amount <= high or provider not in payments.connected(reseller)
+                or not payments.takes(reseller, provider, amount)):
             await _show(target, *await pay_amount_screen(reseller, member, lang))
             return
         if (len(await repo.open_payments(member.id)) >= payments.OPEN_PER_MEMBER
@@ -967,7 +1025,7 @@ def build_router(reseller_id: int) -> Router:
             await _show(target, t(lang, "pay_too_many"), _menu_kb(lang))
             return
         try:
-            p = await payments.open_link(reseller, member.id, provider, amount, method)
+            p = await payments.open_link(reseller, member.id, provider, amount, method, idr)
         except payments.PayError as exc:
             log.warning("reseller %s: %s payment link failed: %s", reseller.id, provider, exc)
             bot = target.bot if isinstance(target, Message) else target.message.bot
@@ -996,8 +1054,8 @@ def build_router(reseller_id: int) -> Router:
         if a == "other":
             low, high = pay_limits(reseller)
             await state.set_state(PayForm.amount)
-            await _show(c, t(lang, "pay_type_amount") + "\n" + t(lang, "dep_min", min=money(low)),
-                        _cancel_member(lang))
+            await _show(c, t(lang, "pay_type_amount_idr" if takes_rupiah(reseller) else "pay_type_amount")
+                        + "\n" + t(lang, "dep_min", min=money(low)), _cancel_member(lang))
         elif a == "amt":
             await _after_amount(c, reseller, member, lang, Decimal(callback_data.c) / 100)
         elif a == "via" and callback_data.g in GATEWAY:
@@ -1053,10 +1111,37 @@ def build_router(reseller_id: int) -> Router:
     @r.message(StateFilter(PayForm.amount), F.text, ~F.text.startswith("/"))
     async def pay_amount_typed(m: Message, reseller: Reseller, member: Member, lang: str, state: FSMContext):
         low, high = pay_limits(reseller)
-        amount = parse_amount(m.text)
-        if amount is None or not low <= amount <= high:
-            await m.answer(t(lang, "pay_bad_amount", min=money(low), max=money(high)),
-                           reply_markup=_cancel_member(lang))
+        qris = takes_rupiah(reseller)
+
+        async def again():
+            if qris:
+                idr_low, idr_high = rupiah_range(reseller)
+                await m.answer(t(lang, "pay_bad_amount_idr", min=money(low), max=money(high),
+                                 idr_min=rupiah(idr_low), idr_max=rupiah(idr_high)), reply_markup=_cancel_member(lang))
+            else:
+                await m.answer(t(lang, "pay_bad_amount", min=money(low), max=money(high)),
+                               reply_markup=_cancel_member(lang))
+
+        read = payments.read_amount(m.text)
+        if read is None:
+            await again()
+            return
+        named, value, grouped = read
+        # Rupiah when the customer says so, and in a shop that takes QRIS also when the
+        # number cannot be dollars: written in thousands, or more than the shop takes.
+        in_rupiah = named == "idr" or (named is None and qris and value >= 1000 and (grouped or value > high))
+        if in_rupiah:
+            idr = int(value) if qris and value == value.to_integral_value() else None
+            usd = payments.idr_to_usd(reseller, idr) if idr is not None else None
+            if usd is None or not low <= usd <= high or not payments.takes(reseller, payments.KASERA, usd):
+                await again()
+                return
+            await state.clear()
+            await _make_link(m, reseller, member, lang, payments.KASERA, usd, idr=idr)
+            return
+        amount = value.quantize(Decimal("0.01"))
+        if amount <= 0 or not low <= amount <= high:
+            await again()
             return
         await state.clear()
         await _after_amount(m, reseller, member, lang, amount)

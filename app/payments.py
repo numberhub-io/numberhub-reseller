@@ -23,8 +23,9 @@ import asyncio
 import datetime as dt
 import json
 import logging
+import re
 import time
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 import httpx
 
@@ -134,6 +135,16 @@ def _ask_due(payment_id: int, every: float) -> bool:
     return True
 MAX_AMOUNT = Decimal("1000")
 PRESETS = (Decimal("5"), Decimal("10"), Decimal("20"), Decimal("50"))
+# A shop that can take less than a dollar (QRIS) offers small amounts first: its
+# customers buy numbers that cost cents (a shop owner asked for $0.50, 2026-11-24).
+PRESETS_SMALL = (Decimal("0.5"), Decimal("1"), Decimal("2"), Decimal("5"), Decimal("10"), Decimal("20"),
+                 Decimal("50"))
+# The smallest automatic top-up anywhere, and the floor of each way to pay. Crypto
+# stays at a dollar: the wallet the built-in payments go to takes no less, and a
+# network fee eats a smaller payment. QRIS has no such cost: its floor is the
+# gateway's own, in rupiah (kasera_limits).
+MIN_AMOUNT = Decimal("0.50")
+CRYPTO_MIN = Decimal("1")
 # Tests swap in an httpx.MockTransport here.
 TRANSPORT: httpx.AsyncBaseTransport | None = None
 
@@ -417,6 +428,101 @@ def kasera_fits(reseller: Reseller, amount: Decimal) -> bool:
     return lim is not None and lim[0] <= amount <= lim[1]
 
 
+def idr_to_usd(reseller: Reseller, idr: int) -> Decimal | None:
+    """The dollars a QRIS payment of `idr` rupiah adds at this shop's rate, rounded
+    DOWN to the cent: the customer is never given more than their rupiah bought.
+    None = no rate, or outside what one QRIS payment can be."""
+    rate = kasera_rate(reseller)
+    if rate is None or not Kasera.MIN_IDR <= int(idr) <= Kasera.MAX_IDR:
+        return None
+    usd = (Decimal(int(idr)) / rate).quantize(Decimal("0.01"), rounding="ROUND_DOWN")
+    return usd if usd > 0 else None
+
+
+def usd_to_idr(reseller: Reseller, amount: Decimal) -> int | None:
+    """The rupiah a QR asks for a dollar amount: rounded UP, as the payment itself does."""
+    rate = kasera_rate(reseller)
+    return None if rate is None else int((Decimal(amount) * rate).to_integral_value(rounding="ROUND_UP"))
+
+
+# ─── an amount as a customer types it ────────────────────────────────────────
+_AMOUNT_WORDS = (("rupiah", "idr", 1), ("ribu", "idr", 1000), ("juta", "idr", 1_000_000), ("idr", "idr", 1),
+                 ("rp.", "idr", 1), ("rp", "idr", 1), ("rb", "idr", 1000), ("jt", "idr", 1_000_000),
+                 ("k", "idr", 1000), ("dollars", "usd", 1), ("dollar", "usd", 1), ("dolar", "usd", 1),
+                 ("usd", "usd", 1), ("$", "usd", 1))
+_GROUPED = re.compile(r"^[1-9]\d{0,2}(?:[., ]\d{3})+$")
+
+
+def read_amount(raw: str) -> tuple[str | None, Decimal, bool] | None:
+    """What a customer typed as an amount: (currency they named or None, the number,
+    whether it was written in groups of three).
+
+    ``13,000`` and ``13.000`` are thirteen thousand, never 13.00: a dollar amount has
+    two decimals, and a customer who meant Rp 13,000 was shown a QR for $13 (a shop
+    in Indonesia, 2026-11-24). ``Rp 13.000``, ``13000 IDR``, ``13rb``, ``13k`` and
+    ``1,5jt`` name rupiah; ``$2``, ``2 usd`` name dollars. None = not an amount."""
+    s = " ".join(str(raw or "").lower().replace("\u00a0", " ").split())
+    if not s or len(s) > 32:
+        return None
+    hint, times = None, 1
+    for word, cur, mult in _AMOUNT_WORDS:
+        if word in s:
+            if hint not in (None, cur):
+                return None                 # "$5 idr": two currencies
+            hint, times = cur, times * mult
+            s = s.replace(word, " ")
+    s = s.strip().strip(".").strip()
+    if not s:
+        return None
+    grouped = bool(_GROUPED.match(s))
+    if grouped:
+        digits = re.sub(r"[., ]", "", s)
+    else:
+        digits = s.replace(" ", "").replace(",", ".")
+        if not re.fullmatch(r"\d+(?:\.\d+)?", digits):
+            return None
+    try:
+        value = Decimal(digits) * times
+    except (InvalidOperation, ValueError):
+        return None
+    if not value.is_finite() or value <= 0 or value > Decimal("1000000000"):
+        return None
+    return hint, value, grouped
+
+
+# ─── how little and how much a shop takes ────────────────────────────────────
+def method_limits(reseller: Reseller, provider: str) -> tuple[Decimal, Decimal] | None:
+    """(smallest, largest) one payment by this way can be, in dollars. None = it
+    cannot take a payment now."""
+    if provider == KASERA:
+        lim = kasera_limits(reseller)
+        if lim is None:
+            return None
+        low, high = max(MIN_AMOUNT, lim[0]), min(MAX_AMOUNT, lim[1])
+        return (low, high) if low <= high else None
+    return CRYPTO_MIN, MAX_AMOUNT
+
+
+def takes(reseller: Reseller, provider: str, amount: Decimal) -> bool:
+    lim = method_limits(reseller, provider)
+    return lim is not None and lim[0] <= amount <= lim[1]
+
+
+def limits(reseller: Reseller) -> tuple[Decimal, Decimal]:
+    """(smallest, largest) automatic top-up in this shop: the lowest floor and the
+    highest ceiling among the ways it takes, and never under the owner's own minimum."""
+    have = [lim for lim in (method_limits(reseller, p) for p in connected(reseller)) if lim is not None]
+    low = min((lim[0] for lim in have), default=CRYPTO_MIN)
+    high = max((lim[1] for lim in have), default=MAX_AMOUNT)
+    own_min = Decimal(reseller.deposit_min) if getattr(reseller, "deposit_min", None) else Decimal("0")
+    return max(low, own_min), high
+
+
+def presets(reseller: Reseller) -> list[Decimal]:
+    low, high = limits(reseller)
+    return [p for p in (PRESETS_SMALL if low < CRYPTO_MIN else PRESETS) if low <= p <= high]
+
+
 # ─── what a shop has connected ───────────────────────────────────────────────
 _ENC_FIELD = {OXAPAY: "oxapay_key_enc", CRYPTOBOT: "cryptobot_token_enc", KASERA: "kasera_key_enc"}
 
@@ -663,16 +769,25 @@ async def _builtin_state(reseller: Reseller, payment: Payment) -> tuple[str, Dec
     return "pending", None
 
 
-async def _open_kasera(reseller: Reseller, member_id: int, amount: Decimal) -> Payment:
+async def _open_kasera(reseller: Reseller, member_id: int, amount: Decimal, idr: int | None = None) -> Payment:
     """A QRIS payment in rupiah for a dollar amount, at the shop's own rate. The
-    dollars the customer gets are fixed now; the rupiah are what the QR asks for."""
+    dollars the customer gets are fixed now; the rupiah are what the QR asks for.
+
+    With `idr` the customer named the rupiah: the QR asks for exactly that, and the
+    dollars are worked out HERE from it (rounded down), whatever `amount` says."""
     key, rate = secret(reseller, KASERA), kasera_rate(reseller)
     if not key or rate is None:
         raise PayError("KaseraPay is not connected, or its rupiah rate is not set")
+    if idr is not None:
+        amount = idr_to_usd(reseller, idr)
+        if amount is None:
+            raise PayError(f"one QRIS payment can be from Rp {Kasera.MIN_IDR} to Rp {Kasera.MAX_IDR}")
+        idr = int(idr)
     if not kasera_fits(reseller, amount):
         low, high = kasera_limits(reseller)
         raise PayError(f"one QRIS payment can be from ${low} to ${high} at your rate")
-    idr = int((amount * rate).to_integral_value(rounding="ROUND_UP"))
+    if idr is None:
+        idr = int((amount * rate).to_integral_value(rounding="ROUND_UP"))
     row = await repo.create_payment(reseller.id, member_id, KASERA, amount)
     ref = f"s{reseller.id}-p{row.id}"
     client = Kasera(key)
@@ -691,15 +806,16 @@ async def _open_kasera(reseller: Reseller, member_id: int, amount: Decimal) -> P
 
 
 async def open_link(reseller: Reseller, member_id: int, provider: str, amount: Decimal,
-                    method: str | None = None) -> Payment:
+                    method: str | None = None, idr: int | None = None) -> Payment:
     """Create the payment row, then the gateway's invoice (or, built in, the
-    deposit address on `method`'s network). Raises PayError."""
+    deposit address on `method`'s network). `idr` = a QRIS payment for exactly that
+    many rupiah. Raises PayError."""
     if provider == NUMBERHUB:
         if not builtin_on(reseller):
             raise PayError("built-in payments are off")
         return await _open_builtin(reseller, member_id, amount, method)
     if provider == KASERA:
-        return await _open_kasera(reseller, member_id, amount)
+        return await _open_kasera(reseller, member_id, amount, idr)
     key = secret(reseller, provider)
     if not key:
         raise PayError(f"{LABEL[provider]} is not connected")

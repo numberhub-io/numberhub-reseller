@@ -51,6 +51,9 @@ class Reseller(Base):
     # None = deposits off (customers send their ID to the support contact instead).
     deposit_info: Mapped[str | None] = mapped_column(Text, nullable=True)
     deposit_min: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    # The owner's own words on the automatic top-up screen (plain text, up to 300
+    # characters), for example how amounts work in their country. None = none.
+    pay_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Automatic top-ups (app/payments.py) with the owner's OWN gateway account,
     # encrypted like the bot token. None = not connected.
     oxapay_key_enc: Mapped[str | None] = mapped_column(Text, nullable=True)

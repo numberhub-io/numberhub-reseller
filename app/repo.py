@@ -66,7 +66,8 @@ async def update_reseller(reseller_id: int, **values) -> None:
     allowed = {"markup_pct", "welcome_text", "support_contact", "status", "bot_username", "bot_title",
                "bot_token_enc", "api_key_enc", "api_key_hint", "max_profit", "deposit_info", "deposit_min",
                "oxapay_key_enc", "cryptobot_token_enc", "nh_pay", "daily_report",
-               "kasera_key_enc", "kasera_rate", "key_by_owner", "email_on", "kasera_auto", "kasera_extra"}
+               "kasera_key_enc", "kasera_rate", "key_by_owner", "email_on", "kasera_auto", "kasera_extra",
+               "pay_note"}
     values = {k: v for k, v in values.items() if k in allowed}
     if values:
         async with session_factory() as s:

@@ -18,6 +18,7 @@ import asyncio
 import datetime as dt
 import json
 import logging
+import re
 import time
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 
@@ -518,6 +519,31 @@ async def email_sites(reseller: Reseller) -> list[dict]:
     rows = [{"site": str(r["site"])[:120], "name": str(r.get("name") or r["site"])[:60]} for r in rows]
     _email_sites[reseller.id] = (time.monotonic(), rows)
     return rows
+
+
+_SITE_CLEAN = re.compile(r"^\s*(?:https?://)?(?:www\.)?([^/\s?#]+)", re.I)
+_SITE_VALID = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9-]+)*\.[a-z]{2,}$")
+
+
+def email_site(raw: str) -> str | None:
+    """A website a customer typed, as its bare address, or None when it is not one.
+
+    Takes what people paste: "https://Example.com/signup", "www.example.com",
+    "@example.com", "name@example.com". A plain word like "example" is not an
+    address (it is searched by name instead): without its ending it is a guess, and
+    a mailbox opened for a wrong guess cannot be used. A mailbox can be opened for
+    ANY site, so an address needs no entry in the list of known sites: until
+    2026-11-24 a typed address was answered "nothing found" for ever."""
+    txt = str(raw or "").strip().lstrip("@").strip()
+    if not txt or len(txt) > 253:
+        return None
+    m = _SITE_CLEAN.match(txt)
+    if not m:
+        return None
+    host = m.group(1).strip().rstrip(".").lower()
+    if "@" in host:
+        host = host.rsplit("@", 1)[-1]
+    return host if _SITE_VALID.match(host) and len(host) <= 120 else None
 
 
 async def email_search(reseller: Reseller, q: str) -> list[dict]:

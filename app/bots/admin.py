@@ -278,6 +278,12 @@ async def deposits_screen(reseller: Reseller, note: str = ""):
         lines += ["", "<b>What customers see:</b>", esc(reseller.deposit_info)]
     if reseller.deposit_min:
         lines.append(f"Minimum top-up: <b>{money(reseller.deposit_min)}</b>")
+    if gates:
+        low, high = payments.limits(reseller)
+        lines += ["", f"<b>Automatic top-ups here:</b> from <b>{money(low)}</b> to <b>{money(high)}</b> at a time"
+                      " (QRIS from $0.50, crypto from $1.00; your own minimum counts when it is higher)."]
+    if getattr(reseller, "pay_note", None):
+        lines += ["", "<b>Your note on the top-up screen:</b>", esc(reseller.pay_note)]
     lines += ["", f"<b>Waiting for you:</b> {len(rows)}" if rows else "No manual deposit waiting."]
     kb = InlineKeyboardBuilder()
     sizes = []
@@ -306,6 +312,7 @@ async def deposits_screen(reseller: Reseller, note: str = ""):
         sizes.append(2)
     kb.button(text="✏️ Payment details", callback_data=Adm(a="dep_info"))
     kb.button(text="📉 Minimum", callback_data=Adm(a="dep_min"))
+    kb.button(text="📝 Note for customers", callback_data=Adm(a="pay_note"))
     if on:
         # One tap instead of sending "-" as the payment details.
         kb.button(text="🗑 Turn off manual deposits", callback_data=Adm(a="dep_off"))
@@ -666,8 +673,16 @@ def register(r: Router) -> None:
             await state.set_state(AdminForm.dep_min)
             now = money(reseller.deposit_min) if reseller.deposit_min else "none"
             await show(c, "📉 <b>Minimum deposit</b>\n\nSend the smallest amount a customer may send, for "
-                          f"example <code>1</code>. Send <code>-</code> for no minimum. Now: <b>{now}</b>.",
-                       _cancel_kb())
+                          f"example <code>1</code> or <code>0.5</code>. Send <code>-</code> for no minimum of "
+                          f"your own. Now: <b>{now}</b>.\n\nAutomatic payments have their own floor whatever you "
+                          "set: <b>$0.50</b> by QRIS and <b>$1.00</b> by crypto.", _cancel_kb())
+        elif a == "pay_note":
+            await state.set_state(AdminForm.pay_note)
+            now = esc(reseller.pay_note) if getattr(reseller, "pay_note", None) else "none"
+            await show(c, "📝 <b>Note for customers</b>\n\nSend a short text your customers see on the "
+                          "💳 Add balance screen, under the amounts. For example how to type an amount, or "
+                          "which bank apps work.\n\nPlain text, up to 300 characters. Send <code>-</code> to "
+                          f"remove it.\n\nNow: {now}", _cancel_kb())
         elif a == "prices":
             await show(c, *await prices_screen(reseller))
         elif a == "pr_del":
@@ -942,6 +957,19 @@ def register(r: Router) -> None:
         await state.clear()
         note = f"✅ Minimum deposit: {money(value)}." if value else "✅ No minimum."
         await reply(m, await deposits_screen(await repo.get_reseller(reseller.id), note))
+
+    @r.message(StateFilter(AdminForm.pay_note), F.text)
+    @owner_only
+    async def f_pay_note(m: Message, reseller: Reseller, state: FSMContext, is_owner: bool = False):
+        raw = " ".join(m.text.split()) if m.text.strip() == "-" else m.text.strip()
+        if raw != "-" and not 1 <= len(raw) <= 300:
+            await m.answer("❌ Up to 300 characters, or <code>-</code> to remove the note.", reply_markup=_cancel_kb())
+            return
+        await repo.update_reseller(reseller.id, pay_note=None if raw == "-" else raw)
+        await state.clear()
+        await reply(m, await deposits_screen(await repo.get_reseller(reseller.id),
+                                             "✅ Note removed." if raw == "-" else "✅ Note saved: your customers "
+                                             "see it on the 💳 Add balance screen."))
 
     @r.message(StateFilter(AdminForm.price_app), F.text)
     @owner_only
