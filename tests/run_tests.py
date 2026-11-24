@@ -3753,6 +3753,80 @@ async def test_number_cycling():
     runtime._bots.pop(r.id, None)
 
 
+async def test_back_to_the_purchase():
+    """After money is added, one tap brings the customer back to the number they were
+    about to buy. The same notice used to end with no button at all."""
+    print("after a top-up: back to the number being bought")
+    from aiogram.methods import SendMessage
+    from app import payments
+    from app.bots.callbacks import Cty, Nav
+    from app.bots.reseller import build_router
+    from fakes import FakeGateways
+    gw = FakeGateways()
+    gw.next = 11000
+    payments.TRANSPORT = gw.transport()
+    own = 5171
+    api = FakeNumberHub()
+    r = await make_reseller(api, owner=own, bot_id=86901)
+    session = FakeSession(bot_id=86901)
+    bot = fake_bot(session)
+    runtime._bots[r.id] = bot
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(build_router(r.id))
+    await dp.feed_update(bot, msg(own, "/admin"))
+    await dp.feed_update(bot, tap(own, button(session, "Payments")))
+    await dp.feed_update(bot, tap(own, button(session, "Connect 🪙 OxaPay")))
+    await dp.feed_update(bot, msg(own, gw.ox_key))
+    cust = 97001
+    m = await member(r, cust, "0")
+
+    def last_kb(uid):
+        sent = [x for x in session.requests if isinstance(x, SendMessage) and x.chat_id == uid and x.reply_markup]
+        return [(b.text, b.callback_data) for row in sent[-1].reply_markup.inline_keyboard for b in row] if sent else []
+
+    # with nothing remembered: to the shop
+    await repo.member_adjust(r.id, m.id, D("0.10"))
+    await dp.feed_update(bot, msg(own, "/admin"))
+    await dp.feed_update(bot, tap(own, Adm(a="add").pack()))
+    await dp.feed_update(bot, msg(own, f"{cust} 0.10"))
+    check("money added with nothing in mind: the notice leads to the shop",
+          [x[1] for x in last_kb(cust)] == [Nav(to="buy").pack(), Nav(to="menu").pack()], str(last_kb(cust)))
+
+    # the customer looks at a number they cannot afford, then tops up
+    await dp.feed_update(bot, tap(cust, Cty(code="wa", cc="187").pack()))
+    check("a number the balance does not cover is remembered",
+          selling.remembered_route(m.id) is not None and selling.remembered_route(m.id)[:2] == ("wa", "187"))
+    await dp.feed_update(bot, tap(cust, Nav(to="deposit").pack()))
+    await dp.feed_update(bot, tap(cust, button(session, "$5.00")))
+    pay = (await repo.open_payments(m.id))[0]
+    gw.ox[pay.invoice_id]["status"] = "Paid"
+    await payments.poll_all()
+    kb = last_kb(cust)
+    check("payment received: the first button continues with that number, by name and flag",
+          (await repo.get_member(m.id)).balance == D("5.20") and kb and kb[0][1] == Cty(code="wa", cc="187").pack()
+          and kb[0][0].startswith("▶️ Continue: WhatsApp") and kb[-1][1] == Nav(to="menu").pack(), str(kb))
+    await dp.feed_update(bot, tap(cust, kb[0][1]))
+    check("one tap shows the number again, ready to buy", button(session, "Buy") is not None
+          and "$5.20" in session.last_text(), session.last_text()[:120])
+    check("…and with enough balance it is still kept until the number is bought",
+          selling.remembered_route(m.id) is not None)
+    await dp.feed_update(bot, tap(cust, button(session, "Buy")))
+    check("bought: nothing is kept any more", selling.remembered_route(m.id) is None
+          and (await repo.member_orders(m.id, 1))[0].status == "waiting")
+    await dp.feed_update(bot, msg(own, "/admin"))
+    await dp.feed_update(bot, tap(own, Adm(a="add").pack()))
+    await dp.feed_update(bot, msg(own, f"{cust} 1"))
+    check("…so the next 'money added' leads to the shop again", [x[1] for x in last_kb(cust)][0] == Nav(to="buy").pack())
+    hit = selling._resume
+    selling.remember_route(m.id, "tg", "187", "Telegram", "🇺🇸")
+    hit[m.id] = (hit[m.id][0] - selling.RESUME_SEC - 5,) + hit[m.id][1:]
+    check("a number looked at more than a day ago is forgotten", selling.remembered_route(m.id) is None)
+    missing = [lang for lang in LANGS if "btn_continue" not in _table(lang)]
+    same = [lang for lang in LANGS if lang != "en" and _table(lang).get("btn_continue") == _table("en")["btn_continue"]]
+    check("the button exists in all 14 languages, translated", not missing and not same, f"{missing} {same}")
+    runtime._bots.pop(r.id, None)
+
+
 async def main():
     await init_db()
     test_prices()
@@ -3761,6 +3835,7 @@ async def main():
                test_races_and_limits, test_bot_flow, test_builder, test_provision, test_custom_prices, test_picker_pages, test_rank_order, test_dead_token, test_rejected_key, test_deposits, test_auto_payments, test_builtin_payments, test_owner_stats, test_kasera_qris, test_paid_left, test_email_codes, test_paused_shop, test_review_money,
                test_review_sync, test_review_bots, test_review_runtime, test_small_topups_and_rupiah,
                test_proxy_data, test_review_2026_11_24, test_number_cycling,
+               test_back_to_the_purchase,
                test_cards_render):
         try:
             await fn()

@@ -9,7 +9,7 @@ from decimal import Decimal
 from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app.bots.callbacks import Em, Nav, Ord, Svc
+from app.bots.callbacks import Cty, Em, Nav, Ord, Svc
 from app.i18n import t
 from app.models import Member, Order
 from app.numberhub import flag
@@ -121,6 +121,23 @@ def order_card(member: Member, order: Order) -> tuple[str, InlineKeyboardMarkup]
     kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
     kb.adjust(2)
     return "\n".join(lines), kb.as_markup()
+
+
+def after_credit_kb(member: Member) -> InlineKeyboardMarkup:
+    """Under "money added": straight back to the number the customer was about to buy
+    when their balance fell short (kept for a day), else to the shop."""
+    from app import selling
+    lang = member.language or "en"
+    kb = InlineKeyboardBuilder()
+    route = selling.remembered_route(member.id)
+    if route:
+        code, cc, name, emoji = route
+        kb.button(text=t(lang, "btn_continue", service=name[:24], flag=emoji).strip(), callback_data=Cty(code=code, cc=cc))
+    else:
+        kb.button(text=t(lang, "btn_buy"), callback_data=Nav(to="buy"))
+    kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+    kb.adjust(1)
+    return kb.as_markup()
 
 
 def proxy_card(member: Member, order: Order, live: dict | None = None):

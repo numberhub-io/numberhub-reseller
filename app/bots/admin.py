@@ -221,7 +221,8 @@ async def settle_deposit(bot, reseller: Reseller, deposit_id: int, approve: bool
             from app.bots.reseller import support_label
             msg = t(lang, "dep_rejected", n=dep.number, amount=money(dep.amount),
                     support=support_label(reseller, lang))
-        await selling.send(bot, member.telegram_id, msg)
+        from app.texts import after_credit_kb
+        await selling.send(bot, member.telegram_id, msg, after_credit_kb(member) if approve else None)
     return dep, member
 
 
@@ -792,8 +793,9 @@ def register(r: Router) -> None:
             await m.answer("❌ That didn't go through. Please try again.", reply_markup=_cancel_kb())
             return
         fresh = await repo.get_member(member.id)
+        from app.texts import after_credit_kb
         await selling.send(m.bot, fresh.telegram_id, t(fresh.language, "msg_credited", amount=money(amount),
-                                                          balance=money(fresh.available)))
+                                                          balance=money(fresh.available)), after_credit_kb(fresh))
         await done(m, reseller, state, f"✅ Added <b>{money(amount)}</b> to <code>{fresh.telegram_id}</code>. "
                                        f"Their balance: <b>{money(fresh.available)}</b>")
 

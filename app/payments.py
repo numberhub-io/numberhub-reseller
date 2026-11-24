@@ -965,8 +965,9 @@ async def check_more(payment: Payment, reseller: Reseller | None = None, bot=Non
     bot = _bot(reseller.id, bot)
     member = await repo.get_member(payment.member_id)
     if bot is not None and member is not None:
+        from app.texts import after_credit_kb
         await send(bot, member.telegram_id, t(member.language or "en", "pay_received", amount=money(added),
-                                              balance=money(member.available)))
+                                              balance=money(member.available)), after_credit_kb(member))
         who = f"<code>{member.telegram_id}</code>" + (f" @{esc(member.username)}" if member.username else "")
         await send(bot, reseller.owner_id,
                    f"💰 <b>More arrived on a payment:</b> +{money(added)} from {who} in "
@@ -1018,8 +1019,9 @@ async def _announce_paid(bot, reseller: Reseller, p: Payment) -> None:
     member = await repo.get_member(p.member_id)
     if bot is None or member is None:
         return
+    from app.texts import after_credit_kb
     await send(bot, member.telegram_id, t(member.language or "en", "pay_received", amount=money(p.credited),
-                                          balance=money(member.available)))
+                                          balance=money(member.available)), after_credit_kb(member))
     who = f"<code>{member.telegram_id}</code>" + (f" @{esc(member.username)}" if member.username else "")
     if p.provider == NUMBERHUB:
         coin = esc(details(p).get("pay_currency") or "crypto")

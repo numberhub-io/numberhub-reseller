@@ -388,6 +388,29 @@ async def buy(reseller: Reseller, member: Member, service: str, country: str,
 # a day holds 150 with under 3%. One customer must not use that up. Sized on 30 days of
 # all shops (2026-11-24: 646 numbers by 39 customers): the most numbers with no code at
 # all in one customer's day was 21, and the busiest honest day was 72 numbers with 6 codes.
+# The number a customer was about to buy when their balance fell short, kept for a day:
+# "money added" then leads straight back to it. Most customers who open a top-up never
+# come back to the purchase (the wallet's own bot: 333 of 426 in two weeks, 2026-10).
+RESUME_SEC = 24 * 3600
+_resume: dict[int, tuple[float, str, str, str, str]] = {}      # member -> (when, app, country, name, flag)
+
+
+def remember_route(member_id: int, service: str, country: str, name: str, emoji: str) -> None:
+    if len(_resume) > 5000:
+        cutoff = time.monotonic() - RESUME_SEC
+        for k in [k for k, v in _resume.items() if v[0] < cutoff]:
+            _resume.pop(k, None)
+    _resume[member_id] = (time.monotonic(), str(service), str(country), str(name or service), str(emoji or ""))
+
+
+def remembered_route(member_id: int) -> tuple[str, str, str, str] | None:
+    hit = _resume.get(member_id)
+    if hit is None or time.monotonic() - hit[0] > RESUME_SEC:
+        _resume.pop(member_id, None)
+        return None
+    return hit[1:]
+
+
 CYCLE_NO_CODE = 30              # numbers in 24 h that ended with no code, when none got one
 CYCLE_MANY = 100                # ...or this many, when under CYCLE_PCT percent got one
 CYCLE_PCT = 3
@@ -459,6 +482,7 @@ async def _buy(reseller: Reseller, member: Member, service: str, country: str,
     order = await _backed_place(reseller, member, cli, values,
                                 lambda o: cli.buy(service, country, row["ceiling"], idempotency_key(o)), repriced)
     invalidate_prices(reseller.id)
+    _resume.pop(member.id, None)        # bought: nothing to come back to
     return order
 
 

@@ -22,7 +22,7 @@ from app.catalog_ui import ANY_OTHER, LETTERS, POPULAR, by_letter, icon, letter_
 from app.i18n import LANGS, resolve, t
 from app.models import Member, Reseller
 from app.selling import SellError
-from app.texts import esc, money, order_card, proxy_card
+from app.texts import after_credit_kb, esc, money, order_card, proxy_card
 
 log = logging.getLogger(__name__)
 AZ_PAGE = 30
@@ -344,6 +344,9 @@ async def confirm_screen(reseller: Reseller, member: Member, lang: str, code: st
         return t(lang, "err_sold_out"), kb.as_markup()
     name = await display_name(reseller, code)
     price = row["member_price"]
+    if member.available < price:
+        # Not enough for it: after a top-up one tap brings the customer back here.
+        selling.remember_route(member.id, code, str(cc), name, row["emoji"])
     text = t(lang, "confirm", service=esc(name), flag=row["emoji"], country=esc(row.get("name") or cc),
              price=money(price), rate="", available=money(member.available))
     if not row.get("in_stock"):
@@ -1239,7 +1242,7 @@ def build_router(reseller_id: int) -> Router:
                 fresh = await repo.get_member(member.id) or member
                 p = await repo.get_payment(p.id)
                 await _show(c, t(lang, "pay_received", amount=money(p.credited), balance=money(fresh.available)),
-                            _menu_kb(lang))
+                            after_credit_kb(fresh))
             else:
                 key = {"already": "pay_already", "expired": "pay_expired", "manual": "pay_manual",
                        "failed": "pay_expired"}.get(state_, "pay_not_yet")

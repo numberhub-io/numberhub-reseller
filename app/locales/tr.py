@@ -159,6 +159,7 @@ T = {
     'email_msg_link': '🔗 Onaylamak için bu bağlantıyı açın: {link}',
     'err_email_limit': 'Kısa sürede çok fazla posta kutusu istediniz. Biraz bekleyip tekrar deneyin.',
     'err_number_limit': 'Bugün çok sayıda numara aldınız ve hiçbirine kod gelmedi; bu yüzden yeni numaralar sizin için yarına kadar durduruldu. Hiçbir ücret alınmadı. O zaman başka bir uygulama veya ülke deneyin.',
+    'btn_continue': '▶️ Devam et: {service} {flag}',
     'btn_email_again': '📧 Başka bir posta kutusu',
     'email_st_waiting': '⏳ E-posta bekleniyor — <b>{left}</b> kaldı',
     'email_st_received': '✅ <b>E-posta geldi</b>',

@@ -118,6 +118,10 @@ Open your own shop bot and send `/admin`, or tap ⚙️ Admin panel in the menu 
 
 Your commission is a percentage added on top of NumberHub's price for each country. With a 30% commission, a number NumberHub prices at $0.25 costs your customer $0.33 (rounded up to the cent) and you keep $0.08. The bot uses NumberHub's highest price for that route (`price_max`) as the base, so NumberHub can never charge you more for a sale than the customer paid.
 
+### Back to the purchase after a top-up
+
+When a customer looks at a number their balance does not cover, the bot remembers it for a day. Every "money added" notice (a payment that arrived, a deposit you approved, a balance you added) then starts with ▶️ Continue: the app and country, one tap from the Buy button. With nothing remembered it leads to the shop.
+
 ### One customer cannot use up your account
 
 A number that gets no code costs its buyer nothing, so nothing slows a customer (or a script) that takes one after another. NumberHub judges your whole account on how many of your numbers get a code and pauses new numbers for all your customers when that falls too low. So a customer whose day holds 30 numbers and not one code, or 100 numbers with under 3% codes, gets no new numbers until the day has passed. Nothing is charged, email codes and proxy data still work for them, and you get one message with their ID. Sized on a month of all shops: the most numbers with no code at all in one customer's day was 21, and a busy honest day was 72 numbers with 6 codes.

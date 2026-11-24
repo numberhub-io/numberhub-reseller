@@ -159,6 +159,7 @@ T = {
     'email_msg_link': '🔗 Buka tautan ini untuk konfirmasi: {link}',
     'err_email_limit': 'Anda meminta banyak kotak surat dalam waktu singkat. Tunggu sebentar, lalu coba lagi.',
     'err_number_limit': 'Hari ini Anda mengambil banyak nomor dan tidak ada yang menerima kode, jadi nomor baru dijeda untuk Anda sampai besok. Tidak ada yang dipotong. Coba aplikasi atau negara lain besok.',
+    'btn_continue': '▶️ Lanjutkan: {service} {flag}',
     'btn_email_again': '📧 Kotak surat lain',
     'email_st_waiting': '⏳ Menunggu email — sisa <b>{left}</b>',
     'email_st_received': '✅ <b>Email diterima</b>',

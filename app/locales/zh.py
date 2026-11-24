@@ -159,6 +159,7 @@ T = {
     'email_msg_link': '🔗 打开此链接进行确认：{link}',
     'err_email_limit': '您在短时间内申请了很多邮箱。请稍等片刻再试。',
     'err_number_limit': '您今天取了很多号码，但都没有收到验证码，因此在明天之前暂停为您提供新号码。没有扣除任何费用。届时请尝试其他应用或国家。',
+    'btn_continue': '▶️ 继续：{service} {flag}',
     'btn_email_again': '📧 再来一个邮箱',
     'email_st_waiting': '⏳ 正在等待邮件 — 剩余 <b>{left}</b>',
     'email_st_received': '✅ <b>已收到邮件</b>',

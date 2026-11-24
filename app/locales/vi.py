@@ -159,6 +159,7 @@ T = {
     'email_msg_link': '🔗 Mở liên kết này để xác nhận: {link}',
     'err_email_limit': 'Bạn đã yêu cầu nhiều hộp thư trong thời gian ngắn. Hãy đợi một chút rồi thử lại.',
     'err_number_limit': 'Hôm nay bạn đã lấy nhiều số và không số nào nhận được mã, nên số mới tạm dừng với bạn đến ngày mai. Không có khoản nào bị trừ. Khi đó hãy thử ứng dụng hoặc quốc gia khác.',
+    'btn_continue': '▶️ Tiếp tục: {service} {flag}',
     'btn_email_again': '📧 Hộp thư khác',
     'email_st_waiting': '⏳ Đang chờ email — còn <b>{left}</b>',
     'email_st_received': '✅ <b>Đã nhận email</b>',
