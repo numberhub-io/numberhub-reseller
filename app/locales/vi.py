@@ -238,4 +238,11 @@ T = {
     'pay_qris_phone': '📱 Thanh toán ngay trên điện thoại này? Lưu ảnh này, mở ứng dụng ngân hàng hoặc ví của bạn, chọn QRIS rồi chọn ảnh từ thư viện.',
     # every mailbox of a site
     'email_type_domain': 'Có {n} loại hộp thư. Gõ một phần tên để tìm, ví dụ <code>gmail</code>.',
+    # search, any website, the missing money
+    'search_prompt': '🔎 <b>Tìm kiếm</b>\n\nGõ tên ứng dụng bạn cần số, ví dụ <i>TikTok</i> hoặc <i>Gmail</i>. Bot sẽ tìm giúp bạn.',
+    'find_hint': '🔎 Hãy gõ tên ngay tại đây trong cuộc trò chuyện, ví dụ {example}.',
+    'btn_any_site': '✍️ Trang web bất kỳ',
+    'email_type_prompt': '✍️ Hãy gõ địa chỉ trang web ngay tại đây trong cuộc trò chuyện, ví dụ example.com.',
+    'confirm_short': '⚠️ Bạn cần thêm <b>{amount}</b> để mua.',
+    'menu_promise': '✅ Bạn chỉ trả tiền khi mã đến. Không có mã, không mất phí.',
 }

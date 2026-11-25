@@ -238,4 +238,11 @@ T = {
     'pay_qris_phone': "📱 Bu telefondan mı ödüyorsunuz? Bu resmi kaydedin, banka veya cüzdan uygulamanızı açın, QRIS'i seçin ve resmi galerinizden seçin.",
     # every mailbox of a site
     'email_type_domain': '{n} tür posta kutusu var. Bulmak için adının bir kısmını yazın, örneğin <code>gmail</code>.',
+    # search, any website, the missing money
+    'search_prompt': '🔎 <b>Ara</b>\n\nNumara gereken uygulamanın adını yazın, örneğin <i>TikTok</i> veya <i>Gmail</i>. Bot onu bulur.',
+    'find_hint': '🔎 Şimdi adını buraya, sohbete yazın, örneğin {example}.',
+    'btn_any_site': '✍️ Herhangi bir site',
+    'email_type_prompt': '✍️ Sitenin adresini şimdi buraya, sohbete yazın, örneğin example.com.',
+    'confirm_short': '⚠️ Satın almak için <b>{amount}</b> daha gerekiyor.',
+    'menu_promise': '✅ Yalnızca kodunuz geldiğinde ödersiniz. Kod yoksa ücret yok.',
 }

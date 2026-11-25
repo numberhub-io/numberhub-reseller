@@ -238,4 +238,11 @@ T = {
     'pay_qris_phone': '📱 تدفع من هذا الهاتف؟ احفظ هذه الصورة، افتح تطبيق البنك أو المحفظة، اختر QRIS، ثم اختر الصورة من المعرض.',
     # every mailbox of a site
     'email_type_domain': '{n} نوعًا من صناديق البريد. اكتب جزءًا من الاسم للعثور على أحدها، مثل <code>gmail</code>.',
+    # search, any website, the missing money
+    'search_prompt': '🔎 <b>بحث</b>\n\nاكتب اسم التطبيق الذي تحتاج رقمًا له، مثل <i>TikTok</i> أو <i>Gmail</i>، وسيجده البوت.',
+    'find_hint': '🔎 اكتب الاسم الآن هنا في المحادثة، مثل {example}.',
+    'btn_any_site': '✍️ أي موقع',
+    'email_type_prompt': '✍️ اكتب عنوان الموقع الآن هنا في المحادثة، مثل example.com.',
+    'confirm_short': '⚠️ تحتاج إلى <b>{amount}</b> إضافية لشرائه.',
+    'menu_promise': '✅ تدفع فقط عند وصول الرمز. لا رمز، لا خصم.',
 }

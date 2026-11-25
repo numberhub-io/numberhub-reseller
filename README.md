@@ -120,6 +120,18 @@ A prompt (welcome text, commission, a gateway key and so on) takes your next mes
 
 Your commission is a percentage added on top of NumberHub's price for each country. With a 30% commission, a number NumberHub prices at $0.25 costs your customer $0.33 (rounded up to the cent) and you keep $0.08. The bot uses NumberHub's highest price for that route (`price_max`) as the base, so NumberHub can never charge you more for a sale than the customer paid.
 
+### What a customer sees first
+
+The screens open with what fits every customer, not with a list to scroll:
+
+- **The menu**: 📱 Buy a number and 🔎 Search side by side, then the other products, 🧾 My orders and 💰 Balance, 💳 Add balance, 🌐 Language and 🆘 Support. A customer who has not bought yet reads one line first: they pay only when their code arrives.
+- **The app list**: ❓ Any other app and 🔎 Search in the first row, then the popular apps, then all apps A to Z.
+- **Search**: a button on the menu, the app list, long country lists, the rental lists and the eSIM list. Typing a name always worked; the button says so. On a list, the next text is searched in that list (a country, a rental country, what a rented number is for, an eSIM destination).
+- **Email codes**: the first button is ✍️ Any website; the sites often asked for come under it.
+- **A price the balance does not cover**: the first button adds the missing money (💳 Add $1.00) and the screen says how much is missing. Buy is offered when it can work. The same on every product.
+- **Add balance**: the amounts start at the smallest payment your shop takes ($1, $2, $5, $10, $20, $50).
+- **Rented numbers**: the countries asked for most come first.
+
 ### The way to the first payment
 
 Most people who open a shop bot never pay. Three things work on that:

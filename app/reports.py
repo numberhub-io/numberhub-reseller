@@ -79,7 +79,7 @@ def funnel_lines(f: dict, days: int) -> list[str]:
     if not f.get("since"):
         return []
     start = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).strftime("%Y-%m-%d")
-    note = f", the first six counted since {f['since']}" if f["since"] > start else ""
+    note = f", counted since {f['since']}" if f["since"] > start else ""
     return ["", f"<b>From a visit to a purchase</b> (customers{note})"] + [f"{words}: <b>{f[key]}</b>" for key, words in FUNNEL_WORDS]
 
 

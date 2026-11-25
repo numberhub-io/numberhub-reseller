@@ -238,4 +238,11 @@ T = {
     'pay_qris_phone': "📱 Vous payez depuis ce téléphone ? Enregistrez cette image, ouvrez l'application de votre banque ou portefeuille, choisissez QRIS, puis sélectionnez l'image dans votre galerie.",
     # every mailbox of a site
     'email_type_domain': '{n} types de boîte mail. Tapez une partie du nom pour en trouver une, par exemple <code>gmail</code>.',
+    # search, any website, the missing money
+    'search_prompt': "🔎 <b>Rechercher</b>\n\nTapez le nom de l'application pour laquelle il vous faut un numéro, par exemple <i>TikTok</i> ou <i>Gmail</i>. Le bot la trouve.",
+    'find_hint': '🔎 Tapez un nom maintenant, ici dans la discussion, par exemple {example}.',
+    'btn_any_site': "✍️ N'importe quel site",
+    'email_type_prompt': "✍️ Tapez maintenant l'adresse du site, ici dans la discussion, par exemple example.com.",
+    'confirm_short': "⚠️ Il vous manque <b>{amount}</b> pour l'acheter.",
+    'menu_promise': '✅ Vous ne payez que lorsque votre code arrive. Pas de code, pas de frais.',
 }

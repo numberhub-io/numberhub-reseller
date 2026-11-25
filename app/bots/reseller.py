@@ -74,6 +74,10 @@ class EsimForm(StatesGroup):
     region = State()           # eSIM: the customer may type the name of a destination
 
 
+class RentForm(StatesGroup):
+    find = State()             # rentals: a typed name finds a country, or what the number is for
+
+
 class Context(BaseMiddleware):
     """Loads the reseller and the member for every update; stops paused bots and
     blocked members before any handler runs."""
@@ -137,7 +141,7 @@ def _step_of(event) -> str | None:
     if data.startswith(("e:", "px:", "rn:", "es:")):       # email codes, proxy data, rentals, eSIM
         a = data.split(":", 2)[1] if data.count(":") else ""
         return "buy" if a == "buy" else "price" if a in ("ok", "dom", "pkg") else "browse"
-    if data.startswith(("s:", "sp:", "az:", "n:buy", "n:apps")):
+    if data.startswith(("s:", "sp:", "az:", "n:buy", "n:apps", "n:search")):
         return "browse"
     if data.startswith(("n:deposit", "n:balance", "p:")):
         return "topup"
@@ -176,9 +180,30 @@ def _gap_button(kb, reseller: Reseller, member: Member, lang: str, price) -> boo
     return True
 
 
+def _buy_row(kb, reseller: Reseller | None, member: Member, lang: str, price, label: str, data) -> str:
+    """The action of a price screen. With enough balance: the purchase. Without: the way
+    to the missing money, and the purchase is not offered, because it cannot work.
+    Returns the line that says how much is missing ("" when nothing is).
+
+    Until 2026-11-25 "Buy" came first whatever the balance: a new customer tapped it,
+    got an error, and only then met "Add balance"."""
+    price = Decimal(price)
+    if member.available >= price:
+        kb.button(text=label, callback_data=data)
+        return ""
+    if reseller is None or not _gap_button(kb, reseller, member, lang, price):
+        kb.button(text=t(lang, "btn_topup"), callback_data=Nav(to="balance"))
+    if reseller is not None and getattr(member, "id", None) and member.telegram_id != reseller.owner_id:
+        try:        # counted: this customer saw a price their balance does not cover
+            asyncio.ensure_future(repo.note_step(reseller.id, member.id, "short"))
+        except RuntimeError:
+            pass
+    return t(lang, "confirm_short", amount=money(price - member.available))
+
+
 # The buttons that belong to each form. Anything else ends it.
 _FORM_BUTTONS = {"AdminForm": ("a:", "d:"), "EmailForm": ("e:",), "PayForm": ("p:",), "DepositForm": (),
-                 "EsimForm": ("es:",)}
+                 "EsimForm": ("es:",), "RentForm": ("rn:",)}
 
 
 # An owner's prompt takes the next text this long. The owner's chat fills with notices
@@ -310,9 +335,15 @@ async def menu_screen(reseller: Reseller, member: Member, lang: str, is_owner: b
     title = esc(reseller.bot_title or reseller.bot_username or "our shop")
     head = esc(reseller.welcome_text) if reseller.welcome_text else t(lang, "welcome_default", bot=title)
     text = f"{head}\n\n{t(lang, 'menu_balance', balance=money(member.available))}"
+    if not member.last_service:
+        # Someone who has not bought yet reads how it works before any price.
+        text = f"{head}\n\n{t(lang, 'menu_promise')}\n\n{t(lang, 'menu_balance', balance=money(member.available))}"
     kb = InlineKeyboardBuilder()
     kb.button(text=t(lang, "btn_buy"), callback_data=Nav(to="buy"))
-    sizes = [1]
+    # Search sits at the top. Typing a name always worked, but until 2026-11-25 no button
+    # said so and the menu did not mention it.
+    kb.button(text=t(lang, "btn_search"), callback_data=Nav(to="search"))
+    sizes = [2]
     if selling.email_on(reseller) and await selling.email_sites(reseller):
         kb.button(text=t(lang, "btn_email"), callback_data=Em(a="home"))
         sizes.append(1)
@@ -335,8 +366,15 @@ async def menu_screen(reseller: Reseller, member: Member, lang: str, is_owner: b
         sizes.append(1)
     kb.button(text=t(lang, "btn_orders"), callback_data=Nav(to="orders"))
     kb.button(text=t(lang, "btn_balance"), callback_data=Nav(to="balance"))
+    sizes.append(2)
+    if payments.connected(reseller) or reseller.deposit_info:
+        kb.button(text=t(lang, "btn_topup"), callback_data=Nav(to="deposit"))     # it was two taps away
+        sizes.append(1)
     kb.button(text=t(lang, "btn_language"), callback_data=Nav(to="lang"))
-    sizes += [2, 1]
+    help_url = support_url(reseller)
+    if help_url:
+        kb.button(text=t(lang, "btn_support"), url=help_url)
+    sizes.append(2 if help_url else 1)
     if is_owner:
         kb.button(text="⚙️ Admin panel", callback_data=Adm(a="home"))
         sizes.append(1)
@@ -364,24 +402,37 @@ async def services_screen(reseller: Reseller, lang: str):
     items = await selling.services(reseller)
     have = {s["code"] for s in items}
     kb = InlineKeyboardBuilder()
+    # First what fits every customer: search, and "any other app". "Any other" was the
+    # last of 24 buttons until 2026-11-25 (the platform's owner: "must be first").
+    if ANY_OTHER in have:
+        kb.button(text=t(lang, "btn_any_other"), callback_data=Svc(code=ANY_OTHER, page=0))
+    kb.button(text=t(lang, "btn_search"), callback_data=Nav(to="search"))
+    sizes = [2 if ANY_OTHER in have else 1]
     shown = 0
     for code, _icon, name in POPULAR:
         if code in have:
             kb.button(text=_svc_label(reseller, code, name)[:40], callback_data=Svc(code=code, page=0))
             shown += 1
-    sizes = _pairs(shown)
+    sizes += _pairs(shown)
     if more_popular(items):
         kb.button(text=t(lang, "btn_more_popular"), callback_data=AZ(l="+"))
         sizes.append(1)
     kb.button(text=t(lang, "btn_all_services", n=len(items)), callback_data=AZ())
     sizes.append(1)
-    if ANY_OTHER in have:
-        kb.button(text=t(lang, "btn_any_other"), callback_data=Svc(code=ANY_OTHER, page=0))
-        sizes.append(1)
     kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
     sizes.append(1)
     kb.adjust(*sizes)
     return t(lang, "svc_title"), kb.as_markup()
+
+
+def search_screen(lang: str):
+    """What the Search button opens: what to type, and the two lists for someone who would rather tap."""
+    kb = InlineKeyboardBuilder()
+    kb.button(text=t(lang, "btn_any_other"), callback_data=Svc(code=ANY_OTHER, page=0))
+    kb.button(text=t(lang, "btn_buy"), callback_data=Nav(to="buy"))
+    kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+    kb.adjust(1)
+    return t(lang, "search_prompt"), kb.as_markup()
 
 
 async def az_screen(reseller: Reseller, lang: str, letter: str = "", page: int = 0):
@@ -462,9 +513,13 @@ async def countries_screen(reseller: Reseller, lang: str, code: str, page: int =
         if page < pages - 1:
             kb.button(text="➡️", callback_data=Svc(code=code, page=page + 1))
             nav += 1
+    find = 0
+    if pages > 1:
+        kb.button(text=t(lang, "btn_search"), callback_data=Noop(k="fc"))     # tells them to type a country
+        find = 1
     kb.button(text=t(lang, "btn_back"), callback_data=Nav(to="apps"))
     kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
-    kb.adjust(*([1] * len(chunk)), *([nav] if nav else []), 2)
+    kb.adjust(*([1] * len(chunk)), *([nav] if nav else []), *([1] if find else []), 2)
     text = t(lang, "cty_title", service=esc(name), n=len(rows))
     if any(not r.get("in_stock") for r in chunk):
         text += f"\n<i>{t(lang, 'cty_legend')}</i>"
@@ -492,13 +547,11 @@ async def confirm_screen(reseller: Reseller, member: Member, lang: str, code: st
         text += t(lang, "confirm_queued")
     if note:
         text = f"{note}\n\n{text}"
-    kb.button(text=t(lang, "btn_confirm", price=money(price)),
-              callback_data=Buy(code=code, cc=str(cc), cents=int(price * 100)))
+    short = _buy_row(kb, reseller, member, lang, price, t(lang, "btn_confirm", price=money(price)),
+                     Buy(code=code, cc=str(cc), cents=int(price * 100)))
+    if short:
+        text += "\n\n" + short
     sizes = [1]
-    if member.available < price:
-        if not _gap_button(kb, reseller, member, lang, price):
-            kb.button(text=t(lang, "btn_topup"), callback_data=Nav(to="balance"))
-        sizes.append(1)
     kb.button(text=t(lang, "btn_back"), callback_data=Svc(code=code, page=back_page))
     kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
     sizes.append(2)
@@ -716,13 +769,15 @@ DELIVERY_MARK = {"high": "✅", "low": "⚠️"}
 def email_home_screen(lang: str, sites: list[dict], note: str = ""):
     """Which site sends the code: the most asked for as buttons, or type a name."""
     kb = InlineKeyboardBuilder()
+    # Any website comes first, as a button: many customers tap and never read that they can type.
+    kb.button(text=t(lang, "btn_any_site"), callback_data=Em(a="ask"))
     for i, s in enumerate(sites[:EMAIL_SITES_SHOWN]):
         # A site found by name whose address is a guess shows the address too.
         label = str(s["name"])[:28] if s.get("known", True) else f'{str(s["name"])[:18]} · {s["site"]}'[:40]
         kb.button(text=label, callback_data=Em(a="site", i=i, t=_tok(s["site"])))
     n = len(sites[:EMAIL_SITES_SHOWN])
     kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
-    kb.adjust(*([2] * (n // 2) + ([1] if n % 2 else []) + [1]))
+    kb.adjust(1, *([2] * (n // 2) + ([1] if n % 2 else []) + [1]))
     return ((note + "\n\n" if note else "") + t(lang, "email_pick_site") + "\n" + t(lang, "email_type_any"),
             kb.as_markup())
 
@@ -746,6 +801,8 @@ def email_domains_screen(lang: str, site: dict, rows: list[dict], page: int = 0,
     kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
     kb.adjust(*([1] * len(chunk)), *([nav] if nav else []), 2)
     text = t(lang, "email_pick_domain", site=esc(site["name"]))
+    if not any(r.get("delivery") == "high" for r in rows):
+        text = text.split("✅")[0].rstrip()         # no mailbox has the mark: do not explain it
     if len(rows) > EMAIL_DOMAINS_PAGE:
         text += "\n\n" + t(lang, "email_type_domain", n=len(rows))
     if site.get("typed") or site.get("known") is False:
@@ -755,18 +812,19 @@ def email_domains_screen(lang: str, site: dict, rows: list[dict], page: int = 0,
     return text, kb.as_markup()
 
 
-def email_confirm_screen(member: Member, lang: str, site: dict, row: dict, i: int, note: str = ""):
+def email_confirm_screen(member: Member, lang: str, site: dict, row: dict, i: int, note: str = "",
+                         reseller: Reseller | None = None):
     price = Decimal(row["cents"]) / 100
     kb = InlineKeyboardBuilder()
-    kb.button(text=t(lang, "btn_email_buy", price=money(price)),
-              callback_data=Em(a="buy", i=i, c=int(row["cents"]), t=_tok(site["site"], row["domain"])))
+    short = _buy_row(kb, reseller, member, lang, price, t(lang, "btn_email_buy", price=money(price)),
+                     Em(a="buy", i=i, c=int(row["cents"]), t=_tok(site["site"], row["domain"])))
     # Back to the page of the list this mailbox is on.
     kb.button(text=t(lang, "btn_back"), callback_data=Em(a="doms", i=i // EMAIL_DOMAINS_PAGE, t=_tok(site["site"])))
     kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
     kb.adjust(1, 2)
     text = t(lang, "email_confirm", site=esc(site["name"]), domain=esc(row["domain"]), price=money(price),
              balance=money(member.available))
-    return (note + "\n\n" if note else "") + text, kb.as_markup()
+    return (note + "\n\n" if note else "") + text + ("\n\n" + short if short else ""), kb.as_markup()
 
 
 # ─── proxy data packages ─────────────────────────────────────────────────────
@@ -785,17 +843,17 @@ def proxy_home_screen(lang: str, rows: list[dict]):
     return t(lang, "proxy_pick", days=shown[0]["days"]), kb.as_markup()
 
 
-def proxy_confirm_screen(member: Member, lang: str, row: dict, note: str = ""):
+def proxy_confirm_screen(member: Member, lang: str, row: dict, note: str = "", reseller: Reseller | None = None):
     price = row["member_price"]
     kb = InlineKeyboardBuilder()
-    kb.button(text=t(lang, "btn_proxy_buy", price=money(price)),
-              callback_data=Px(a="buy", g=row["gb"], c=int(price * 100)))
+    short = _buy_row(kb, reseller, member, lang, price, t(lang, "btn_proxy_buy", price=money(price)),
+                     Px(a="buy", g=row["gb"], c=int(price * 100)))
     kb.button(text=t(lang, "btn_back"), callback_data=Px(a="home"))
     kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
     kb.adjust(1, 2)
     text = t(lang, "proxy_confirm", gb=row["gb"], price=money(price), per_gb=money(row["per_gb"]),
              days=row["days"], balance=money(member.available))
-    return (note + "\n\n" if note else "") + text, kb.as_markup()
+    return (note + "\n\n" if note else "") + text + ("\n\n" + short if short else ""), kb.as_markup()
 
 
 # ─── eSIM data plans ─────────────────────────────────────────────────────────
@@ -811,9 +869,11 @@ def esim_home_screen(lang: str, rows: list[dict], page: int = 0, note: str = "",
     pages = 1 if found else max(1, (len(rows) + ESIM_PAGE - 1) // ESIM_PAGE)
     page = max(0, min(page, pages - 1))
     chunk = rows[:ESIM_PAGE] if found else rows[page * ESIM_PAGE:(page + 1) * ESIM_PAGE]
+    if not found:
+        kb.button(text=t(lang, "btn_search"), callback_data=Es(a="find"))
     for r in chunk:
         kb.button(text=f"{r['emoji']} {r['name']}"[:32], callback_data=Es(a="reg", r=r["code"]))
-    sizes = _pairs(len(chunk))
+    sizes = ([] if found else [1]) + _pairs(len(chunk))
     nav = _page_nav(kb, page, pages, lambda p: Es(a="home", p=p))
     if found:
         kb.button(text=t(lang, "btn_back"), callback_data=Es(a="home"))
@@ -854,13 +914,9 @@ def esim_confirm_screen(member: Member, lang: str, place: dict, row: dict, note:
                         reseller: Reseller | None = None):
     price = row["member_price"]
     kb = InlineKeyboardBuilder()
-    kb.button(text=t(lang, "btn_proxy_buy", price=money(price)),          # "✅ Buy · $x", the same words
-              callback_data=Es(a="buy", r=place["code"], k=row["code"], c=int(price * 100)))
+    short = _buy_row(kb, reseller, member, lang, price, t(lang, "btn_proxy_buy", price=money(price)),   # "✅ Buy · $x"
+                     Es(a="buy", r=place["code"], k=row["code"], c=int(price * 100)))
     sizes = [1]
-    if member.available < price:
-        if reseller is None or not _gap_button(kb, reseller, member, lang, price):
-            kb.button(text=t(lang, "btn_topup"), callback_data=Nav(to="balance"))
-        sizes.append(1)
     kb.button(text=t(lang, "btn_back"), callback_data=Es(a="reg", r=place["code"]))
     kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
     kb.adjust(*sizes, 2)
@@ -874,6 +930,8 @@ def esim_confirm_screen(member: Member, lang: str, place: dict, row: dict, note:
         lines.append(t(lang, f"esim_act_{row['active_type']}"))
     lines += ["", t(lang, "esim_confirm_pay", price=money(price), balance=money(member.available)), "",
               t(lang, "esim_confirm_note")]
+    if short:
+        lines += ["", short]
     return (note + "\n\n" if note else "") + "\n".join(lines), kb.as_markup()
 
 
@@ -907,7 +965,7 @@ def rent_home_screen(lang: str, periods: list[dict]):
     return t(lang, "rent_pick_period" if periods else "rent_none"), kb.as_markup()
 
 
-def rent_countries_screen(lang: str, h: int, rows: list[dict], page: int = 0):
+def rent_countries_screen(lang: str, h: int, rows: list[dict], page: int = 0, note: str = ""):
     kb = InlineKeyboardBuilder()
     if not rows:
         kb.button(text=t(lang, "btn_back"), callback_data=Rn(a="home"))
@@ -917,17 +975,19 @@ def rent_countries_screen(lang: str, h: int, rows: list[dict], page: int = 0):
     pages = max(1, (len(rows) + RENT_CTY_PAGE - 1) // RENT_CTY_PAGE)
     page = max(0, min(page, pages - 1))
     chunk = rows[page * RENT_CTY_PAGE:(page + 1) * RENT_CTY_PAGE]
+    if pages > 1:
+        kb.button(text=t(lang, "btn_search"), callback_data=Rn(a="find", h=h))
     for r in chunk:
         kb.button(text=f"{r['emoji']} {r['name']}"[:32], callback_data=Rn(a="svc", h=h, cc=r["country"]))
-    sizes = _pairs(len(chunk))
+    sizes = ([1] if pages > 1 else []) + _pairs(len(chunk))
     nav = _page_nav(kb, page, pages, lambda p: Rn(a="cty", h=h, p=p))
     kb.button(text=t(lang, "btn_back"), callback_data=Rn(a="home"))
     kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
     kb.adjust(*sizes, *([nav] if nav else []), 2)
-    return t(lang, "rent_pick_country", period=rent_period(lang, h)), kb.as_markup()
+    return (note + "\n\n" if note else "") + t(lang, "rent_pick_country", period=rent_period(lang, h)), kb.as_markup()
 
 
-def rent_services_screen(lang: str, h: int, place: dict, rows: list[dict], page: int = 0):
+def rent_services_screen(lang: str, h: int, place: dict, rows: list[dict], page: int = 0, note: str = ""):
     """What the number is for, each with the shop's price for the whole period."""
     kb = InlineKeyboardBuilder()
     cc = place["country"]
@@ -943,10 +1003,15 @@ def rent_services_screen(lang: str, h: int, place: dict, rows: list[dict], page:
         kb.button(text=f"{rent_service_label(lang, r['code'], r['name'])} · {money(r['member_price'])}"[:60],
                   callback_data=Rn(a="ok", h=h, cc=cc, s=r["code"]))
     nav = _page_nav(kb, page, pages, lambda p: Rn(a="svc", h=h, cc=cc, p=p))
+    find = 0
+    if pages > 1:
+        kb.button(text=t(lang, "btn_search"), callback_data=Rn(a="find", h=h, cc=cc))
+        find = 1
     kb.button(text=t(lang, "btn_back"), callback_data=Rn(a="cty", h=h))
     kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
-    kb.adjust(*([1] * len(chunk)), *([nav] if nav else []), 2)
-    return (t(lang, "rent_pick_service", flag=place["emoji"], country=esc(place["name"]), period=rent_period(lang, h)),
+    kb.adjust(*([1] * len(chunk)), *([nav] if nav else []), *([1] if find else []), 2)
+    return ((note + "\n\n" if note else "")
+            + t(lang, "rent_pick_service", flag=place["emoji"], country=esc(place["name"]), period=rent_period(lang, h)),
             kb.as_markup())
 
 
@@ -954,20 +1019,16 @@ def rent_confirm_screen(member: Member, lang: str, h: int, place: dict, row: dic
                         reseller: Reseller | None = None):
     price, cc = row["member_price"], place["country"]
     kb = InlineKeyboardBuilder()
-    kb.button(text=t(lang, "btn_rent_buy", price=money(price)),
-              callback_data=Rn(a="buy", h=h, cc=cc, s=row["code"], c=int(price * 100)))
+    short = _buy_row(kb, reseller, member, lang, price, t(lang, "btn_rent_buy", price=money(price)),
+                     Rn(a="buy", h=h, cc=cc, s=row["code"], c=int(price * 100)))
     sizes = [1]
-    if member.available < price:
-        if reseller is None or not _gap_button(kb, reseller, member, lang, price):
-            kb.button(text=t(lang, "btn_topup"), callback_data=Nav(to="balance"))
-        sizes.append(1)
     kb.button(text=t(lang, "btn_back"), callback_data=Rn(a="svc", h=h, cc=cc))
     kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
     kb.adjust(*sizes, 2)
     text = t(lang, "rent_confirm", service=esc(rent_service_label(lang, row["code"], row["name"])), flag=place["emoji"],
              country=esc(place["name"]), period=rent_period(lang, h), price=money(price),
              balance=money(member.available))
-    return (note + "\n\n" if note else "") + text, kb.as_markup()
+    return (note + "\n\n" if note else "") + text + ("\n\n" + short if short else ""), kb.as_markup()
 
 
 def _email_rows(rows: list[dict]) -> list[dict]:
@@ -1034,6 +1095,8 @@ def build_router(reseller_id: int) -> Router:
             await _show(c, *await az_screen(reseller, lang, letter, page))
         elif to in ("buy", "apps"):
             await _show(c, *await services_screen(reseller, lang))
+        elif to == "search":
+            await _show(c, *search_screen(lang))
         elif to == "orders":
             await _show(c, *await orders_screen(member, lang))
         elif to in ("balance", "support"):   # support lives on the balance screen now
@@ -1084,8 +1147,12 @@ def build_router(reseller_id: int) -> Router:
         await c.answer(t(code, "lang_set"))
 
     @r.callback_query(Noop.filter())
-    async def noop(c: CallbackQuery):
-        await c.answer()
+    async def noop(c: CallbackQuery, callback_data: Noop, lang: str):
+        if callback_data.k == "fc":
+            # The Search button of a country list: the list stays, the next text is searched in it.
+            await c.answer(t(lang, "find_hint", example="Indonesia"), show_alert=True)
+        else:
+            await c.answer()
 
     # ── buying ──
     @r.callback_query(SvcPage.filter())
@@ -1215,6 +1282,12 @@ def build_router(reseller_id: int) -> Router:
     async def email(c: CallbackQuery, callback_data: Em, reseller: Reseller, member: Member, lang: str,
                     state: FSMContext):
         a, i = callback_data.a, callback_data.i
+        if a == "ask" and selling.email_on(reseller):
+            # "Any website": the next text is its address.
+            await state.set_state(EmailForm.site)
+            await state.update_data(em_site=None, em_domains=None)
+            await c.answer(t(lang, "email_type_prompt"), show_alert=True)
+            return
         data = await state.get_data()
         sites, site, rows = data.get("em_sites") or [], data.get("em_site"), data.get("em_domains") or []
         made_for = callback_data.t
@@ -1223,7 +1296,7 @@ def build_router(reseller_id: int) -> Router:
         elif a == "doms" and site and made_for == _tok(site["site"]):
             await _email_domains(c, reseller, lang, state, site, page=i)      # i = the page of the list
         elif a == "dom" and site and 0 <= i < len(rows) and made_for == _tok(site["site"], rows[i]["domain"]):
-            await _show(c, *email_confirm_screen(member, lang, site, rows[i], i))
+            await _show(c, *email_confirm_screen(member, lang, site, rows[i], i, reseller=reseller))
             await c.answer()
         elif a == "buy" and site and 0 <= i < len(rows) and made_for == _tok(site["site"], rows[i]["domain"]):
             await _email_buy(c, callback_data, reseller, member, lang, state, site, rows[i])
@@ -1251,7 +1324,7 @@ def build_router(reseller_id: int) -> Router:
                 at = next((n for n, r in enumerate(rows) if r["domain"] == row["domain"]), None)
                 if at is not None:
                     await _show(c, *email_confirm_screen(fresh, lang, site, rows[at], at,
-                                                         t(lang, "err_price_changed", price=money(exc.price))))
+                                                         t(lang, "err_price_changed", price=money(exc.price)), reseller))
                     return
                 exc = SellError("sold_out")
             kb = InlineKeyboardBuilder()
@@ -1326,7 +1399,7 @@ def build_router(reseller_id: int) -> Router:
             return
         row = next((x for x in rows if x["gb"] == callback_data.g), None)
         if callback_data.a == "pkg" and row is not None:
-            await _show(c, *proxy_confirm_screen(member, lang, row))
+            await _show(c, *proxy_confirm_screen(member, lang, row, reseller=reseller))
             await c.answer()
         elif callback_data.a == "buy" and row is not None:
             await _proxy_buy(c, callback_data, reseller, member, lang, row)
@@ -1347,7 +1420,7 @@ def build_router(reseller_id: int) -> Router:
                 now = next((x for x in await selling.proxy_packages(reseller, fresh=True) if x["gb"] == row["gb"]), None)
                 if now is not None:
                     await _show(c, *proxy_confirm_screen(fresh, lang, now,
-                                                         t(lang, "err_price_changed", price=money(exc.price))))
+                                                         t(lang, "err_price_changed", price=money(exc.price)), reseller))
                     return
                 exc = SellError("sold_out")
             kb = InlineKeyboardBuilder()
@@ -1397,6 +1470,10 @@ def build_router(reseller_id: int) -> Router:
             await c.answer(t(lang, "err_paused"), show_alert=True)
             return
         a = callback_data.a
+        if a == "find":
+            await state.set_state(EsimForm.region)
+            await c.answer(t(lang, "find_hint", example="Japan"), show_alert=True)
+            return
         place = next((x for x in regions if x["code"] == callback_data.r), None)
         if a == "home" or place is None:
             await state.clear()
@@ -1493,6 +1570,12 @@ def build_router(reseller_id: int) -> Router:
     @r.callback_query(Rn.filter())
     async def rent_(c: CallbackQuery, callback_data: Rn, reseller: Reseller, member: Member, lang: str,
                     state: FSMContext):
+        if callback_data.a == "find":
+            # The Search button of a rental list: the list stays, the next text is searched in it.
+            await state.set_state(RentForm.find)
+            await state.update_data(rent_h=callback_data.h, rent_cc=callback_data.cc)
+            await c.answer(t(lang, "find_hint", example="WhatsApp" if callback_data.cc else "USA"), show_alert=True)
+            return
         await state.clear()             # a site or an amount being typed is over: no later text is read as one
         periods = await selling.rent_periods(reseller) if selling.rent_on(reseller) else []
         if not periods:
@@ -1507,6 +1590,8 @@ def build_router(reseller_id: int) -> Router:
             places = await selling.rent_countries(reseller, h)
             place = next((x for x in places if x["country"] == cc), None)
             if a == "cty" or place is None:
+                await state.set_state(RentForm.find)         # a typed name finds a country
+                await state.update_data(rent_h=h, rent_cc="")
                 await _show(c, *rent_countries_screen(lang, h, places, callback_data.p))
                 await c.answer()
                 return
@@ -1516,6 +1601,8 @@ def build_router(reseller_id: int) -> Router:
             return
         row = next((x for x in rows if x["code"] == callback_data.s), None)
         if a == "svc" or row is None:
+            await state.set_state(RentForm.find)             # a typed name finds what the number is for
+            await state.update_data(rent_h=h, rent_cc=cc)
             await _show(c, *rent_services_screen(lang, h, place, rows, callback_data.p))
             if a in ("ok", "buy"):      # what they tapped is no longer offered: say so, next to the list
                 await c.answer(t(lang, "rent_unavailable"), show_alert=True)
@@ -1574,6 +1661,28 @@ def build_router(reseller_id: int) -> Router:
             return
         await _show(c, *order_card(await repo.get_member(member.id) or member, order))
         await repo.set_card(order.id, c.message.chat.id, c.message.message_id)
+
+    @r.message(StateFilter(RentForm.find), F.text, ~F.text.startswith("/"))
+    async def rent_typed(m: Message, reseller: Reseller, lang: str, state: FSMContext):
+        """A name typed on a rental list. Until 2026-11-25 it was searched among the apps for
+        one-time numbers, and the 29 countries were in ABC order with USA on the second page."""
+        data = await state.get_data()
+        h, cc = int(data.get("rent_h") or 0), str(data.get("rent_cc") or "")
+        q = " ".join(m.text.split()).casefold()[:40]
+        nothing = t(lang, "svc_none", q=esc(m.text.strip()[:40]))
+        try:
+            places = await selling.rent_countries(reseller, h) if selling.rent_on(reseller) else []
+            place = next((x for x in places if x["country"] == cc), None)
+            if place is None:
+                found = [x for x in places if q and (q in x["name"].casefold() or q == (x["iso"] or "").casefold())]
+                await _show(m, *rent_countries_screen(lang, h, found or places, note="" if found else nothing))
+                return
+            rows = await selling.rent_services(reseller, h, cc)
+            found = [x for x in rows if q and (q in rent_service_label(lang, x["code"], x["name"]).casefold()
+                                               or q == x["code"].casefold())]
+            await _show(m, *rent_services_screen(lang, h, place, found or rows, note="" if found else nothing))
+        except SellError:
+            await m.answer(t(lang, "err_busy"))
 
     # ── orders ──
     @r.callback_query(Ord.filter())

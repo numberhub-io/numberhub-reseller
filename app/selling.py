@@ -1088,6 +1088,7 @@ async def send_esim(bot, reseller: Reseller, member: Member, order: Order) -> bo
 # it from a clock. A cancel that NumberHub confirms inside that time releases the
 # hold, so the customer gets back exactly what they paid.
 RENT_MAX_ACTIVE = 5             # numbers one customer may be renting at once
+RENT_FIRST = ("US", "GB", "DE", "FR", "NL", "CA", "ES", "IT", "ID")     # shown before the other countries
 RENT_SERVICES_MAX = 80          # services listed for one country and period
 RENT_SYNC_SEC = 15              # how often a shop with nothing but running rentals asks for news
 RENT_CANCEL_CONFIRM_SEC = 60    # a cancel seen in the list is believed when it is still there this much later
@@ -1155,6 +1156,9 @@ async def rent_countries(reseller: Reseller, h: int) -> list[dict]:
         iso = str(r.get("flag") or "").upper()
         out.append({"country": str(r["country"])[:8], "name": str(r.get("name") or r["country"])[:60],
                     "iso": iso if len(iso) == 2 and iso.isalpha() else None, "emoji": flag(iso)})
+    # The list comes in ABC order, which put USA on the second page: the countries asked
+    # for most first, then the rest as they came.
+    out.sort(key=lambda r: RENT_FIRST.index(r["iso"]) if r["iso"] in RENT_FIRST else len(RENT_FIRST))
     _rent_countries[key] = (time.monotonic(), out)
     return out
 

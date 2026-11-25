@@ -247,4 +247,11 @@ T = {
     'pay_qris_phone': '📱 Paying on this phone? Save this picture, open your bank or wallet app, choose QRIS, and pick the picture from your gallery.',
     # every mailbox of a site
     'email_type_domain': '{n} kinds of mailbox. Type part of a name to find one, for example <code>gmail</code>.',
+    # search, any website, the missing money
+    'search_prompt': '🔎 <b>Search</b>\n\nType the name of the app you need a number for, for example <i>TikTok</i> or <i>Gmail</i>. The bot finds it.',
+    'find_hint': '🔎 Type a name now, here in the chat, for example {example}.',
+    'btn_any_site': '✍️ Any website',
+    'email_type_prompt': "✍️ Type the website's address now, here in the chat, for example example.com.",
+    'confirm_short': '⚠️ You need <b>{amount}</b> more to buy it.',
+    'menu_promise': '✅ You pay only when your code arrives. No code, no charge.',
 }

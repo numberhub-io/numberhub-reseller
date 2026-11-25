@@ -427,7 +427,9 @@ async def test_bot_flow():
     await dp.feed_update(bot, tap(ALICE + 100, button(session, "USA")))
     check("confirm screen: price, refund promise, balance", "$0.39" in session.last_text()
           and "automatic refund" in session.last_text() and button(session, "Add balance"))
-    await dp.feed_update(bot, tap(ALICE + 100, button(session, "Buy ·")))
+    check("...and with nothing on the balance it offers no Buy that cannot work", button(session, "Buy ·") is None
+          and "more to buy it" in session.last_text())
+    await dp.feed_update(bot, tap(ALICE + 100, "b:wa:187:39"))          # a Buy button from an older message
     check("no credit -> told how to top up with their ID", "Not enough balance" in session.last_text()
           and str(ALICE + 100) in session.last_text())
     mem = await repo.find_member(r.id, str(ALICE + 100))
@@ -2347,7 +2349,8 @@ async def test_email_codes():
     check("the menu has an Email codes button", button(session, "Email codes") == Em(a="home").pack())
     await dp.feed_update(bot, tap(cust, button(session, "Email codes")))
     check("the customer is asked which site sends the code, with the most asked for as buttons",
-          "Type the website's address" in session.last_text() and labels()[:3] == ["OpenAI", "Google", "Reddit"],
+          "Type the website's address" in session.last_text()
+          and labels()[:4] == ["✍️ Any website", "OpenAI", "Google", "Reddit"],
           str(labels()))
     await dp.feed_update(bot, tap(cust, button(session, "OpenAI")))
     check("the mail domains in stock, the reliable first, at the shop's price (NumberHub's plus 30%, rounded up)",
@@ -2447,7 +2450,8 @@ async def test_email_codes():
     await dp.feed_update(bot, msg(cust, "/start"))
     await dp.feed_update(bot, tap(cust, button(session, "Email codes")))
     await dp.feed_update(bot, msg(cust, "redd"))
-    check("typing a name finds the site", labels()[0] == "Reddit" and "Type the website's address" in session.last_text())
+    check("typing a name finds the site", labels()[:2] == ["✍️ Any website", "Reddit"]
+          and "Type the website's address" in session.last_text())
     await dp.feed_update(bot, tap(cust, button(session, "Reddit")))
     check("a site with no mailbox in stock says so", "No mailbox is available for <b>Reddit</b>" in session.last_text())
     await dp.feed_update(bot, tap(cust, button(session, "Back")))
@@ -3114,7 +3118,7 @@ async def test_small_topups_and_rupiah():
     await dp.feed_update(bot, msg(OWNER, "2"))
     r = await repo.get_reseller(r.id)
     check("the owner's own minimum counts when it is higher", payments.limits(r) == (D("2.00"), D("60.60"))
-          and payments.presets(r) == [D("5"), D("10"), D("20"), D("50")])
+          and payments.presets(r) == [D("2"), D("5"), D("10"), D("20"), D("50")])
     made, text = await typed(9922, "Rp 20.000")
     check("…for rupiah too: Rp 20.000 is $1.21, under $2", made == 0 and "from <b>Rp 33.000</b>" in text, text[:200])
     await dp.feed_update(bot, msg(OWNER, "/admin"))
@@ -3198,8 +3202,8 @@ async def test_small_topups_and_rupiah():
         return first, prompt, session2.last_text()
 
     first, prompt, answer = await typed2(9940, "13,000")
-    check("crypto only: from $1.00, the old amounts, no rupiah anywhere",
-          payments.limits(r2) == (D("1"), D("1000")) and payments.presets(r2) == [D("5"), D("10"), D("20"), D("50")]
+    check("crypto only: from $1.00, amounts from the minimum up, no rupiah anywhere",
+          payments.limits(r2) == (D("1"), D("1000")) and payments.presets(r2) == [D("1"), D("2"), D("5"), D("10"), D("20"), D("50")]
           and "You pay by crypto" in first and "Amounts are in US dollars ($)." in first and "Rp" not in first
           and "Minimum: <b>$1.00</b>" in first and "rupiah" not in prompt)
     check("'13,000' is not $13.00 here either: asked again, no link made",
@@ -3872,7 +3876,7 @@ async def test_rentals():
           labels()[:4] == ["1 day", "3 days", "1 week", "1 month"] and "For how long?" in session.last_text(), str(labels()))
     await dp.feed_update(bot, tap(cust, button(session, "1 day")))
     check("then the countries of that period",
-          labels()[:2] == ["🇬🇧 United Kingdom", "🇺🇸 USA"] and "Rent for 1 day" in session.last_text(), str(labels()))
+          labels()[:2] == ["🇺🇸 USA", "🇬🇧 United Kingdom"] and "Rent for 1 day" in session.last_text(), str(labels()))
     await dp.feed_update(bot, tap(cust, button(session, "USA")))
     check("then what the number is for, at the shop's price: every SMS first, any other, the popular app, the rest; "
           "what is sold out is not listed",
@@ -4284,7 +4288,7 @@ async def test_esim():
     check("the menu has an eSIM data button", button(session, "eSIM data") == Es(a="home").pack())
     await dp.feed_update(bot, tap(cust, button(session, "eSIM data")))
     check("the destinations in the wallet's order, with flags; a group of countries gets a globe",
-          labels()[:4] == ["🇺🇸 United States", "🇮🇩 Indonesia", "🌍 Europe (42 areas)", "🇦🇹 Austria"]
+          labels()[:5] == ["🔎 Search", "🇺🇸 United States", "🇮🇩 Indonesia", "🌍 Europe (42 areas)", "🇦🇹 Austria"]
           and "type its name" in session.last_text(), str(labels()))
     await dp.feed_update(bot, msg(cust, "euro"))
     check("a typed name finds the destination, with a way back to all of them",
@@ -4292,7 +4296,7 @@ async def test_esim():
           str(labels()))
     await dp.feed_update(bot, msg(cust, "atlantis"))
     check("a name that matches nothing says so and shows the list again",
-          "Nothing found" in session.last_text() and labels()[0] == "🇺🇸 United States")
+          "Nothing found" in session.last_text() and labels()[:2] == ["🔎 Search", "🇺🇸 United States"])
     await dp.feed_update(bot, tap(cust, Es(a="reg", r="ID").pack()))
     check("a destination with no plan says so, with a way back",
           "No plans for <b>Indonesia</b>" in session.last_text() and button(session, "Back") == Es(a="home").pack())
@@ -4831,7 +4835,7 @@ async def test_review_defects_2026_11_25():
     await member(r, broke, "0")
     await dp.feed_update(bot, tap(broke, Svc(code="wa", page=0).pack()))
     await dp.feed_update(bot, tap(broke, Cty(code="wa", cc="187").pack()))
-    await dp.feed_update(bot, tap(broke, button(session, "Buy")))
+    await dp.feed_update(bot, tap(broke, "b:wa:187:39"))          # a Buy button from an older message
     text = session.last_text()
     check("a shop paid by QRIS only, a number the balance does not cover: told to top up, with no word of crypto",
           "Not enough balance: the price is" in text and "Add balance below to top up." in text
@@ -5063,7 +5067,7 @@ async def test_first_payment_path():
     await dp.feed_update(bot, tap(cust, Cty(code="wa", cc="187").pack()))
     check("a number at $0.39 with $0.20 on the balance: the button adds the smallest payment the shop takes",
           button(session, "Add $1.00") == Pay(a="amt", c=100).pack() and "💳 Add balance" not in labels(), str(labels()))
-    await dp.feed_update(bot, tap(cust, button(session, "Buy")))
+    await dp.feed_update(bot, tap(cust, "b:wa:187:39"))          # a Buy button from an older message
     check("after a purchase the balance did not cover: the same one tap, and the way back to the number",
           "Not enough balance" in session.last_text() and button(session, "Add $1.00") == Pay(a="amt", c=100).pack()
           and button(session, "Back") == Cty(code="wa", cc="187").pack(), str(labels()))
@@ -5304,6 +5308,172 @@ async def test_every_mailbox():
     runtime._bots.pop(r.id, None)
 
 
+async def test_ux_review_batch():
+    """The full UX review of 2026-11-25. The platform's owner: "any other option must be
+    first" (for one-time numbers and for email), "0 search", and price screens whose first
+    button could not work. What was found is in the checks below, one by one."""
+    print("UX review: any other and search first, price screens that lead with what works")
+    import datetime as _dt
+    from aiogram.methods import SendMessage
+    from app import payments, reports
+    from app.bots.callbacks import Buy, Cty, Em, Es, Nav, Noop, Pay, Px, Rn, Svc
+    from app.bots.reseller import build_router
+    from app.db import session_factory
+    from app.models import Payment
+    from fakes import FakeGateways
+    own = 5211
+    gw = FakeGateways()
+    gw.next = 17000
+    payments.TRANSPORT = gw.transport()
+    api = FakeNumberHub()
+    api.countries["wa"] = api.countries["wa"] + [dict(api.countries["wa"][0], country=str(700 + i), name=f"Land {i:02d}", flag="")
+                                                 for i in range(20)]
+    r = await make_reseller(api, owner=own, bot_id=88861)
+    await payments.set_builtin(r.id, False)
+    await payments.connect(r.id, payments.OXAPAY, gw.ox_key)
+    await repo.update_reseller(r.id, support_contact="@shop_help")
+    session = FakeSession(bot_id=88861)
+    bot = fake_bot(session)
+    runtime._bots[r.id] = bot
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(build_router(r.id))
+    shop = lambda: repo.get_reseller(r.id)     # noqa: E731
+    rows_ = lambda: [[b.text for b in row] for row in (session.last_markup().inline_keyboard if session.last_markup() else [])]  # noqa: E731
+    labels = lambda: [x for row in rows_() for x in row]     # noqa: E731
+    urls = lambda: [b.url for row in session.last_markup().inline_keyboard for b in row if b.url]     # noqa: E731
+    new, rich = 99201, 99202
+    await member(r, new, "0")
+    m_rich = await member(r, rich, "20.00")
+
+    # ── the menu ──
+    await dp.feed_update(bot, msg(new, "/start"))
+    check("the menu opens with Buy a number and Search side by side",
+          rows_()[0] == ["📱 Buy a number", "🔎 Search"] and button(session, "Search") == Nav(to="search").pack(), str(rows_()[:2]))
+    check("Add balance is on the menu (it was two taps away), and Support with it",
+          button(session, "Add balance") == Nav(to="deposit").pack() and "🆘 Support" in labels()
+          and urls() == ["https://t.me/shop_help"], str(labels()))
+    check("a customer who has not bought yet reads how it works before any price",
+          "You pay only when your code arrives" in session.last_text())
+
+    # ── the app list ──
+    await dp.feed_update(bot, tap(new, Nav(to="buy").pack()))
+    check("the app list opens with Any other app and Search (Any other was the last of 24 buttons)",
+          rows_()[0] == ["❓ Any other app", "🔎 Search"] and "WhatsApp" in labels()[2], str(rows_()[:2]))
+    await dp.feed_update(bot, tap(new, button(session, "Search")))
+    check("Search says what to type, and offers Any other app for an app with no name in the list",
+          "Type the name of the app" in session.last_text() and labels()[0] == "❓ Any other app", session.last_text()[:80])
+    await dp.feed_update(bot, msg(new, "whats"))
+    check("...and the name typed after it is found", "Results for “whats”" in session.last_text() and any("WhatsApp" in x for x in labels()))
+
+    # ── a country list ──
+    await dp.feed_update(bot, tap(new, Svc(code="wa", page=0).pack()))
+    check("a country list longer than one page has a Search button", button(session, "Search") == Noop(k="fc").pack())
+    await dp.feed_update(bot, tap(new, button(session, "Search")))
+    check("it says to type a country's name now, and the list stays on the screen",
+          "Type a name now" in session.alerts()[-1] and "Indonesia" in session.alerts()[-1])
+    await dp.feed_update(bot, msg(new, "indo"))
+    check("...and the name typed after it finds a country of that app", "countries for “indo”" in session.last_text())
+    await dp.feed_update(bot, tap(new, Svc(code="tg", page=0).pack()))
+    check("a list of one page needs none", button(session, "Search") is None)
+
+    # ── the price screen ──
+    await dp.feed_update(bot, tap(new, Cty(code="wa", cc="187").pack()))
+    check("a price the balance does not cover: no Buy button that cannot work; the first button adds the money, "
+          "and the screen says how much is missing",
+          rows_()[0] == ["💳 Add $1.00"] and not any(x.startswith("✅ Buy") for x in labels())
+          and "You need <b>$0.39</b> more to buy it." in session.last_text(), f"{rows_()} {session.last_text()[-60:]}")
+    await dp.feed_update(bot, tap(rich, Cty(code="wa", cc="187").pack()))
+    check("with enough balance: Buy is the one action, nothing is said to be missing",
+          rows_()[0] == ["✅ Buy · $0.39"] and "You need" not in session.last_text() and not any("Add $" in x for x in labels()))
+    await dp.feed_update(bot, tap(new, Buy(code="wa", cc="187", cents=39).pack()))
+    check("a Buy button from an older message still answers honestly when the balance is short",
+          "Not enough balance" in session.last_text() and button(session, "Add $1.00") == Pay(a="amt", c=100).pack()
+          and not api.orders)
+
+    # ── adding balance ──
+    await dp.feed_update(bot, tap(new, Nav(to="deposit").pack()))
+    check("the amounts offered start at the smallest payment ($1), not at $5",
+          labels()[:6] == ["$1.00", "$2.00", "$5.00", "$10.00", "$20.00", "$50.00"], str(labels()))
+
+    # ── email codes ──
+    await dp.feed_update(bot, tap(new, Em(a="home").pack()))
+    check("Email codes opens with a button for any website",
+          rows_()[0] == ["✍️ Any website"] and button(session, "Any website") == Em(a="ask").pack(), str(rows_()[:2]))
+    await dp.feed_update(bot, tap(new, button(session, "Any website")))
+    check("it asks for the website's address", "Type the website's address now" in session.alerts()[-1])
+    api.email_domains["any-site.io"] = [{"domain": "gmail.com", "price": "0.04", "in_stock": True, "delivery": None}]
+    await dp.feed_update(bot, msg(new, "any-site.io"))
+    check("...and the address typed after it opens its mailboxes; no ✅ is explained when no mailbox has one",
+          "any-site.io" in session.last_text() and any("gmail.com" in x for x in labels()) and "✅" not in session.last_text(),
+          session.last_text()[:120])
+    await dp.feed_update(bot, tap(new, button(session, "gmail.com")))
+    check("the email price screen with a short balance offers the money, as the others do (it had no such button)",
+          rows_()[0] == ["💳 Add $1.00"] and "You need <b>$0.06</b> more" in session.last_text(), f"{rows_()} {session.last_text()[-50:]}")
+    await dp.feed_update(bot, tap(new, Em(a="home").pack()))
+    await dp.feed_update(bot, tap(new, button(session, "OpenAI")))
+    check("a site with a mailbox that delivers best keeps the line about ✅", "✅ marks" in session.last_text())
+
+    # ── proxy data ──
+    await dp.feed_update(bot, tap(new, Px(a="pkg", g=1).pack()))
+    check("the proxy price screen with a short balance offers the money too",
+          rows_()[0] == ["💳 Add $1.00"] and "You need <b>$0.64</b> more" in session.last_text(), f"{rows_()} {session.last_text()[-50:]}")
+    await dp.feed_update(bot, tap(rich, Px(a="pkg", g=1).pack()))
+    check("...and with enough balance it is Buy", rows_()[0] == ["✅ Buy · $0.64"])
+
+    # ── rentals ──
+    await dp.feed_update(bot, tap(new, Rn(a="cty", h=24).pack()))
+    check("rental countries: the ones asked for most come first (USA was after United Kingdom, in ABC order)",
+          labels()[:2] == ["🇺🇸 USA", "🇬🇧 United Kingdom"], str(labels()))
+    await dp.feed_update(bot, msg(new, "king"))
+    check("a name typed on the rental countries finds a country (it was searched among apps for one-time numbers)",
+          labels()[0] == "🇬🇧 United Kingdom" and not any("USA" in x for x in labels()) and "Rent for 1 day" in session.last_text(),
+          str(labels()))
+    await dp.feed_update(bot, msg(new, "zzzz"))
+    check("a name that matches nothing says so and shows every country again",
+          "Nothing found for “zzzz”" in session.last_text() and labels()[:2] == ["🇺🇸 USA", "🇬🇧 United Kingdom"])
+    await dp.feed_update(bot, tap(new, Rn(a="svc", h=24, cc="187").pack()))
+    await dp.feed_update(bot, msg(new, "whats"))
+    check("a name typed on what the number is for finds it", [x for x in labels() if "$" in x] == ["WhatsApp · $1.95"], str(labels()))
+    await dp.feed_update(bot, tap(new, Rn(a="find", h=24, cc="187").pack()))
+    await dp.feed_update(bot, msg(new, "zeta"))
+    check("the Search button of a rental list says to type, and the next name is searched in that list",
+          "Type a name now" in session.alerts()[-1] and [x for x in labels() if "$" in x] == ["Zeta · $1.04"], str(labels()))
+
+    # ── eSIM ──
+    await dp.feed_update(bot, tap(new, Es(a="home").pack()))
+    check("the eSIM list opens with Search", rows_()[0] == ["🔎 Search"] and button(session, "Search") == Es(a="find").pack())
+    await dp.feed_update(bot, tap(new, button(session, "Search")))
+    await dp.feed_update(bot, msg(new, "euro"))
+    check("it says to type a destination, and the name typed after it is found",
+          "Japan" in session.alerts()[-1] and labels()[0] == "🌍 Europe (42 areas)", str(labels()[:2]))
+
+    # ── the owner's side ──
+    await member(r, own, "0")
+    await dp.feed_update(bot, msg(own, "/admin"))
+    text = session.last_text()
+    check("the admin panel names the products on one line instead of four paragraphs",
+          "📧 Email codes: <b>on</b> · 🌐 Proxy data: <b>on</b> · 🌍 eSIM: <b>on</b> · 📅 Rented numbers: <b>on</b>" in text
+          and len(text) < 950, f"{len(text)}")
+    async with session_factory() as s:
+        s.add(Payment(reseller_id=r.id, member_id=m_rich.id, provider=payments.OXAPAY, invoice_id="old-17000", amount=D("5"),
+                      status=Payment.EXPIRED, created_at=_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=10)))
+        await s.commit()
+    f = await repo.funnel(await shop(), 30)
+    today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
+    check("the nine steps are for the same days: a payment opened before the steps were counted is left out "
+          "(it stood beside 'Opened the bot: 1')",
+          f["since"] == today and f["pay"] == 0 and f["open"] == 2 and f["short"] == 1, str(f))
+    check("...and the statistics say since when", f"counted since {today}" in "\n".join(reports.funnel_lines(f, 30))
+          and "first six" not in "\n".join(reports.funnel_lines(f, 30)))
+    keys = ("btn_search", "search_prompt", "find_hint", "btn_any_site", "email_type_prompt", "confirm_short", "menu_promise")
+    missing = [(lang, k) for lang in LANGS for k in keys if k not in _table(lang)]
+    same = [(lang, k) for lang in LANGS if lang != "en" for k in keys if _table(lang).get(k) == _table("en")[k]]
+    check("the new texts exist in all 14 languages, translated", not missing and not same, f"{missing[:3]} {same[:3]}")
+    told = [x.text or "" for x in session.requests if isinstance(x, SendMessage) and x.chat_id == new]
+    check("no screen of this walk showed a raw text key", not any(k in " ".join(session.texts() + told) for k in keys))
+    runtime._bots.pop(r.id, None)
+
+
 async def main():
     await init_db()
     test_prices()
@@ -5313,7 +5483,7 @@ async def main():
                test_review_sync, test_review_bots, test_review_runtime, test_small_topups_and_rupiah,
                test_proxy_data, test_rentals, test_esim, test_review_2026_11_24, test_number_cycling,
                test_review_defects_2026_11_25, test_commission_per_product, test_first_payment_path,
-               test_every_mailbox,
+               test_every_mailbox, test_ux_review_batch,
                test_back_to_the_purchase,
                test_cards_render):
         try:

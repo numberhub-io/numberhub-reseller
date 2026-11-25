@@ -137,21 +137,13 @@ async def dashboard(reseller: Reseller):
         f"🏦 NumberHub wallet: {wallet}",
         f"🔗 Share your bot: <code>t.me/{esc(reseller.bot_username)}</code>",
         "",
-        "📧 Email codes: <b>" + ("on" if getattr(reseller, "email_on", None) != 0 else "off") + "</b> · a mailbox "
-        "for one verification mail, your commission on top, paid only when the mail arrives",
-        "🌐 Proxy data: <b>" + ("on" if getattr(reseller, "proxy_on", None) != 0 else "off") + "</b> · data "
-        "packages in GB, your commission on top, paid from your NumberHub wallet when a customer buys one",
-        "🌍 eSIM: <b>" + ("on" if getattr(reseller, "esim_on", None) != 0 else "off") + "</b> · mobile data "
-        "plans by destination, your commission on top, paid from your NumberHub wallet when a customer "
-        "buys one and charged to them when it is delivered",
-        "📅 Rented numbers: <b>" + ("on" if getattr(reseller, "rent_on", None) != 0 else "off") + "</b> · a number "
-        "for 1 day to 1 month with every SMS, your commission on top, paid from your NumberHub wallet when a "
-        "customer rents one. With no SMS yet they can give it back between the 2nd and the 20th minute: then "
-        "your wallet and the customer both get the money back",
+        # One line for what the shop sells. Until 2026-11-25 each product had a paragraph
+        # here, 1,500 characters on every visit; what each one is says its switch when tapped.
+        " · ".join(f"{label}: <b>{'on' if getattr(reseller, field, None) != 0 else 'off'}</b>" for label, field in
+                   (("📧 Email codes", "email_on"), ("🌐 Proxy data", "proxy_on"), ("🌍 eSIM", "esim_on"),
+                    ("📅 Rented numbers", "rent_on"))),
         "",
-        "<i>Customers add balance by themselves in crypto (💳 Payments): built in, it lands in your "
-        "NumberHub wallet; or through your own OxaPay or @CryptoBot; or they pay you your way and you add "
-        "it here. Each number is paid from your NumberHub wallet only when its code arrives.</i>",
+        "<i>Every sale is paid from your NumberHub wallet. Customers add balance by themselves: 💳 Payments.</i>",
     ])
     kb = InlineKeyboardBuilder()
     kb.button(text="📊 Statistics", callback_data=Adm(a="stats"))

@@ -238,4 +238,11 @@ T = {
     'pay_qris_phone': '📱 Bayar dari HP ini? Simpan gambar ini, buka aplikasi bank atau e-wallet Anda, pilih QRIS, lalu pilih gambar ini dari galeri.',
     # every mailbox of a site
     'email_type_domain': 'Ada {n} jenis kotak surat. Ketik sebagian namanya untuk mencari, misalnya <code>gmail</code>.',
+    # search, any website, the missing money
+    'search_prompt': '🔎 <b>Cari</b>\n\nKetik nama aplikasi yang butuh nomor, misalnya <i>TikTok</i> atau <i>Gmail</i>. Bot akan mencarinya.',
+    'find_hint': '🔎 Ketik namanya sekarang di chat ini, misalnya {example}.',
+    'btn_any_site': '✍️ Situs apa pun',
+    'email_type_prompt': '✍️ Ketik alamat situsnya sekarang di chat ini, misalnya example.com.',
+    'confirm_short': '⚠️ Saldo Anda kurang <b>{amount}</b> untuk membelinya.',
+    'menu_promise': '✅ Anda hanya membayar saat kode masuk. Tidak ada kode, tidak ada biaya.',
 }

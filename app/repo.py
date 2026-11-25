@@ -721,6 +721,10 @@ async def funnel(reseller: Reseller | None, days: int = 30) -> dict:
         out = {k: 0 for k in STEPS}
         out.update({step: n for step, n in (await s.execute(q)).all() if step in out})
         out["since"] = await s.scalar(first)
+        if out["since"] and out["since"] > day:
+            # The tapped steps are younger than the days asked for: the money steps are
+            # read for the same days, or "opened: 1 ... started a payment: 9" stood side by side.
+            since = dt.datetime.strptime(out["since"], "%Y-%m-%d").replace(tzinfo=dt.timezone.utc)
 
         def mine(q_, model):
             q_ = q_.where(model.member_id.not_in(owners))

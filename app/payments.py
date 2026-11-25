@@ -134,7 +134,9 @@ def _ask_due(payment_id: int, every: float) -> bool:
     _last_ask[payment_id] = now
     return True
 MAX_AMOUNT = Decimal("1000")
-PRESETS = (Decimal("5"), Decimal("10"), Decimal("20"), Decimal("50"))
+# From the smallest payment up: the shops' numbers cost $0.15 to $2, and until 2026-11-25
+# the first amount offered was $5 (customers tried to pay $1 to $5 in 22 of 26 attempts).
+PRESETS = (Decimal("1"), Decimal("2"), Decimal("5"), Decimal("10"), Decimal("20"), Decimal("50"))
 # A shop that can take less than a dollar (QRIS) offers small amounts first: its
 # customers buy numbers that cost cents (a shop owner asked for $0.50, 2026-11-24).
 PRESETS_SMALL = (Decimal("0.5"), Decimal("1"), Decimal("2"), Decimal("5"), Decimal("10"), Decimal("20"),

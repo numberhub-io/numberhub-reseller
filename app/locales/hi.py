@@ -238,4 +238,11 @@ T = {
     'pay_qris_phone': '📱 इसी फ़ोन से भुगतान कर रहे हैं? यह तस्वीर सेव करें, अपना बैंक या वॉलेट ऐप खोलें, QRIS चुनें और गैलरी से यह तस्वीर चुनें।',
     # every mailbox of a site
     'email_type_domain': '{n} तरह के मेलबॉक्स। ढूँढने के लिए नाम का कोई हिस्सा लिखें, जैसे <code>gmail</code>।',
+    # search, any website, the missing money
+    'search_prompt': '🔎 <b>खोजें</b>\n\nजिस ऐप के लिए नंबर चाहिए उसका नाम लिखें, जैसे <i>TikTok</i> या <i>Gmail</i>। बॉट उसे ढूँढ देगा।',
+    'find_hint': '🔎 अभी यहीं चैट में नाम लिखें, जैसे {example}।',
+    'btn_any_site': '✍️ कोई भी वेबसाइट',
+    'email_type_prompt': '✍️ अभी यहीं चैट में वेबसाइट का पता लिखें, जैसे example.com।',
+    'confirm_short': '⚠️ इसे खरीदने के लिए <b>{amount}</b> और चाहिए।',
+    'menu_promise': '✅ कोड आने पर ही पैसे कटते हैं। कोड नहीं, तो कोई शुल्क नहीं।',
 }

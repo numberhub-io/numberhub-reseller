@@ -238,4 +238,11 @@ T = {
     'pay_qris_phone': '📱 就在这部手机上付款？请保存这张图片，打开您的银行或钱包应用，选择 QRIS，然后从相册中选取这张图片。',
     # every mailbox of a site
     'email_type_domain': '共有 {n} 种邮箱。输入名称的一部分即可查找，例如 <code>gmail</code>。',
+    # search, any website, the missing money
+    'search_prompt': '🔎 <b>搜索</b>\n\n输入需要号码的应用名称，例如 <i>TikTok</i> 或 <i>Gmail</i>，机器人会帮您找到。',
+    'find_hint': '🔎 现在就在聊天中输入名称，例如 {example}。',
+    'btn_any_site': '✍️ 任何网站',
+    'email_type_prompt': '✍️ 现在就在聊天中输入网址，例如 example.com。',
+    'confirm_short': '⚠️ 购买还差 <b>{amount}</b>。',
+    'menu_promise': '✅ 收到验证码才扣费。没有验证码，不收费。',
 }
