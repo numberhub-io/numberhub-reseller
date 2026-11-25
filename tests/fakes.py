@@ -82,6 +82,23 @@ class FakeNumberHub:
         self.proxy_bodies: list[dict] = []
         self.proxy_usage_down = False                # GET /proxies/{id}/usage answers 502
         self.proxy_down = False                      # every GET /proxies/... answers 503
+        # rented numbers (GET /rent/..., POST /rentals, GET and DELETE /rentals/{id})
+        self.rent_periods = [{"h": 24, "label": "1 day"}, {"h": 72, "label": "3 days"},
+                             {"h": 168, "label": "1 week"}, {"h": 720, "label": "1 month"}]
+        self.rent_places = [{"country": "16", "name": "United Kingdom", "flag": "GB"},
+                            {"country": "187", "name": "USA", "flag": "US"}]
+        self.rent_list = {       # country -> what a number can be rented for (the same price for every period)
+            "187": [{"code": "full", "name": "Any service (all SMS)", "price": "2.00", "in_stock": True, "popular": True},
+                    {"code": "ot", "name": "OT", "price": "1.00", "in_stock": True, "popular": False},
+                    {"code": "zz", "name": "zeta", "price": "0.80", "in_stock": True, "popular": False},
+                    {"code": "wa", "name": "WhatsApp", "price": "1.50", "in_stock": True, "popular": True},
+                    {"code": "tg", "name": "Telegram", "price": "1.20", "in_stock": False, "popular": True}],
+            "16": [{"code": "full", "name": "Any service (all SMS)", "price": "3.00", "in_stock": True, "popular": True}],
+        }
+        self.rent_bodies: list[dict] = []
+        self.rent_down = False                       # the price lists cannot be read: 503 rent_unavailable
+        self.rent_buy_down = False                   # ...at the purchase itself, before anything is bought
+        self.rent_refuse_cancel = False              # the number's source refuses a cancel: ok false, still running
         # deposits into the wallet (POST /topups, GET /topups/{id})
         self.topups: dict[int, dict] = {}
         self.next_topup = 500
@@ -94,7 +111,8 @@ class FakeNumberHub:
     def _scope(self, method: str, path: str) -> str:
         if path == "/balance":
             return "wallet:read"
-        if path in ("/services", "/countries") or path.startswith("/email/") or path.startswith("/proxy/"):
+        if (path in ("/services", "/countries") or path.startswith("/email/") or path.startswith("/proxy/")
+                or path.startswith("/rent/")):
             return "catalog:read"
         if path.startswith("/topups"):
             return "orders:write" if method == "POST" else "wallet:read"
@@ -184,7 +202,15 @@ class FakeNumberHub:
             self.held -= Decimal(o["price"])
 
     def public(self, o: dict) -> dict:
-        return {k: v for k, v in o.items() if not k.startswith("_")}
+        out = {k: v for k, v in o.items() if not k.startswith("_")}
+        if o.get("kind") == "rent":
+            # Every SMS, and from when until when a cancel is refunded (empty once it is not).
+            refundable = (o["status"] in ("waiting", "received") and not o["_messages"]
+                          and dt.datetime.now(UTC) <= o["_start"] + self.REFUND_UNTIL)
+            out.update(messages=[dict(m) for m in o["_messages"]],
+                       refund_from=iso(o["_start"] + self.REFUND_FROM) if refundable else None,
+                       refund_until=iso(o["_start"] + self.REFUND_UNTIL) if refundable else None)
+        return out
 
     def email_public(self, o: dict) -> dict:
         """GET /emails/{id}: the order plus its `email` block."""
@@ -231,7 +257,7 @@ class FakeNumberHub:
         if request.method == "GET" and path == "/countries":
             svc = request.url.params.get("service")
             return self._json(200, {"service": svc, "countries": self.countries.get(svc, [])})
-        if request.method == "POST" and path in ("/numbers", "/emails", "/proxies"):
+        if request.method == "POST" and path in ("/numbers", "/emails", "/proxies", "/rentals"):
             return self._buy(request)
         if request.method == "GET" and path == "/proxy/packages":
             return self._json(200, {"enabled": self.proxy_enabled, "validity_days": 30, "currency": "USD",
@@ -278,6 +304,28 @@ class FakeNumberHub:
                     return self._json(200, {"ok": False, "email": self.email_public(o), "reason": "code_received"})
                 self.set_status(o["id"], "canceled")
                 return self._json(200, {"ok": True, "email": self.email_public(o)})
+        if request.method == "GET" and path.startswith("/rent/"):
+            parts = path.split("/")                  # "", "rent", h | "durations", country | "countries", "services"
+            if parts[2] == "durations":
+                return self._json(200, {"durations": self.rent_periods})
+            if not parts[2].isdigit() or int(parts[2]) not in {p["h"] for p in self.rent_periods}:
+                return self._json(404, {"error": "not_found"})
+            if self.rent_down:
+                return self._json(503, {"error": "rent_unavailable"})
+            if len(parts) == 4 and parts[3] == "countries":
+                return self._json(200, {"h": int(parts[2]), "countries": self.rent_places})
+            if len(parts) == 5 and parts[4] == "services":
+                return self._json(200, {"h": int(parts[2]), "country": parts[3],
+                                        "services": self.rent_list.get(parts[3], [])})
+        if path.startswith("/rentals/"):
+            tail = path.split("/")[2]
+            o = self.orders.get(int(tail)) if tail.isdigit() else None
+            if o is None or o.get("kind") != "rent":
+                return self._json(404, {"error": "not_found"})
+            if request.method == "GET":
+                return self._json(200, {"rental": self.public(o)})
+            if request.method == "DELETE":
+                return self._cancel_rental(o)
         if request.method == "POST" and path == "/topups":
             return self._open_topup(request)
         if request.method == "GET" and path == "/topups/methods" and self.has_methods_list:
@@ -298,7 +346,7 @@ class FakeNumberHub:
         if path.startswith("/numbers/"):
             nh_id = int(path.split("/")[2])
             o = self.orders.get(nh_id)
-            if o is None:
+            if o is None or o.get("kind", "sms") != "sms":      # a mailbox or a rental is not a number here
                 return self._json(404, {"error": "not_found"})
             if request.method == "GET":
                 return self._json(200, {"number": self.public(o)})
@@ -386,6 +434,65 @@ class FakeNumberHub:
         self.orders[o["id"]] = o
         return 201, {"proxy": self.proxy_public(o)}
 
+    # ── rented numbers ──
+    REFUND_FROM, REFUND_UNTIL = dt.timedelta(minutes=2), dt.timedelta(minutes=20)
+
+    def rental_sms(self, nh_id: int, text: str, sender: str = "", code: str | None = None) -> None:
+        """An SMS arrives on a rented number (many carry no code)."""
+        o = self.orders[nh_id]
+        o["_messages"].append({"from": sender or None, "text": text, "code": code})
+        if code:
+            o["codes"].append(code)
+            o["code"] = code
+
+    def rental_age(self, nh_id: int, minutes: float) -> None:
+        """Make a rental `minutes` old, to move it into or past its refund time."""
+        self.orders[nh_id]["_start"] = dt.datetime.now(UTC) - dt.timedelta(minutes=minutes)
+
+    def _cancel_rental(self, o: dict) -> httpx.Response:
+        age = dt.datetime.now(UTC) - o["_start"]
+        if age < self.REFUND_FROM:
+            return self._json(409, {"error": "cancel_window_closed", "window_state": "locked"})
+        if age > self.REFUND_UNTIL:
+            return self._json(409, {"error": "cancel_window_closed", "window_state": "closed"})
+        if o["_messages"] or self.rent_refuse_cancel or o["status"] not in ("waiting", "received"):
+            return self._json(200, {"ok": False, "rental": self.public(o)})
+        o["status"] = "canceled"
+        self.wallet += Decimal(o["price"])           # the refund
+        return self._json(200, {"ok": True, "rental": self.public(o)})
+
+    def _do_buy_rental(self, body: dict) -> tuple[int, dict]:
+        self.rent_bodies.append(body)
+        if self.rent_down or self.rent_buy_down:
+            return 503, {"error": "rent_unavailable"}
+        if self.fail_next_buy:
+            code, self.fail_next_buy = self.fail_next_buy, None
+            if code == "price_exceeded":
+                return 409, {"error": code, "price": "2.50", "max_price": body["max_price"]}
+            return (402 if code == "insufficient_funds" else 409), {"error": code}
+        if body.get("h") not in {p["h"] for p in self.rent_periods}:
+            return 400, {"error": "invalid_duration"}
+        country = str(body.get("country"))
+        row = next((r for r in self.rent_list.get(country, []) if r["code"] == body.get("code") and r["in_stock"]), None)
+        if row is None:
+            return 409, {"error": "sold_out"}
+        price = Decimal(row["price"])
+        if Decimal(body["max_price"]) < price:
+            return 409, {"error": "price_exceeded", "price": f"{price:.2f}", "max_price": body["max_price"]}
+        if self.wallet - self.held < price:
+            return 402, {"error": "insufficient_funds"}
+        self.wallet -= price                         # paid when rented: nothing is held
+        self.next_id += 1
+        now = dt.datetime.now(UTC)
+        o = {"id": self.next_id, "kind": "rent", "service": row["code"], "service_name": row["name"], "country": country,
+             "country_name": next((p["name"] for p in self.rent_places if p["country"] == country), country),
+             "phone": f"1777000{self.next_id}", "verification": "sms", "status": "waiting", "status_label": "",
+             "price": f"{price:.2f}", "code": None, "codes": [], "operator": None, "created_at": iso(now),
+             "expires_at": iso(now + dt.timedelta(hours=body["h"])), "cancel_available_at": None,
+             "_charged": True, "_start": now, "_messages": []}
+        self.orders[o["id"]] = o
+        return 201, {"rental": self.public(o)}
+
     def _do_buy_email(self, body: dict) -> tuple[int, dict]:
         self.email_bodies.append(body)
         if self.fail_next_buy:
@@ -417,6 +524,8 @@ class FakeNumberHub:
             return self._do_buy_email(body)
         if "gb" in body:
             return self._do_buy_proxy(body)
+        if "h" in body:
+            return self._do_buy_rental(body)
         if self.fail_next_buy:
             code, self.fail_next_buy = self.fail_next_buy, None
             if code == "insufficient_funds":

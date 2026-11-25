@@ -67,7 +67,7 @@ async def update_reseller(reseller_id: int, **values) -> None:
                "bot_token_enc", "api_key_enc", "api_key_hint", "max_profit", "deposit_info", "deposit_min",
                "oxapay_key_enc", "cryptobot_token_enc", "nh_pay", "daily_report",
                "kasera_key_enc", "kasera_rate", "key_by_owner", "email_on", "kasera_auto", "kasera_extra",
-               "pay_note", "proxy_on"}
+               "pay_note", "proxy_on", "rent_on"}
     values = {k: v for k, v in values.items() if k in allowed}
     if values:
         async with session_factory() as s:
@@ -242,8 +242,21 @@ async def get_order(order_id: int) -> Order | None:
         return await s.get(Order, order_id)
 
 
+def _message(m: dict) -> dict:
+    return {"from": str(m.get("from") or "")[:64], "text": str(m.get("text") or "")[:1200],
+            "code": str(m.get("code") or "")[:32]}
+
+
+def _load_list(raw) -> list:
+    try:
+        rows = json.loads(raw or "[]")
+    except (TypeError, ValueError):
+        return []
+    return rows if isinstance(rows, list) else []
+
+
 def _nh_values(nh: dict) -> dict:
-    return {
+    vals = {
         "nh_id": int(nh["id"]),
         "status": str(nh.get("status") or "pending"),
         "phone": nh.get("phone") or None,
@@ -255,6 +268,16 @@ def _nh_values(nh: dict) -> dict:
         "country_name": nh.get("country_name") or None,
         "updated_at": _now(),
     }
+    if str(nh.get("kind") or "") == "rent":
+        # A rented number: every SMS with its text (`codes` has only the codes read out
+        # of them), and from when until when a cancel gives the money back. NumberHub
+        # sends both times empty once it no longer offers a refund.
+        if isinstance(nh.get("messages"), list):
+            vals["messages"] = json.dumps([_message(m) for m in nh["messages"] if isinstance(m, dict)][:300],
+                                          ensure_ascii=False)
+        vals["cancel_available_at"] = _parse_ts(nh.get("refund_from"))
+        vals["refund_until"] = _parse_ts(nh.get("refund_until"))
+    return vals
 
 
 def _link_values(nh: dict) -> dict:
@@ -328,6 +351,16 @@ async def apply_nh_state(order_id: int, nh: dict) -> tuple[bool, int]:
         got = json.loads(vals["codes"])
         if len(got) < len(have):
             vals["codes"] = json.dumps(have, ensure_ascii=False)
+        count, had = len(json.loads(vals["codes"])), len(have)
+        if cur.kind == "rent":
+            # A rental is counted by its SMS, not by the codes in them; they never shrink.
+            kept = _load_list(cur.messages)
+            if "messages" not in vals or len(_load_list(vals["messages"])) < len(kept):
+                vals["messages"] = json.dumps(kept, ensure_ascii=False)
+            count, had = len(_load_list(vals["messages"])), len(kept)
+        else:
+            vals.pop("messages", None)
+            vals.pop("refund_until", None)
         new = vals["status"]
         if cur.status in Order.TERMINAL or _rank(new) < _rank(cur.status):
             vals["status"] = cur.status
@@ -337,8 +370,8 @@ async def apply_nh_state(order_id: int, nh: dict) -> tuple[bool, int]:
                               .values(**vals))
         await s.commit()
         if res.rowcount != 1:
-            return False, len(have)
-        return changed, len(json.loads(vals["codes"]))
+            return False, had
+        return changed, count
 
 
 async def set_codes_announced(order_id: int, n: int) -> None:
@@ -380,13 +413,16 @@ async def fail_order(order_id: int, reason: str | None = None) -> bool:
         return True
 
 
-async def settle(order_id: int, charge: bool) -> bool:
+async def settle(order_id: int, charge: bool, open_ok: bool = False) -> bool:
     """Close the member side of an ended order exactly once: charge the held price
-    (a code arrived) or release it. Claim and member update commit together."""
+    (a code arrived) or release it. Claim and member update commit together.
+    `open_ok`: a rented number is charged while it is still running (it stays
+    "waiting" for days), as soon as it can no longer be given back."""
     target = Order.CHARGED if charge else Order.RELEASED
+    not_yet = (Order.BUYING,) if open_ok else Order.OPEN
     async with session_factory() as s:
         claim = await s.execute(update(Order).where(Order.id == order_id, Order.settled == Order.UNSETTLED,
-                                                    Order.status.not_in(Order.OPEN))
+                                                    Order.status.not_in(not_yet))
                                 .values(settled=target))
         if claim.rowcount != 1:
             await s.rollback()
@@ -448,6 +484,23 @@ async def proxy_active_count(member_id: int) -> int:
         return int(await s.scalar(q) or 0)
 
 
+async def rent_active_count(member_id: int) -> int:
+    """Numbers this customer is renting now, or is renting at this very moment."""
+    async with session_factory() as s:
+        q = select(func.count()).select_from(Order).where(
+            Order.member_id == member_id, Order.kind == "rent",
+            Order.status.not_in(Order.TERMINAL), or_(Order.expires_at.is_(None), Order.expires_at > _now()))
+        return int(await s.scalar(q) or 0)
+
+
+async def unsettled_rentals(limit: int = 200) -> list[Order]:
+    """Rented numbers whose price is still held: running ones and ended ones."""
+    async with session_factory() as s:
+        q = select(Order).where(Order.kind == "rent", Order.settled == Order.UNSETTLED,
+                                Order.status.not_in((Order.BUYING, Order.FAILED))).limit(limit)
+        return list((await s.execute(q)).scalars())
+
+
 async def unsettled_ended(limit: int = 200) -> list[Order]:
     async with session_factory() as s:
         q = select(Order).where(Order.settled == Order.UNSETTLED, Order.status.not_in(Order.OPEN)).limit(limit)
@@ -478,6 +531,10 @@ async def member_open_count(member_id: int, service: str | None = None, country:
             q = q.where(Order.service == service, Order.country == str(country))
         if kind is not None:
             q = q.where(Order.kind == kind)
+        else:
+            # A rented number stays "waiting" for its whole period. It is not an order
+            # in progress: five rentals must not use up the open orders a customer may have.
+            q = q.where(Order.kind != "rent")
         return (await s.execute(q)).scalar_one()
 
 

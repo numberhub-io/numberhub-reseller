@@ -15,6 +15,7 @@ REPORT_HOUR_UTC = 5
 # NumberHub's answers in words an owner can act on.
 WHY = {
     "insufficient_funds": "your NumberHub wallet was empty",
+    "rent_unavailable": "numbers to rent could not be priced at that moment",
     "sold_out": "no number in stock", "purchase_failed": "no number in stock",
     "price_exceeded": "the price moved while they were buying",
     "duplicate_order": "too many open orders for that app and country",

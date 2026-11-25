@@ -49,6 +49,10 @@ _ADDED_COLUMNS = (
     ("resellers", "kasera_extra", "NUMERIC(5, 2)"),
     ("resellers", "pay_note", "TEXT"),
     ("resellers", "proxy_on", "INTEGER"),
+    ("resellers", "rent_on", "INTEGER"),
+    ("orders", "rent_hours", "INTEGER"),
+    ("orders", "messages", "TEXT"),
+    ("orders", "refund_until", "DATETIME"),
 )
 # Run once, right after its column is added: what each customer paid in and still
 # holds, as it was estimated until then (the smaller of the balance and everything

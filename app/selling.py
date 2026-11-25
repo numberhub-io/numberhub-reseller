@@ -246,6 +246,8 @@ def forget_prices(reseller_id: int) -> None:
     """The commission changed: no screen may show a price from the old one."""
     invalidate_prices(reseller_id)
     _proxy_pkgs.pop(reseller_id, None)
+    for k in [k for k in _rent_services if k[0] == reseller_id]:
+        _rent_services.pop(k, None)
     for k in [k for k in _from_price if k[0] == reseller_id]:
         _from_price.pop(k, None)
 
@@ -322,7 +324,8 @@ def _map_error(exc: NumberHubError, reseller: Reseller) -> SellError:
     if problem:
         asyncio.ensure_future(warn_owner(reseller, problem))
         return SellError("paused")
-    if code in ("sold_out", "purchase_failed", "unknown_service", "operators_unavailable", "unknown_package"):
+    if code in ("sold_out", "purchase_failed", "unknown_service", "operators_unavailable", "unknown_package",
+                "invalid_country", "invalid_duration"):
         return SellError("sold_out")
     if code == "price_exceeded":
         return SellError("price_changed", member_price(dec(exc.data.get("price")), reseller.markup_pct))
@@ -331,7 +334,7 @@ def _map_error(exc: NumberHubError, reseller: Reseller) -> SellError:
         # shops), not this member: the route is busy, not the member's fault.
         asyncio.ensure_future(warn_owner(reseller, "route_cap"))
         return SellError("busy")
-    if code == "rate_limited" or isinstance(exc, TransportError):
+    if code in ("rate_limited", "rent_unavailable") or isinstance(exc, TransportError):
         return SellError("busy")
     return SellError("failed")
 
@@ -363,7 +366,7 @@ async def _backed(reseller: Reseller, cli, share: Decimal, ceiling: Decimal) -> 
 
 _inflight: set[int] = set()          # orders a live buy() or recovery is talking to NumberHub about
 _members_buying: set[int] = set()    # one purchase at a time per member (a double tap)
-_orphans: dict[int, tuple[int, float]] = {}   # NumberHub order -> (reseller, next try): give it back
+_orphans: dict[int, tuple[int, float, str]] = {}   # NumberHub order -> (reseller, next try, kind): give it back
 BUYING_GIVE_UP_SEC = 20 * 3600       # NumberHub keeps a key 24 h: never replay past that
 
 
@@ -827,6 +830,254 @@ async def proxy_live(reseller: Reseller, order: Order) -> dict | None:
     return nh
 
 
+# ─── rented numbers ──────────────────────────────────────────────────────────
+# A number that is the customer's for days: every SMS sent to it reaches them. The
+# owner's NumberHub wallet pays for it when it is rented. In the shop the customer's
+# price is held with the order, like every purchase, and charged as soon as the number
+# can no longer be given back: at its first SMS, or when NumberHub's refund time is
+# over. NumberHub says on the rental itself until when that is; nothing here guesses
+# it from a clock. A cancel that NumberHub confirms inside that time releases the
+# hold, so the customer gets back exactly what they paid.
+RENT_MAX_ACTIVE = 5             # numbers one customer may be renting at once
+RENT_SERVICES_MAX = 80          # services listed for one country and period
+RENT_SYNC_SEC = 15              # how often a shop with nothing but running rentals asks for news
+RENT_CANCEL_CONFIRM_SEC = 60    # a cancel seen in the list is believed when it is still there this much later
+_RENT_CODE = re.compile(r"^[A-Za-z0-9_]{1,12}$")
+_rent_periods: dict[int, tuple[float, list[dict]]] = {}
+_rent_countries: dict[tuple[int, int], tuple[float, list[dict]]] = {}
+_rent_services: dict[tuple[int, int, str], tuple[float, list[dict]]] = {}
+_rent_learned: dict[tuple[int, int, str, str], tuple[float, Decimal]] = {}   # the price a refused purchase named
+_rent_cancelling: set[int] = set()            # rentals a customer's own cancel is asking NumberHub about right now
+_rent_cancel_seen: dict[int, float] = {}      # rental -> when the list first showed it cancelled
+_rent_synced: dict[int, float] = {}
+
+
+def rent_on(reseller: Reseller) -> bool:
+    return getattr(reseller, "rent_on", None) != 0
+
+
+async def rent_periods(reseller: Reseller) -> list[dict]:
+    """The periods a number can be rented for: [{h, label}], shortest first. Empty when
+    the shop's API has none or cannot be asked (the menu button then hides)."""
+    hit = _rent_periods.get(reseller.id)
+    if hit and time.monotonic() - hit[0] < 3600:
+        return hit[1]
+    cli = client_for(reseller.id)
+    if cli is None:
+        return []
+    try:
+        rows = await cli.rent_durations()
+    except NumberHubError:
+        if hit is None:
+            # Asked again in a minute, not on every menu.
+            _rent_periods[reseller.id] = (time.monotonic() - 3540, [])
+        return hit[1] if hit else []
+    out = []
+    for r in rows:
+        try:
+            h = int(r.get("h") or 0)
+        except (TypeError, ValueError):
+            continue
+        if 0 < h <= 24 * 366:
+            out.append({"h": h, "label": str(r.get("label") or "")[:40]})
+    out.sort(key=lambda r: r["h"])
+    _rent_periods[reseller.id] = (time.monotonic(), out)
+    return out
+
+
+async def rent_countries(reseller: Reseller, h: int) -> list[dict]:
+    """Countries with numbers to rent for `h` hours: [{country, name, iso, emoji}].
+    Raises SellError."""
+    key = (reseller.id, int(h))
+    hit = _rent_countries.get(key)
+    if hit and time.monotonic() - hit[0] < 120:
+        return hit[1]
+    cli = client_for(reseller.id)
+    if cli is None:
+        raise SellError("paused")
+    try:
+        rows = await cli.rent_countries(h)
+    except NumberHubError as exc:
+        if hit:
+            return hit[1]               # the list of a few minutes ago beats "busy"
+        raise _map_error(exc, reseller) from exc
+    out = []
+    for r in rows:
+        iso = str(r.get("flag") or "").upper()
+        out.append({"country": str(r["country"])[:8], "name": str(r.get("name") or r["country"])[:60],
+                    "iso": iso if len(iso) == 2 and iso.isalpha() else None, "emoji": flag(iso)})
+    _rent_countries[key] = (time.monotonic(), out)
+    return out
+
+
+async def rent_services(reseller: Reseller, h: int, country: str, fresh: bool = False) -> list[dict]:
+    """What a number of this country can be rented for, in stock only, at the shop's
+    price: [{code, name, nh_price, member_price, popular}]. "Any service" (every SMS)
+    first, then "any other", then the popular apps. Raises SellError."""
+    key = (reseller.id, int(h), str(country))
+    hit = _rent_services.get(key)
+    if hit and not fresh and time.monotonic() - hit[0] < 60:
+        return hit[1]
+    cli = client_for(reseller.id)
+    if cli is None:
+        raise SellError("paused")
+    try:
+        rows = await cli.rent_services(h, country)
+    except NumberHubError as exc:
+        if exc.status == 401:
+            await key_rejected(reseller.id, cli)
+        raise _map_error(exc, reseller) from exc
+    from app.catalog_ui import nice_name
+    out = []
+    for r in rows:
+        code, price = str(r["code"]), dec(r.get("price"))
+        if price <= 0 or not r.get("in_stock") or not _RENT_CODE.match(code):
+            continue
+        learned = _rent_learned.get((reseller.id, int(h), str(country), code))
+        if learned and time.monotonic() - learned[0] < LEARNED_TTL:
+            price = max(price, learned[1])
+        out.append({"code": code, "name": nice_name(code, r.get("name"))[:60], "nh_price": price,
+                    "member_price": shop_price(reseller, {}, "rent", code, price), "popular": bool(r.get("popular"))})
+    out.sort(key=lambda r: 0 if r["code"] == "full" else 1 if r["code"] == "ot" else 2 if r["popular"] else 3)
+    out = out[:RENT_SERVICES_MAX]
+    if len(_rent_services) > 3000:
+        for k in [k for k, v in list(_rent_services.items()) if time.monotonic() - v[0] > 300]:
+            _rent_services.pop(k, None)
+    _rent_services[key] = (time.monotonic(), out)
+    return out
+
+
+async def buy_rental(reseller: Reseller, member: Member, h: int, country: str, code: str,
+                     shown_price: Decimal | None = None) -> Order:
+    if reseller.status != Reseller.ACTIVE or not rent_on(reseller):
+        raise SellError("paused")
+    if member.is_blocked:
+        raise SellError("blocked")
+    if member.id in _members_buying:
+        raise SellError("duplicate")
+    _members_buying.add(member.id)
+    try:
+        return await _buy_rental(reseller, member, int(h), str(country), str(code), shown_price)
+    finally:
+        _members_buying.discard(member.id)
+
+
+async def _buy_rental(reseller: Reseller, member: Member, h: int, country: str, code: str,
+                      shown_price: Decimal | None) -> Order:
+    if await repo.rent_active_count(member.id) >= RENT_MAX_ACTIVE:
+        raise SellError("rent_limit")
+    cli = client_for(reseller.id)
+    if cli is None:
+        raise SellError("paused")
+    if h not in {p["h"] for p in await rent_periods(reseller)}:
+        raise SellError("sold_out")
+    row = next((r for r in await rent_services(reseller, h, country, fresh=True) if r["code"] == code), None)
+    if row is None:
+        raise SellError("sold_out")
+    price = row["member_price"]
+    if shown_price is not None and price > shown_price:
+        raise SellError("price_changed", price)
+    try:
+        place = next((c for c in await rent_countries(reseller, h) if c["country"] == country), None)
+    except SellError:
+        place = None                    # only its name and flag: the purchase does not need them
+    values = dict(reseller_id=reseller.id, member_id=member.id, kind="rent", service=code,
+                  service_name=row["name"][:128], country=country, country_name=(place or {}).get("name") or country,
+                  country_iso=(place or {}).get("iso"), member_price=price, markup_pct_at_buy=reseller.markup_pct,
+                  ceiling_at_buy=row["nh_price"], rent_hours=h)
+
+    async def repriced(exc: NumberHubError) -> Decimal:
+        # The list can lag behind what a purchase really costs. The refusal's own price
+        # wins for a while, or the customer would confirm, be refused, and confirm again.
+        real = dec(exc.data.get("price"))
+        if real > 0:
+            _rent_learned[(reseller.id, h, country, code)] = (time.monotonic(), real)
+        _rent_services.pop((reseller.id, h, country), None)
+        return shop_price(reseller, {}, "rent", code, real)
+
+    order = await _backed_place(reseller, member, cli, values,
+                                lambda o: cli.buy_rental(h, country, code, row["nh_price"], idempotency_key(o)),
+                                repriced)
+    _rent_services.pop((reseller.id, h, country), None)
+    return order
+
+
+def order_messages(order: Order) -> list[dict]:
+    """Every SMS a rented number got, oldest first: [{from, text, code}]."""
+    try:
+        rows = json.loads(getattr(order, "messages", None) or "[]")
+    except (TypeError, ValueError):
+        return []
+    return [m for m in rows if isinstance(m, dict)] if isinstance(rows, list) else []
+
+
+def rental_due(order: Order) -> bool | None:
+    """What to do with a rented number's held price now: True = charge it, False = give
+    it back, None = wait.
+
+    NumberHub cancels a rental only together with its refund, so "canceled" gives the
+    money back. Anything else that is final, an SMS on the number, or NumberHub no
+    longer offering a refund (it sends no `refund_until` then) means the rental was
+    used or can no longer be returned: charged. Until then the price stays held: the
+    customer cannot spend it, and it is not yet spent either."""
+    if order.status in (Order.BUYING, Order.FAILED):
+        return None
+    if order.status == "canceled":
+        return False
+    if order.status in Order.TERMINAL or order_messages(order) or order_codes(order):
+        return True
+    return True if getattr(order, "refund_until", None) is None else None
+
+
+async def cancel_rental(reseller: Reseller, member: Member, order_id: int) -> tuple[bool, str | None]:
+    """The customer gives a rented number back for a refund. Returns (cancelled, why
+    not): locked = the refund opens two minutes after the start; closed = too late;
+    sms = an SMS arrived; ended = it is over or cancelled already; refused / busy = try
+    again.
+
+    NumberHub decides. The hold is released only on its own answer to this cancel."""
+    order = await repo.get_order(order_id)
+    if order is None or order.member_id != member.id or order.kind != "rent" or order.nh_id is None:
+        return False, "not_found"
+    if order.status in Order.TERMINAL:
+        return False, "ended"
+    if order.settled != Order.UNSETTLED:
+        return False, "sms" if order_messages(order) else "closed"
+    cli = client_for(reseller.id)
+    if cli is None or order.id in _rent_cancelling:
+        return False, "busy"
+    _rent_cancelling.add(order.id)
+    try:
+        try:
+            body = await cli.cancel_rental(order.nh_id)
+        except NumberHubError as exc:
+            if exc.code == "cancel_window_closed":
+                return False, "locked" if exc.data.get("window_state") == "locked" else "closed"
+            if exc.status == 404:
+                return False, "not_found"
+            return False, "busy"        # a lost reply too: the order sync learns what happened
+        rental = body.get("rental")
+        if isinstance(rental, dict) and rental.get("id") is not None:
+            await repo.apply_nh_state(order.id, rental)
+        _rent_cancel_seen.pop(order.id, None)
+        await settle_order(await repo.get_order(order.id), cancelling=True)
+        fresh = await repo.get_order(order.id)
+        if body.get("ok") and fresh is not None and fresh.status == "canceled":
+            log.info("rental %s (nh %s) cancelled by member %s: %s given back", order.id, order.nh_id, member.id,
+                     order.member_price)
+            return True, None
+        return False, "sms" if fresh is not None and order_messages(fresh) else "refused"
+    finally:
+        _rent_cancelling.discard(order.id)
+
+
+async def _rent_not_returned(reseller_id: int, nh_id: int) -> None:
+    log.error("rental %s exists at NumberHub, nobody holds money for it and it could not be given back", nh_id)
+    shop = await repo.get_reseller(reseller_id)
+    if shop is not None:
+        await warn_owner(shop, "rent_unpaid")
+
+
 async def mail_details(reseller: Reseller, order: Order) -> dict:
     """The mail that arrived on an email order: {code, link, message} (any may be
     None). Many sites verify with a link and no code, so the list of orders, which
@@ -854,40 +1105,53 @@ async def _attach(reseller: Reseller, order_id: int, nh: dict) -> bool:
         log.warning("order %s: a purchase given up on exists after all (nh %s); hold taken again",
                     order_id, nh.get("id"))
         return True
-    if (cur.kind if cur is not None else str(nh.get("kind") or "")) == "proxy":
+    kind = cur.kind if cur is not None else str(nh.get("kind") or "sms")
+    if kind == "proxy":
         # A data package is paid for when bought and cannot be given back: the owner
         # has it in their NumberHub account, and nobody paid the shop for it.
         log.error("order %s: data package %s exists but the member no longer covers it", order_id, nh.get("id"))
         asyncio.ensure_future(warn_owner(reseller, "proxy_unpaid"))
         return False
+    # A rented number is paid for when rented too, but NumberHub takes it back inside
+    # its refund time: tried there, and the owner is told when it cannot be done.
     log.error("order %s: NumberHub order %s exists but the member no longer covers it — giving it back",
               order_id, nh.get("id"))
-    _orphans[int(nh["id"])] = (reseller.id, 0.0)
+    _orphans[int(nh["id"])] = (reseller.id, 0.0, kind if kind in ("rent", "email") else "sms")
     await release_orphans()
     return False
 
 
 async def release_orphans() -> None:
     """Cancel NumberHub orders that no member order holds money for (retried
-    until NumberHub's cancel lock opens)."""
+    until NumberHub's cancel lock opens). Each kind has its own cancel: a mailbox
+    was asked about as if it were a number until 2026-11-25, which answered "not
+    found" and left it open. A rented number goes back only inside its refund time."""
     now = time.monotonic()
-    for nh_id, (rid, due) in list(_orphans.items()):
+    for nh_id, (rid, due, kind) in list(_orphans.items()):
         if due > now:
             continue
         cli = client_for(rid)
         if cli is None:
             continue
         try:
-            body = await cli.cancel(nh_id)
+            body = await (cli.cancel_rental(nh_id) if kind == "rent" else
+                          cli.cancel_email(nh_id) if kind == "email" else cli.cancel(nh_id))
         except NumberHubError as exc:
             if exc.code == "cancel_locked":
-                _orphans[nh_id] = (rid, now + int(exc.data.get("seconds_remaining") or 15) + 3)
-            elif exc.status == 404:
+                _orphans[nh_id] = (rid, now + int(exc.data.get("seconds_remaining") or 15) + 3, kind)
+            elif exc.code == "cancel_window_closed" and exc.data.get("window_state") == "locked":
+                _orphans[nh_id] = (rid, now + 40, kind)          # a rental's refund opens after two minutes
+            elif exc.status == 404 or exc.code == "cancel_window_closed":
                 _orphans.pop(nh_id, None)
+                if kind == "rent" and exc.status != 404:
+                    await _rent_not_returned(rid, nh_id)
             else:
-                _orphans[nh_id] = (rid, now + 30)
+                _orphans[nh_id] = (rid, now + 30, kind)
             continue
         _orphans.pop(nh_id, None)
+        if kind == "rent" and not body.get("ok"):
+            await _rent_not_returned(rid, nh_id)
+            continue
         log.warning("NumberHub order %s given back (%s)", nh_id,
                     "cancelled" if body.get("ok") else body.get("reason") or "already closed")
 
@@ -938,12 +1202,12 @@ async def _recover_one(order: Order) -> None:
             # Any number from back then has long expired: give the hold back.
             if await repo.fail_order(order.id, "no_answer"):
                 log.warning("order %s: no answer from NumberHub for 20 h; member hold released", order.id)
-                if order.kind == "proxy":
-                    # A package is paid when bought and lasts 30 days: if it was bought
-                    # after all, the owner has it and paid for it. Say so.
+                if order.kind in ("proxy", "rent"):
+                    # Both are paid when bought and last for days: if the purchase
+                    # happened after all, the owner has it and paid for it. Say so.
                     shop = await repo.get_reseller(order.reseller_id)
                     if shop is not None:
-                        asyncio.ensure_future(warn_owner(shop, "proxy_unconfirmed"))
+                        asyncio.ensure_future(warn_owner(shop, order.kind + "_unconfirmed"))
             continue
         reseller = await repo.get_reseller(order.reseller_id)
         cli = client_for(order.reseller_id)
@@ -960,6 +1224,9 @@ async def _recover_one(order: Order) -> None:
                 nh = await cli.buy_email(order.service, order.country, ceiling, idempotency_key(order))
             elif order.kind == "proxy":
                 nh = await cli.buy_proxy(int(order.country), ceiling, idempotency_key(order))
+            elif order.kind == "rent":
+                nh = await cli.buy_rental(int(order.rent_hours or 0), order.country, order.service, ceiling,
+                                          idempotency_key(order))
             else:
                 nh = await cli.buy(order.service, order.country, ceiling, idempotency_key(order))
         except TransportError:
@@ -1000,6 +1267,8 @@ async def cancel(reseller: Reseller, member: Member, order_id: int) -> tuple[boo
     order = await repo.get_order(order_id)
     if order is None or order.member_id != member.id or order.nh_id is None:
         return False, "not_found", 0
+    if order.kind in ("rent", "proxy"):
+        return False, "closed", 0       # a rented number has its own way back (cancel_rental); a package has none
     if order.status not in ("pending", "waiting"):
         return False, "closed", 0
     cli = client_for(reseller.id)
@@ -1033,7 +1302,21 @@ def order_codes(order: Order) -> list[str]:
         return []
 
 
-async def settle_order(order: Order | None) -> bool:
+async def settle_order(order: Order | None, cancelling: bool = False) -> bool:
+    if order is not None and getattr(order, "kind", "sms") == "rent":
+        if order.settled != Order.UNSETTLED:
+            return False
+        # While a cancel is being asked or confirmed, nothing else decides about the money.
+        if not cancelling and (order.id in _rent_cancelling or order.id in _rent_cancel_seen):
+            return False
+        due = rental_due(order)
+        if due is None:
+            return False
+        done = await repo.settle(order.id, due, open_ok=True)
+        if done:
+            log.info("rental %s settled: member %s %s", order.id, "charged" if due else "refunded",
+                     order.member_price)
+        return done
     if order is None or order.status in Order.OPEN or order.settled != Order.UNSETTLED:
         return False
     charge = order.status in Order.CHARGED_STATUSES or bool(order_codes(order))
@@ -1067,6 +1350,12 @@ async def sync_reseller(reseller: Reseller) -> None:
     cli = client_for(reseller.id)
     if cli is None:
         return
+    # Nothing live but rented numbers past their refund time: the only news there is an
+    # SMS now and then, for days. Asked every RENT_SYNC_SEC, not on every pass.
+    if all(o.kind == "rent" and o.settled != Order.UNSETTLED for o in live):
+        if now - _rent_synced.get(reseller.id, float("-inf")) < RENT_SYNC_SEC:
+            return
+    _rent_synced[reseller.id] = now
     try:
         listed = {int(o["id"]): o for o in await cli.orders(limit=100) if o.get("id") is not None}
     except NumberHubError as exc:
@@ -1074,7 +1363,9 @@ async def sync_reseller(reseller: Reseller) -> None:
         return
     from app import runtime, texts
     bot = runtime.bot_for(reseller.id)
-    missing = sorted((o for o in live if o.nh_id not in listed), key=lambda o: _offlist_polled.get(o.id, 0))
+    missing = sorted((o for o in live if o.nh_id not in listed
+                      and not (o.kind == "rent" and now - _offlist_polled.get(o.id, float("-inf")) < RENT_SYNC_SEC)),
+                     key=lambda o: _offlist_polled.get(o.id, 0))
     polled = {o.id for o in missing[:OFFLIST_PER_PASS]}
     for order in live:
         nh = listed.get(order.nh_id)
@@ -1083,25 +1374,52 @@ async def sync_reseller(reseller: Reseller) -> None:
                 continue
             _offlist_polled[order.id] = now
             try:
-                nh = await (cli.email(order.nh_id) if order.kind == "email" else cli.number(order.nh_id))
+                nh = await (cli.email(order.nh_id) if order.kind == "email" else
+                            cli.rental(order.nh_id) if order.kind == "rent" else cli.number(order.nh_id))
             except NumberHubError as exc:
                 if exc.status in (401, 403, 429):
                     await _sync_trouble(reseller, exc, cli)
                     return
                 continue
+        if order.kind == "rent":
+            if order.id in _rent_cancelling:
+                continue                # the customer's own cancel is waiting for NumberHub's answer
+            if str(nh.get("status") or "") == "canceled" and order.status != "canceled":
+                # NumberHub marks a rental cancelled BEFORE it asks the number's source, and
+                # puts it back when the source refuses. Believed when it is still cancelled
+                # a minute later: a refund for a rental that kept running is the owner's loss.
+                if now - _rent_cancel_seen.setdefault(order.id, now) < RENT_CANCEL_CONFIRM_SEC:
+                    continue
+            _rent_cancel_seen.pop(order.id, None)
         before = order.status
         changed, n_codes = await repo.apply_nh_state(order.id, nh)
         fresh = await repo.get_order(order.id)
         if fresh is None:
             continue
-        await settle_order(fresh)
+        settled_now = await settle_order(fresh)
         fresh = await repo.get_order(order.id)
         member = await repo.get_member(fresh.member_id)
         if bot is None or member is None:
             continue
         codes = order_codes(fresh)
         new_codes = n_codes > fresh.codes_announced
-        if fresh.kind == "email":
+        if fresh.kind == "rent":
+            # Every SMS goes to the customer with its text. A rental is counted by its
+            # SMS (codes_announced), not by the codes in them: many carry none.
+            sms = order_messages(fresh)
+            announced = fresh.codes_announced
+            for one in sms[announced:]:
+                if await send_ex(bot, member.telegram_id, texts.rental_sms(member, fresh, one)) == "retry":
+                    break               # Telegram is busy: the rest goes out next pass
+                announced += 1
+            new_codes = announced > fresh.codes_announced
+            if new_codes:
+                await repo.set_codes_announced(fresh.id, announced)
+            if changed and fresh.status == "canceled":
+                await send(bot, member.telegram_id, texts.rental_refunded(member, fresh))
+            elif changed and fresh.status in ("completed", "expired"):
+                await send(bot, member.telegram_id, texts.rental_ended(member, fresh))
+        elif fresh.kind == "email":
             # One mail per mailbox, and it may carry a link and no code at all: tell
             # the customer once, when the order shows it received its mail.
             new_codes = False
@@ -1129,7 +1447,9 @@ async def sync_reseller(reseller: Reseller) -> None:
         elif changed and fresh.status in ("canceled", "expired") and not codes:
             await send(bot, member.telegram_id, texts.refunded(member, fresh))
         due = time.monotonic() - _last_card_edit.get(fresh.id, 0) >= CARD_TICK_SEC
-        if changed or new_codes or due:
+        if fresh.kind == "rent" and fresh.settled != Order.UNSETTLED:
+            due = False                 # nothing counts down on it once its refund time is over
+        if changed or new_codes or due or settled_now:
             await refresh_card(bot, member, fresh)
     _track(reseller.id, {o.id for o in live})
 
@@ -1143,6 +1463,7 @@ def _track(reseller_id: int, live_ids: set[int]) -> None:
         _order_reseller.pop(oid, None)
         _last_card_edit.pop(oid, None)
         _offlist_polled.pop(oid, None)
+        _rent_cancel_seen.pop(oid, None)
     for oid in live_ids:
         _order_reseller[oid] = reseller_id
 
@@ -1178,6 +1499,10 @@ async def refresh_card(bot, member: Member, order: Order) -> None:
 
 async def settle_sweep() -> None:
     for order in await repo.unsettled_ended():
+        await settle_order(order)
+    # Rented numbers are settled while they run, by the order sync. Here: the ones a
+    # paused shop's sync is not looking at, from what NumberHub last said about them.
+    for order in await repo.unsettled_rentals():
         await settle_order(order)
 
 

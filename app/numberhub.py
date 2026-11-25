@@ -41,6 +41,11 @@ NOT_AUTHORITATIVE_CODES = ("idempotency_in_progress", "idempotency_conflict", "r
                            "invalid_idempotency_key", "idempotency_key_required")
 
 
+# 5xx answers a purchase handler gives BEFORE it does anything (its price list could
+# not be read just now). Unlike every other 5xx they prove that nothing was bought.
+NOTHING_DONE_5XX = ("rent_unavailable",)
+
+
 def authoritative(exc: NumberHubError) -> bool:
     """True when the error proves no order exists under the purchase's key."""
     if isinstance(exc, TransportError):
@@ -87,6 +92,12 @@ class NumberHub:
         except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as exc:
             raise TransportError("transport", 0, {"detail": str(exc)}) from exc
         if r.status_code >= 500:
+            try:
+                code = r.json().get("error")
+            except (ValueError, AttributeError):
+                code = None
+            if code in NOTHING_DONE_5XX:
+                raise NumberHubError(code, r.status_code)
             # The server may have acted before failing: treat like a lost reply.
             raise TransportError(f"http_{r.status_code}", r.status_code)
         if r.status_code >= 400:
@@ -173,6 +184,13 @@ class NumberHub:
     async def cancel(self, nh_id: int) -> dict:
         return await self._req("DELETE", f"/numbers/{nh_id}")
 
+    async def order_of(self, nh_id: int, kind: str = "sms") -> dict:
+        """One order of this account, asked for as what it is. Each kind has its own
+        address, and a mailbox or a rented number asked about as a number answers "not
+        found" even on its own account. 404 = this account has no such order."""
+        path = {"email": "emails", "rent": "rentals", "proxy": "proxies"}.get(kind, "numbers")
+        return await self._req("GET", f"/{path}/{int(nh_id)}")
+
     async def orders(self, limit: int = 100) -> list[dict]:
         return (await self._req("GET", "/orders", params={"limit": limit})).get("orders", [])
 
@@ -234,6 +252,43 @@ class NumberHub:
             return (await self._req("GET", f"/proxies/{int(nh_id)}/usage"))["proxy"]
         except TransportError:
             return (await self._req("GET", f"/proxies/{int(nh_id)}"))["proxy"]
+
+    # ── rented numbers: a number for days, every SMS, paid up front ───────────
+    async def rent_durations(self) -> list[dict]:
+        """The periods a number can be rented for: [{h, label}] (h = hours)."""
+        rows = (await self._req("GET", "/rent/durations")).get("durations", [])
+        return [r for r in rows if isinstance(r, dict) and r.get("h")] if isinstance(rows, list) else []
+
+    async def rent_countries(self, h: int) -> list[dict]:
+        """Countries with numbers to rent for `h` hours: [{country, name, flag}]."""
+        rows = (await self._req("GET", f"/rent/{int(h)}/countries")).get("countries", [])
+        return [r for r in rows if isinstance(r, dict) and r.get("country") is not None] if isinstance(rows, list) else []
+
+    async def rent_services(self, h: int, country: str) -> list[dict]:
+        """What a number of this country can be rented for: [{code, name, price, in_stock, popular}]."""
+        rows = (await self._req("GET", f"/rent/{int(h)}/{quote(str(country), safe='')}/services")).get("services", [])
+        return [r for r in rows if isinstance(r, dict) and r.get("code")] if isinstance(rows, list) else []
+
+    @staticmethod
+    def rent_body(h: int, country: str, code: str, max_price: Decimal) -> bytes:
+        return json.dumps({"h": int(h), "country": str(country), "code": str(code), "max_price": f"{max_price:.2f}"},
+                          separators=(",", ":"), sort_keys=True).encode()
+
+    async def buy_rental(self, h: int, country: str, code: str, max_price: Decimal, idempotency_key: str) -> dict:
+        """Rent a number for `h` hours. Same rules as buy(): the key makes a retry return
+        the same rental, and an unclear answer raises TransportError. It is paid for at
+        once; NumberHub gives the money back only for a cancel inside its refund window."""
+        return await self._purchase("/rentals", self.rent_body(h, country, code, max_price), idempotency_key, "rental")
+
+    async def rental(self, nh_id: int) -> dict:
+        """The rental with `messages` (every SMS: {from, text, code}) and, while a cancel
+        can still be refunded, `refund_from` / `refund_until`."""
+        return (await self._req("GET", f"/rentals/{int(nh_id)}"))["rental"]
+
+    async def cancel_rental(self, nh_id: int) -> dict:
+        """{ok, rental}: ok false = not cancelled, nothing refunded. Outside the refund
+        window: 409 cancel_window_closed with window_state "locked" (too early) or "closed"."""
+        return await self._req("DELETE", f"/rentals/{int(nh_id)}")
 
     # ── deposits into the reseller's wallet (built-in payments) ───────────────
     async def open_topup(self, amount: Decimal, method: str, reference: str, lifetime_minutes: int) -> dict:

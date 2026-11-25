@@ -3827,6 +3827,406 @@ async def test_back_to_the_purchase():
     runtime._bots.pop(r.id, None)
 
 
+async def test_rentals():
+    """Rented numbers in a shop (a shop owner asked on 2026-11-24 why not everything is in
+    the shop bot). The owner's wallet pays when a number is rented. The customer's price
+    is held with the order and charged once the number can no longer be given back: at
+    its first SMS, or when the wallet's refund time is over."""
+    print("rented numbers")
+    import json
+    from aiogram.methods import SendMessage
+    from app.bots.callbacks import Adm, Nav, Ord, Rn
+    from app.bots.reseller import build_router
+    from app.models import Member
+    from app.texts import order_card, rental_ended, rental_refunded, rental_sms
+    own = 5151
+    api = FakeNumberHub()
+    r = await make_reseller(api, owner=own, bot_id=88801)
+    session = FakeSession(bot_id=88801)
+    bot = fake_bot(session)
+    runtime._bots[r.id] = bot
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(build_router(r.id))
+    cust = 95001
+    m = await member(r, cust, "10.00")
+    labels = lambda: [b.text for row in (session.last_markup().inline_keyboard if session.last_markup() else [])  # noqa: E731
+                      for b in row]
+    sent_to = lambda uid: [x.text or "" for x in session.requests if isinstance(x, SendMessage) and x.chat_id == uid]  # noqa: E731
+    wallet0 = api.wallet
+    slow, confirm = selling.RENT_SYNC_SEC, selling.RENT_CANCEL_CONFIRM_SEC
+    selling.RENT_SYNC_SEC = 0
+
+    async def state_of(mem):
+        fresh = await repo.get_member(mem.id)
+        return fresh.balance, fresh.held
+
+    def rent(code, cents, h=24, cc="187"):
+        return tap(cust, Rn(a="buy", h=h, cc=cc, s=code, c=cents).pack())
+
+    # ── the way in ──
+    await dp.feed_update(bot, msg(cust, "/start"))
+    check("the menu has a Rent a number button", button(session, "Rent a number") == Rn(a="home").pack())
+    await dp.feed_update(bot, tap(cust, button(session, "Rent a number")))
+    check("the periods the wallet offers, in the customer's words",
+          labels()[:4] == ["1 day", "3 days", "1 week", "1 month"] and "For how long?" in session.last_text(), str(labels()))
+    await dp.feed_update(bot, tap(cust, button(session, "1 day")))
+    check("then the countries of that period",
+          labels()[:2] == ["🇬🇧 United Kingdom", "🇺🇸 USA"] and "Rent for 1 day" in session.last_text(), str(labels()))
+    await dp.feed_update(bot, tap(cust, button(session, "USA")))
+    check("then what the number is for, at the shop's price: every SMS first, any other, the popular app, the rest; "
+          "what is sold out is not listed",
+          labels()[:4] == ["📨 Any service (all SMS) · $2.60", "❓ Any other app · $1.30", "WhatsApp · $1.95", "Zeta · $1.04"]
+          and not any("Telegram" in x for x in labels()) and "USA · 1 day" in session.last_text(), str(labels()))
+    await dp.feed_update(bot, tap(cust, button(session, "Any service")))
+    text = session.last_text()
+    check("the price is confirmed before anything is rented: paid now, the period, and when a refund is possible",
+          "Price: <b>$2.60</b>, paid now" in text and "Period: <b>1 day</b>" in text and "20th minute" in text
+          and "Your balance: <b>$10.00</b>" in text and not api.rent_bodies
+          and button(session, "Rent · $2.60") == Rn(a="buy", h=24, cc="187", s="full", c=260).pack(), text[:300])
+
+    # ── renting ──
+    await dp.feed_update(bot, tap(cust, button(session, "Rent · $2.60")))
+    o = (await repo.member_orders(m.id, 1))[0]
+    check("rented: the price is held, not yet charged, and the order knows its period and its refund time",
+          await state_of(m) == (D("10.00"), D("2.60")) and o.kind == "rent" and o.status == "waiting"
+          and o.settled == Order.UNSETTLED and o.rent_hours == 24 and o.nh_price == D("2.00")
+          and o.refund_until is not None and o.cancel_available_at is not None, f"{await state_of(m)} {o.status}")
+    check("one purchase at the wallet for exactly this, paid there at once",
+          api.rent_bodies == [{"h": 24, "country": "187", "code": "full", "max_price": "2.00"}]
+          and api.wallet == wallet0 - D("2.00") and api.held == 0, str(api.rent_bodies))
+    text = session.last_text()
+    check("the card: the number, until when it is theirs, when a refund opens, and where its SMS will show",
+          "Rented number" in text and "Any service (all SMS)" in text and f"+{o.phone}" in text
+          and "Yours until" in text and "(24 hours left)" in text and "A refund of $2.60 opens in" in text
+          and "Every SMS sent to it appears here" in text and "Paid: $2.60" in text
+          and button(session, "Cancel in") == Ord(a="cancel", id=o.id).pack(), text[:400])
+    await dp.feed_update(bot, tap(cust, Ord(a="cancel", id=o.id).pack()))
+    check("a cancel in the first two minutes: told when a refund opens, nothing changes",
+          "2 minutes after you rent" in session.alerts()[-1] and await state_of(m) == (D("10.00"), D("2.60"))
+          and (await repo.get_order(o.id)).status == "waiting")
+
+    # ── giving it back inside the refund time ──
+    api.rental_age(o.nh_id, 5)
+    await selling.sync_reseller(r)
+    check("inside the refund time the card offers the refund and counts down; still nothing is charged",
+          "get $2.60 back for another" in session.last_text()
+          and button(session, "Cancel and refund") == Ord(a="cancel", id=o.id).pack()
+          and (await repo.get_order(o.id)).settled == Order.UNSETTLED, session.last_text()[:300])
+    api.rent_refuse_cancel = True
+    await dp.feed_update(bot, tap(cust, Ord(a="cancel", id=o.id).pack()))
+    check("the wallet could not cancel it: said so, the rental runs on, the money stays held",
+          "did not go through" in session.alerts()[-1] and await state_of(m) == (D("10.00"), D("2.60"))
+          and (await repo.get_order(o.id)).status == "waiting" and api.wallet == wallet0 - D("2.00"))
+    api.rent_refuse_cancel = False
+    await dp.feed_update(bot, tap(cust, Ord(a="cancel", id=o.id).pack()))
+    o = await repo.get_order(o.id)
+    check("given back inside the refund time: the customer has all of it again, and so has the wallet",
+          "$2.60 is back on your balance" in session.alerts()[-1] and await state_of(m) == (D("10.00"), D("0"))
+          and o.status == "canceled" and o.settled == Order.RELEASED and api.wallet == wallet0
+          and "Cancelled — $2.60 returned" in session.last_text(), f"{await state_of(m)} {o.status} {session.alerts()[-1]}")
+    check("a cancelled rental's card has nothing left to cancel", button(session, "Cancel") is None)
+    await dp.feed_update(bot, tap(cust, Ord(a="cancel", id=o.id).pack()))
+    check("its old cancel button says it is closed and changes nothing",
+          "already closed" in session.alerts()[-1] and await state_of(m) == (D("10.00"), D("0")) and api.wallet == wallet0)
+
+    # ── an SMS arrives: delivered in full, and the rental is charged ──
+    await dp.feed_update(bot, rent("wa", 195))
+    o2 = (await repo.member_orders(m.id, 1))[0]
+    n_sent = len(sent_to(cust))
+    api.rental_sms(o2.nh_id, "Your parcel is on its way.", "Parcel")
+    await selling.sync_reseller(r)
+    o2 = await repo.get_order(o2.id)
+    new = sent_to(cust)[n_sent:]
+    check("an SMS with no code in it reaches the customer in full",
+          any("New SMS" in x and f"+{o2.phone}" in x and "<b>Parcel</b>: Your parcel is on its way." in x for x in new), str(new))
+    check("from its first SMS the rental is charged, once; it keeps running",
+          o2.settled == Order.CHARGED and o2.status == "waiting" and await state_of(m) == (D("8.05"), D("0"))
+          and o2.codes_announced == 1, f"{o2.settled} {await state_of(m)}")
+    card = order_card(await repo.get_member(m.id), o2)
+    check("the card lists the SMS and no longer offers a refund",
+          "📩 <b>Parcel</b>: Your parcel is on its way." in card[0] and "opens in" not in card[0]
+          and not any("Cancel" in b.text for row in card[1].inline_keyboard for b in row), card[0][:300])
+    api.rental_sms(o2.nh_id, "WhatsApp code 123-456", "", "123456")
+    await selling.sync_reseller(r)
+    await selling.sync_reseller(r)
+    new = sent_to(cust)[n_sent:]
+    check("the next SMS is sent once, with its code to copy; nothing more is charged",
+          sum("WhatsApp code 123-456" in x for x in new) == 1 and any("<code>123456</code>" in x for x in new)
+          and (await repo.get_order(o2.id)).codes_announced == 2 and await state_of(m) == (D("8.05"), D("0")), str(new))
+    await dp.feed_update(bot, tap(cust, Ord(a="cancel", id=o2.id).pack()))
+    check("an old cancel button after an SMS: no refund, said why",
+          "can no longer be refunded" in session.alerts()[-1] and await state_of(m) == (D("8.05"), D("0")))
+
+    # ── no SMS and the refund time passes ──
+    await dp.feed_update(bot, rent("ot", 130, h=72))
+    o3 = (await repo.member_orders(m.id, 1))[0]
+    await selling.settle_sweep()
+    check("a rental in its refund time is left alone by the sweep: held, not charged",
+          await state_of(m) == (D("8.05"), D("1.30")) and (await repo.get_order(o3.id)).settled == Order.UNSETTLED
+          and o3.rent_hours == 72 and api.rent_bodies[-1]["h"] == 72)
+    api.rental_age(o3.nh_id, 25)
+    await selling.sync_reseller(r)
+    o3 = await repo.get_order(o3.id)
+    check("the wallet no longer offers a refund: charged, as the wallet was from the start",
+          o3.settled == Order.CHARGED and o3.status == "waiting" and o3.refund_until is None
+          and await state_of(m) == (D("6.75"), D("0")), f"{o3.settled} {await state_of(m)}")
+    card = order_card(await repo.get_member(m.id), o3)
+    check("...and its card no longer offers one",
+          "back for another" not in card[0] and not any("Cancel" in b.text for row in card[1].inline_keyboard for b in row))
+    await dp.feed_update(bot, tap(cust, Ord(a="cancel", id=o3.id).pack()))
+    check("an old cancel button after the refund time: refused, nothing changes",
+          "time for a refund is over" in session.alerts()[-1] and await state_of(m) == (D("6.75"), D("0"))
+          and (await repo.get_order(o3.id)).status == "waiting")
+
+    # ── a shop with nothing but running rentals ──
+    selling.RENT_SYNC_SEC = 15
+    selling._rent_synced.pop(r.id, None)
+    calls = len(api.calls)
+    for _ in range(3):
+        await selling.sync_reseller(r)
+    check("it asks the wallet for news once in a while, not on every pass (a rental runs for days)",
+          len(api.calls) - calls == 1, str(len(api.calls) - calls))
+    selling.RENT_SYNC_SEC = 0
+
+    # ── a cancel that shows in the list ──
+    await dp.feed_update(bot, rent("zz", 104))
+    o4 = (await repo.member_orders(m.id, 1))[0]
+    api.rental_age(o4.nh_id, 5)
+    api.orders[o4.nh_id]["status"] = "canceled"          # the wallet marks it while it asks the number's source...
+    await selling.sync_reseller(r)
+    await selling.settle_sweep()
+    check("a rental the list shows cancelled for a moment is not refunded on the spot",
+          (await repo.get_order(o4.id)).status == "waiting" and await state_of(m) == (D("6.75"), D("1.04")))
+    api.orders[o4.nh_id]["status"] = "waiting"           # ...and puts it back: the source refused
+    await selling.sync_reseller(r)
+    check("when the wallet puts it back it simply runs on, the money still held",
+          (await repo.get_order(o4.id)).status == "waiting" and (await repo.get_order(o4.id)).settled == Order.UNSETTLED
+          and o4.id not in selling._rent_cancel_seen and await state_of(m) == (D("6.75"), D("1.04")))
+    api.orders[o4.nh_id]["status"] = "canceled"          # a cancel made in the owner's own wallet app, refunded there
+    api.wallet += D("0.80")
+    await selling.sync_reseller(r)
+    selling.RENT_CANCEL_CONFIRM_SEC = 0
+    n_sent = len(sent_to(cust))
+    await selling.sync_reseller(r)
+    await selling.sync_reseller(r)
+    selling.RENT_CANCEL_CONFIRM_SEC = confirm
+    o4 = await repo.get_order(o4.id)
+    check("a cancel that is still there later is believed: the customer is refunded once and told",
+          o4.status == "canceled" and o4.settled == Order.RELEASED and await state_of(m) == (D("6.75"), D("0"))
+          and sum("is cancelled. $1.04 is back" in x for x in sent_to(cust)[n_sent:]) == 1, f"{o4.status} {await state_of(m)}")
+
+    # ── the period ends ──
+    api.set_status(o2.nh_id, "completed")
+    n_sent = len(sent_to(cust))
+    await selling.sync_reseller(r)
+    await selling.sync_reseller(r)
+    o2 = await repo.get_order(o2.id)
+    check("when the period ends the customer is told once and the card says so; nothing more is charged",
+          sum("has ended" in x for x in sent_to(cust)[n_sent:]) == 1 and o2.status == "completed"
+          and "This rental has ended" in order_card(m, o2)[0] and await state_of(m) == (D("6.75"), D("0")))
+    check("a running rental does not use up the open orders a customer may have",
+          await repo.member_open_count(m.id) == 0 and await repo.rent_active_count(m.id) == 1)
+    await dp.feed_update(bot, tap(cust, Nav(to="orders").pack()))
+    check("My orders lists the rented numbers with their numbers",
+          sum("📅" in x and "+1777000" in x for x in labels()) >= 3, str(labels()))
+
+    # ── what must not rent ──
+    poor = await member(r, 95002, "1.00")
+    n = len(api.rent_bodies)
+    await dp.feed_update(bot, tap(95002, Rn(a="buy", h=24, cc="187", s="full", c=260).pack()))
+    check("not enough balance: nothing rented, nothing held", "$2.60" in session.last_text()
+          and len(api.rent_bodies) == n and await state_of(poor) == (D("1.00"), D("0")))
+    await dp.feed_update(bot, rent("full", 1))
+    check("a button made by hand with a lower price rents nothing: the real price to confirm",
+          len(api.rent_bodies) == n and "price just changed to <b>$2.60</b>" in session.last_text()
+          and button(session, "Rent · $2.60") is not None)
+    await dp.feed_update(bot, rent("tg", 156))
+    check("what is sold out is not rented: said so, next to the list of what is",
+          "can't be rented right now" in session.alerts()[-1] and len(api.rent_bodies) == n
+          and "What is the number for?" in session.last_text())
+    await dp.feed_update(bot, rent("full", 260, h=48))
+    check("a period the wallet does not offer shows the periods", "For how long?" in session.last_text()
+          and len(api.rent_bodies) == n)
+    api.fail_next_buy = "price_exceeded"
+    await dp.feed_update(bot, rent("full", 260))
+    check("the wallet says the price is higher: nothing held, and the price it named is the one to confirm",
+          "price just changed to <b>$3.25</b>" in session.last_text() and button(session, "Rent · $3.25") is not None
+          and await state_of(m) == (D("6.75"), D("0")), session.last_text()[:200])
+    selling._rent_learned.clear()
+    selling._rent_services.clear()
+    api.rent_buy_down = True
+    await dp.feed_update(bot, rent("full", 260))
+    stuck = [x for x in await repo.stale_buying(older_than_sec=-5) if x.member_id == m.id]
+    check("the wallet cannot price the rental at the purchase itself: nothing was bought, so nothing stays held or open",
+          "Busy right now" in session.last_text() and await state_of(m) == (D("6.75"), D("0")) and not stuck,
+          f"{session.last_text()[:80]} {await state_of(m)} {len(stuck)}")
+    api.rent_buy_down, api.rent_down = False, True
+    selling._rent_services.clear()
+    await dp.feed_update(bot, rent("full", 260))
+    check("...nor when the price list cannot be read: asked to try again", "Busy right now" in session.alerts()[-1]
+          and await state_of(m) == (D("6.75"), D("0")))
+    api.rent_down = False
+    n = len(api.rent_bodies)
+    await asyncio.gather(dp.feed_update(bot, rent("zz", 104)), dp.feed_update(bot, rent("zz", 104)))
+    check("a double tap rents one number", len(api.rent_bodies) == n + 1 and await state_of(m) == (D("6.75"), D("1.04")),
+          f"{len(api.rent_bodies) - n} {await state_of(m)}")
+    limit = selling.RENT_MAX_ACTIVE
+    selling.RENT_MAX_ACTIVE = 2
+    await dp.feed_update(bot, rent("zz", 104))
+    selling.RENT_MAX_ACTIVE = limit
+    check("a customer renting the most numbers allowed is told so, and nothing is rented",
+          "already renting 2 numbers" in session.last_text() and len(api.rent_bodies) == n + 1
+          and await state_of(m) == (D("6.75"), D("1.04")), session.last_text()[:120])
+    shown, asked = len(session.texts()), len(api.calls)
+    await dp.feed_update(bot, tap(95002, Ord(a="cancel", id=o3.id).pack()))
+    check("another customer can neither open nor cancel it: told it is closed, the wallet is not asked",
+          "closed" in session.alerts()[-1] and len(session.texts()) == shown and len(api.calls) == asked
+          and (await repo.get_order(o3.id)).status == "waiting")
+
+    # ── a reply that never came ──
+    other = await member(r, 95003, "9.00")
+    api.lose_replies = 3
+    wallet1, n_orders = api.wallet, len(api.orders)
+    try:
+        await selling.buy_rental(r, other, 168, "16", "full", D("3.90"))
+        check("three lost replies -> processing", False)
+    except SellError as e:
+        check("the wallet's answer is lost: 'processing', the customer's money held",
+              e.reason == "processing" and await state_of(other) == (D("9.00"), D("3.90")))
+    from app import repo as _r
+    orig = _r.stale_buying
+    _r.stale_buying = lambda older_than_sec=60: orig(older_than_sec=0)
+    try:
+        await selling.recover_buying()
+        await selling.recover_buying()
+    finally:
+        _r.stale_buying = orig
+    rec = (await repo.member_orders(other.id, 1))[0]
+    check("recovery asks again with the same request, the period included: ONE rental, still held, and the customer gets its card",
+          len(api.orders) == n_orders + 1 and api.wallet == wallet1 - D("3.00") and rec.status == "waiting"
+          and rec.settled == Order.UNSETTLED and rec.rent_hours == 168 and await state_of(other) == (D("9.00"), D("3.90"))
+          and api.rent_bodies[-1] == {"h": 168, "country": "16", "code": "full", "max_price": "3.00"}
+          and any("Rented number" in x and "(6 days left)" in x for x in sent_to(95003)),
+          f"{len(api.orders) - n_orders} {rec.status} {await state_of(other)}")
+
+    # ── a number nobody holds money for ──
+    cli = api.client()
+    lone = await cli.buy_rental(24, "187", "zz", D("0.80"), "orphan-rental-1")
+    selling._orphans[int(lone["id"])] = (r.id, 0.0, "rent")
+    await selling.release_orphans()
+    check("asked back before its refund time opens: kept on the list, tried again later",
+          int(lone["id"]) in selling._orphans and api.orders[lone["id"]]["status"] == "waiting")
+    api.rental_age(lone["id"], 5)
+    selling._orphans[int(lone["id"])] = (r.id, 0.0, "rent")
+    before = api.wallet
+    await selling.release_orphans()
+    check("...and given back inside it: the wallet has its money again",
+          int(lone["id"]) not in selling._orphans and api.orders[lone["id"]]["status"] == "canceled"
+          and api.wallet == before + D("0.80"))
+    late = await cli.buy_rental(24, "187", "zz", D("0.80"), "orphan-rental-2")
+    api.rental_age(late["id"], 30)
+    selling._orphans[int(late["id"])] = (r.id, 0.0, "rent")
+    selling._owner_warned.clear()
+    n_own = len(sent_to(own))
+    await selling.release_orphans()
+    check("too late to give back: dropped from the list, and the owner is told where to find it",
+          int(late["id"]) not in selling._orphans and any("could not be given back" in x for x in sent_to(own)[n_own:]))
+    box = await cli.buy_email("openai.com", "gmx.com", D("0.03"), "orphan-mailbox-1")
+    selling._orphans[int(box["id"])] = (r.id, 0.0, "email")
+    await selling.release_orphans()
+    check("a mailbox nobody holds money for is cancelled as a mailbox (asked about as a number it stayed open)",
+          int(box["id"]) not in selling._orphans and api.orders[box["id"]]["status"] == "canceled")
+    await cli.close()
+
+    # ── a new API key while a rental runs ──
+    from app import provision as _prov
+    from app.bots import builder as _bld
+    only_rent = await make_reseller(api, owner=own + 1, bot_id=88803)
+    lodger = await member(only_rent, 95004, "5.00")
+    kept = await selling.buy_rental(only_rent, lodger, 24, "187", "zz", D("1.04"))
+    letter = await selling.buy_email(only_rent, lodger, "openai.com", "OpenAI", "gmx.com", D("0.04"))
+    elsewhere = FakeNumberHub(key="nh_live_someone_elses_0123456789")
+    real_b, real_p = _bld.NumberHub, _prov.NumberHub
+    _bld.NumberHub = _prov.NumberHub = lambda key: (elsewhere if key == elsewhere.key else api).client(key)
+    try:
+        found = await _bld._an_open_order(only_rent.id)
+        check("the shop's running order is named with what it is", found is not None and found[1] in ("rent", "email"), str(found))
+        for what, order in (("a rented number", kept), ("a mailbox", letter)):
+            open_order = (order.nh_id, order.kind)
+            ok_b = await _bld._check_key(own + 1, api.key, open_order)
+            ok_p = await _prov._key_problem(api.key, open_order)
+            check(f"a key of the SAME account is accepted while {what} runs (it was refused as another account)",
+                  ok_b[1] is None and ok_p[1] is None, f"{ok_b[1]} {ok_p[1]}")
+            no_b = await _bld._check_key(own + 1, elsewhere.key, open_order)
+            no_p = await _prov._key_problem(elsewhere.key, open_order)
+            check(f"...and a key of another account is still refused while {what} runs",
+                  "different NumberHub account" in (no_b[1] or "") and no_p[1] == "other_account", f"{no_b[1]} {no_p[1]}")
+    finally:
+        _bld.NumberHub, _prov.NumberHub = real_b, real_p
+
+    # ── the owner's switch ──
+    await dp.feed_update(bot, msg(own, "/admin"))
+    check("the owner's panel says it is on, with a switch",
+          "📅 Rented numbers: <b>on</b>" in session.last_text()
+          and button(session, "Rented numbers: on") == Adm(a="rent", arg="off").pack())
+    await dp.feed_update(bot, tap(own, button(session, "Rented numbers: on")))
+    check("switched off", (await repo.get_reseller(r.id)).rent_on == 0
+          and "📅 Rented numbers: <b>off</b>" in session.last_text() and button(session, "Rented numbers: off") is not None)
+    await dp.feed_update(bot, msg(cust, "/start"))
+    n = len(api.rent_bodies)
+    gone = button(session, "Rent a number") is None
+    await dp.feed_update(bot, rent("ot", 130))
+    check("off: the button is gone and an old button rents nothing", gone and len(api.rent_bodies) == n)
+    api.rental_sms(o3.nh_id, "Still here 4455", "Shop", "4455")
+    n_sent = len(sent_to(cust))
+    await selling.sync_reseller(await repo.get_reseller(r.id))
+    check("...and a number rented before keeps delivering its SMS",
+          any("<b>Shop</b>: Still here 4455" in x for x in sent_to(cust)[n_sent:]))
+    await dp.feed_update(bot, msg(own, "/admin"))
+    await dp.feed_update(bot, tap(own, button(session, "Rented numbers: off")))
+    await dp.feed_update(bot, msg(cust, "/start"))
+    check("switched on again: the button is back", button(session, "Rent a number") is not None)
+    api2 = FakeNumberHub()
+    api2.rent_periods = []
+    r2 = await make_reseller(api2, owner=own, bot_id=88802)
+    check("a wallet that rents no numbers: no button, nothing to rent", await selling.rent_periods(r2) == [])
+
+    # ── every language ──
+    keys = ["btn_rent", "rent_pick_period", "rent_p_24", "rent_p_72", "rent_p_168", "rent_p_720", "rent_p_days",
+            "rent_pick_country", "rent_pick_service", "rent_any_service", "rent_none", "rent_confirm", "btn_rent_buy",
+            "rent_card_title", "rent_active_days", "rent_active_hours", "rent_ended", "rent_canceled", "rent_failed",
+            "rent_no_sms", "rent_more_sms", "rent_refund_soon", "rent_refund_open", "btn_rent_cancel", "rent_msg_sms",
+            "rent_msg_refunded", "rent_msg_ended", "rent_toast_locked", "rent_toast_closed", "rent_toast_sms",
+            "rent_toast_refused", "err_rent_limit", "rent_unavailable"]
+    missing = [(lang, k) for lang in LANGS for k in keys if k not in _table(lang)]
+    same = [(lang, k) for lang in LANGS if lang != "en" for k in keys if _table(lang).get(k) == _table("en")[k]]
+    check("the rental texts exist in all 14 languages, translated", not missing and not same, f"{missing[:3]} {same[:3]}")
+    now = dt.datetime.now(dt.timezone.utc)
+    many = json.dumps([{"from": "Bank", "text": "Use code 5566 to sign in. " * 6, "code": "5566"}] * 7)
+    states = (("buying", 0, {}), ("failed", 2, {}), ("canceled", 2, {}), ("completed", 1, {"messages": many}),
+              ("waiting", 0, {"cancel_available_at": now + dt.timedelta(minutes=1), "refund_until": now + dt.timedelta(minutes=15)}),
+              ("waiting", 0, {"cancel_available_at": now - dt.timedelta(minutes=1), "refund_until": now + dt.timedelta(minutes=15)}),
+              ("waiting", 1, {"messages": many}), ("waiting", 1, {}))
+    errs = []
+    for lang in LANGS:
+        mem = Member(id=1, reseller_id=1, telegram_id=1, language=lang, balance=D("1"), held=D("0"))
+        for hours in (24, 720, 36):
+            for st, settled, extra in states:
+                row = Order(id=1, reseller_id=1, member_id=1, kind="rent", service="full", service_name="Any service",
+                            country="187", country_name="USA", country_iso="US", phone="17770001", member_price=D("2.60"),
+                            status=st, settled=settled, rent_hours=hours, expires_at=now + dt.timedelta(hours=hours), **extra)
+                text, kb = order_card(mem, row)
+                extra_texts = (rental_sms(mem, row, {"from": "Bank", "text": "Hello", "code": "77"}),
+                               rental_refunded(mem, row), rental_ended(mem, row))
+                if ("{" in text or not kb.inline_keyboard or len(text) > 3900 or any("{" in x for x in extra_texts)
+                        or (extra.get("messages") and "…" not in text and lang == "en")):
+                    errs.append(f"{lang}/{st}/{hours}")
+    check("the card and the messages render cleanly in every language, state and period, a long SMS list included",
+          not errs, str(errs[:5]))
+    selling.RENT_SYNC_SEC = slow
+    runtime._bots.pop(r.id, None)
+
+
 async def main():
     await init_db()
     test_prices()
@@ -3834,7 +4234,7 @@ async def main():
     for fn in (test_buy_and_code, test_no_code_refund, test_failures, test_lost_reply, test_cancel,
                test_races_and_limits, test_bot_flow, test_builder, test_provision, test_custom_prices, test_picker_pages, test_rank_order, test_dead_token, test_rejected_key, test_deposits, test_auto_payments, test_builtin_payments, test_owner_stats, test_kasera_qris, test_paid_left, test_email_codes, test_paused_shop, test_review_money,
                test_review_sync, test_review_bots, test_review_runtime, test_small_topups_and_rupiah,
-               test_proxy_data, test_review_2026_11_24, test_number_cycling,
+               test_proxy_data, test_rentals, test_review_2026_11_24, test_number_cycling,
                test_back_to_the_purchase,
                test_cards_render):
         try:

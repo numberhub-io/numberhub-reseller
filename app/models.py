@@ -80,6 +80,8 @@ class Reseller(Base):
     email_on: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Proxy data packages in this shop: 0 = switched off by the owner, anything else on.
     proxy_on: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Rented numbers in this shop: 0 = switched off by the owner, anything else on.
+    rent_on: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # The morning report to the owner (app/reports.py): 0 = off, anything else on.
     # report_day = the UTC day it was last sent for, so it goes out once a day.
     daily_report: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -177,6 +179,9 @@ class Order(Base):
     # in `country` and the mailbox address in `phone`, as NumberHub's own orders do.
     # "proxy" = a data package, paid when bought: `country` holds its size in GB and
     # `phone` its login; it stays "received" while it works (expires_at = its end).
+    # "rent" = a number rented for days: it stays "waiting" for its whole period,
+    # `rent_hours` is the period, `messages` every SMS it got, and it can be given back
+    # for a refund from `cancel_available_at` until `refund_until`.
     kind: Mapped[str] = mapped_column(String(8), default="sms", server_default="sms")
     # Why a purchase did not happen (NumberHub's own answer: insufficient_funds,
     # sold_out, price_exceeded, ...), for the owner's statistics. None otherwise.
@@ -202,6 +207,13 @@ class Order(Base):
     settled: Mapped[int] = mapped_column(default=UNSETTLED, index=True)
     expires_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     cancel_available_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # A rented number only. The period in hours (the purchase and its replay after a
+    # lost reply are rebuilt from it); every SMS as NumberHub gives it, oldest first
+    # ([{from, text, code}], JSON: `codes` has only the codes read out of them); and
+    # until when a cancel gives the money back (None once NumberHub no longer offers it).
+    rent_hours: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    messages: Mapped[str | None] = mapped_column(Text, nullable=True)
+    refund_until: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)

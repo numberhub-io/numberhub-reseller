@@ -63,7 +63,8 @@ def _markup(value) -> Decimal | None:
     return v.quantize(Decimal("0.01"))
 
 
-async def _key_problem(key: str, open_nh_id: int | None, topup_id: int | None = None) -> tuple[dict | None, str | None]:
+async def _key_problem(key: str, open_order: tuple[int, str] | None,
+                       topup_id: int | None = None) -> tuple[dict | None, str | None]:
     """The same checks as the builder's (wallet, catalog, orders, and the SAME
     account as the shop's open orders), as error codes."""
     cli = NumberHub(key)
@@ -71,8 +72,8 @@ async def _key_problem(key: str, open_nh_id: int | None, topup_id: int | None = 
         bal = await cli.balance()
         await cli.services()
         await cli.orders(limit=1)
-        if open_nh_id is not None:
-            await cli.number(open_nh_id)
+        if open_order is not None:
+            await cli.order_of(*open_order)
         if topup_id is not None:
             await cli.topup(topup_id)      # a customer's recent payment lives on the same account too
         return bal, None
@@ -81,7 +82,7 @@ async def _key_problem(key: str, open_nh_id: int | None, topup_id: int | None = 
             return None, "key_scope"
         if exc.code == "ip_not_allowed":
             return None, "key_ip"
-        if exc.status == 404 and (open_nh_id is not None or topup_id is not None):
+        if exc.status == 404 and (open_order is not None or topup_id is not None):
             return None, "other_account"
         if exc.status in (401, 403):
             return None, "key_rejected"

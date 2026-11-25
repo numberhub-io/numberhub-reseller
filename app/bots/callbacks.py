@@ -52,6 +52,16 @@ class Px(CallbackData, prefix="px"):
     c: int = 0                 # buy: the price on the button, in cents
 
 
+class Rn(CallbackData, prefix="rn"):
+    """Rented numbers."""
+    a: str                     # home | cty (countries of a period) | svc (services of a country) | ok (confirm) | buy
+    h: int = 0                 # the period in hours
+    cc: str = ""               # the country's id
+    s: str = ""                # what the number is for (a service code; "full" = every SMS)
+    c: int = 0                 # buy: the price on the button, in cents
+    p: int = 0                 # the page of a list
+
+
 class Lang(CallbackData, prefix="l"):
     code: str
 

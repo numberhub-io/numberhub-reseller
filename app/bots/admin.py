@@ -91,6 +91,10 @@ async def dashboard(reseller: Reseller):
         "for one verification mail, your commission on top, paid only when the mail arrives",
         "🌐 Proxy data: <b>" + ("on" if getattr(reseller, "proxy_on", None) != 0 else "off") + "</b> · data "
         "packages in GB, your commission on top, paid from your NumberHub wallet when a customer buys one",
+        "📅 Rented numbers: <b>" + ("on" if getattr(reseller, "rent_on", None) != 0 else "off") + "</b> · a number "
+        "for 1 day to 1 month with every SMS, your commission on top, paid from your NumberHub wallet when a "
+        "customer rents one. With no SMS yet they can give it back between the 2nd and the 20th minute: then "
+        "your wallet and the customer both get the money back",
         "",
         "<i>Customers add balance by themselves in crypto (💳 Payments): built in, it lands in your "
         "NumberHub wallet; or through your own OxaPay or @CryptoBot; or they pay you your way and you add "
@@ -116,9 +120,13 @@ async def dashboard(reseller: Reseller):
     proxy_on = getattr(reseller, "proxy_on", None) != 0
     kb.button(text="🌐 Proxy data: on" if proxy_on else "🌐 Proxy data: off",
               callback_data=Adm(a="proxy", arg="off" if proxy_on else "on"))
+    # Rented numbers: a number for days, paid up front, refundable only in its first minutes.
+    rent_on = getattr(reseller, "rent_on", None) != 0
+    kb.button(text="📅 Rented numbers: on" if rent_on else "📅 Rented numbers: off",
+              callback_data=Adm(a="rent", arg="off" if rent_on else "on"))
     kb.button(text="🔄 Refresh", callback_data=Adm(a="home"))
     kb.button(text="🏠 Menu", callback_data=Nav(to="menu"))
-    kb.adjust(1, 2, 2, 2, 2, 2, 2, 2)
+    kb.adjust(1, 2, 2, 2, 2, 2, 2, 1, 2)
     return text, kb.as_markup()
 
 
@@ -624,6 +632,13 @@ def register(r: Router) -> None:
             await c.answer("🌐 Proxy data is on: your customers see the button in the menu."
                            if callback_data.arg == "on" else
                            "🌐 Proxy data is off. A package a customer already bought still works.", show_alert=True)
+            return
+        elif a == "rent" and callback_data.arg in ("on", "off"):
+            await repo.update_reseller(reseller.id, rent_on=1 if callback_data.arg == "on" else 0)
+            await show(c, *await dashboard(await repo.get_reseller(reseller.id)))
+            await c.answer("📅 Rented numbers are on: your customers see the button in the menu."
+                           if callback_data.arg == "on" else
+                           "📅 Rented numbers are off. A number a customer already rents keeps working.", show_alert=True)
             return
         elif a == "report" and callback_data.arg in ("on", "off"):
             await repo.update_reseller(reseller.id, daily_report=1 if callback_data.arg == "on" else 0)

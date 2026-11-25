@@ -145,6 +145,18 @@ Every shop also sells **proxy data**: residential IPs worldwide, bought in GB an
 - A customer may have 5 packages working at once. A lost reply from NumberHub is asked again with the same key: one package, charged once.
 - On by default. ⚙️ Admin panel → 🌐 Proxy data: on / off. A package bought before it was switched off keeps working. The button stays hidden while your NumberHub API sells no packages.
 
+### Rented numbers
+
+Every shop also **rents numbers**: a number that is the customer's for 1 day, 3 days, 1 week or 1 month, with every SMS sent to it delivered in the chat, whoever sends it and whether it carries a code or not. A customer taps 📅 Rent a number, picks the period, the country and what the number is for ("Any service" receives every SMS), confirms the price and gets a card with the number, until when it is theirs, and its newest SMS.
+
+- **Your NumberHub wallet pays when the number is rented.** The customer's price is held on their balance at that moment and charged as soon as the number can no longer be given back: at its first SMS, or when NumberHub's refund time is over.
+- **A refund in the first minutes.** While no SMS has arrived, the customer can give the number back between the 2nd and the 20th minute. NumberHub refunds your wallet and the customer's hold is released, so they get back exactly what they paid. NumberHub decides: the bot releases the hold only on NumberHub's own answer to the cancel. After that time, or once an SMS has arrived, the rental runs to its end.
+- The price is NumberHub's price for the period plus your commission, rounded up to the cent (your profit cap applies).
+- A customer may rent 5 numbers at once, and a rented number does not count against the open orders a customer may have. A lost reply from NumberHub is asked again with the same key and the same period: one rental.
+- A shop with nothing open but running rentals asks NumberHub for news every 15 seconds, so an SMS reaches the customer within about half a minute.
+- On by default. ⚙️ Admin panel → 📅 Rented numbers: on / off. A number rented before it was switched off keeps working. The button stays hidden while your NumberHub API rents no numbers.
+- Not in the bot yet: extending a rental.
+
 ### Built-in payments (crypto, nothing to set up)
 
 ⚙️ Admin panel → 💳 Payments → 💵 Turn on built-in crypto. That is the whole setup: no account to open, no key to paste.
@@ -209,7 +221,8 @@ The shop bot messages you, at most once an hour per problem, when:
 - your API key reached its daily spend limit,
 - NumberHub rejected your API key (it was revoked or rotated). Send a new one with 🤖 My bots, then 🔑 New API key,
 - the key is missing a permission, or only works from certain IP addresses,
-- your account has as many open orders for one app and country as NumberHub allows (all your shops count together).
+- your account has as many open orders for one app and country as NumberHub allows (all your shops count together),
+- a proxy data package or a rented number ended up in your NumberHub account with no customer paying for it (their balance no longer covered it, or NumberHub gave no clear answer for 20 hours). The message says where to find it.
 
 While any of these lasts, customers who try to buy are told that buying is paused for a moment, and nothing is held from them.
 
@@ -229,6 +242,7 @@ A purchase goes like this:
 Other rules:
 
 - Every change to a customer's balance is a single conditional update with an audit row (`member_tx`).
+- A rented number is the one purchase whose hold is charged while the order still runs: at its first SMS, or as soon as NumberHub no longer offers a refund for it (NumberHub says until when on the rental itself; the bot does not guess it from a clock). A cancel is believed only when it is final: NumberHub's own answer to the customer's cancel, or a cancelled rental that is still cancelled a minute later. NumberHub marks a rental cancelled before it asks the number's source and puts it back when the source refuses, and a refund for a rental that kept running would be the owner's loss.
 - A customer can have at most 10 open orders, and at most 3 for the same app and country (`MAX_OPEN_PER_MEMBER`, `MAX_OPEN_PER_ROUTE`).
 - If NumberHub refuses a buy because the price is higher than the list said (`price_exceeded`), the bot remembers the real price for that route for 15 minutes. The customer sees the new price once, and the next tap buys.
 - Cancelling goes to NumberHub first. The local hold is released only after NumberHub confirms the cancel. If a code arrived in the meantime, the customer is told and charged for the code.

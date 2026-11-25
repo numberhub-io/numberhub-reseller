@@ -53,6 +53,8 @@ _EMAIL_WORDING = {"st_waiting", "st_received", "st_expired", "st_buying", "st_fa
 
 def order_card(member: Member, order: Order) -> tuple[str, InlineKeyboardMarkup]:
     from app.selling import order_codes
+    if getattr(order, "kind", "sms") == "rent":
+        return rental_card(member, order)
     if getattr(order, "kind", "sms") == "proxy":
         # Whoever draws a card without NumberHub's live answer (a recovered purchase,
         # a refresh) gets the short one; opening it loads the rest.
@@ -205,6 +207,118 @@ def proxy_card(member: Member, order: Order, live: dict | None = None):
     return "\n".join(lines), kb.as_markup()
 
 
+RENT_SMS_SHOWN = 5              # the newest SMS a rented number's card lists
+
+
+def rent_period(lang: str, hours) -> str:
+    """'1 day', '1 week': a rental period in the customer's language."""
+    try:
+        h = int(hours or 0)
+    except (TypeError, ValueError):
+        h = 0
+    if h in (24, 72, 168, 720):
+        return t(lang, f"rent_p_{h}")
+    return t(lang, "rent_p_days", n=max(1, -(-h // 24)))
+
+
+def rent_service_label(lang: str, code: str, name: str | None) -> str:
+    """What a number is rented for. "Any service" (every SMS) and "any other" are
+    said in the customer's language; an app keeps its name."""
+    if code == "full":
+        return t(lang, "rent_any_service")
+    if code == "ot":
+        return t(lang, "btn_any_other")
+    return str(name or code)
+
+
+def _sms_lines(lang: str, m: dict, limit: int) -> list[str]:
+    sender = str(m.get("from") or "").strip()
+    text = " ".join(str(m.get("text") or "").split())
+    if len(text) > limit:
+        text = text[:limit - 1] + "…"
+    code = str(m.get("code") or "").strip()
+    out = [f"📩 <b>{esc(sender)}</b>: {esc(text)}" if sender else f"📩 {esc(text or code)}"]
+    if code:
+        out.append(t(lang, "card_code", code=esc(code)))
+    return out
+
+
+def rental_card(member: Member, order: Order) -> tuple[str, InlineKeyboardMarkup]:
+    """A rented number: until when it is the customer's, its newest SMS, and, while
+    NumberHub still gives the money back for it, how long that lasts."""
+    from app.bots.callbacks import Rn
+    from app.selling import order_messages
+    lang = member.language or "en"
+    now, until, st = _now(), _aware(order.expires_at), order.status
+    sms = order_messages(order)
+    lines = [t(lang, "rent_card_title", service=esc(rent_service_label(lang, order.service, order.service_name)),
+               flag=flag(order.country_iso), country=esc(order.country_name or order.country))]
+    if order.phone:
+        lines.append(t(lang, "card_number", phone=esc(phone_fmt(order.phone))))
+    lines.append("")
+    active = False
+    if st == "buying":
+        lines.append(t(lang, "err_processing"))
+    elif st == "failed":
+        lines.append(t(lang, "rent_failed", price=money(order.member_price)))
+    elif st == "canceled":
+        lines.append(t(lang, "rent_canceled", price=money(order.member_price)))
+    elif st in ("completed", "expired") or (until is not None and until <= now):
+        lines.append(t(lang, "rent_ended"))
+    else:
+        active = True
+        if until is not None:
+            left, date = int((until - now).total_seconds()), until.strftime("%Y-%m-%d %H:%M")
+            lines.append(t(lang, "rent_active_days", date=date, days=left // 86400) if left >= 2 * 86400
+                         else t(lang, "rent_active_hours", date=date, hours=max(1, -(-left // 3600))))
+    if sms:
+        lines.append("")
+        if len(sms) > RENT_SMS_SHOWN:
+            lines.append(t(lang, "rent_more_sms", n=len(sms) - RENT_SMS_SHOWN))
+        for one in sms[-RENT_SMS_SHOWN:]:
+            lines += _sms_lines(lang, one, 280)
+    elif active:
+        lines += ["", t(lang, "rent_no_sms")]
+    lock = end = 0
+    if active and not sms and order.settled == Order.UNSETTLED and getattr(order, "refund_until", None) is not None:
+        end, lock = seconds_until(order.refund_until), seconds_until(order.cancel_available_at)
+    if end > 0:
+        lines += ["", t(lang, "rent_refund_soon", price=money(order.member_price), left=mmss(lock)) if lock > 0
+                  else t(lang, "rent_refund_open", price=money(order.member_price), left=mmss(end))]
+    if st not in ("buying", "failed", "canceled"):
+        lines += ["", t(lang, "card_paid", price=money(order.member_price))]
+    if order.phone and st not in ("failed", "canceled"):
+        lines.append(t(lang, "card_tip"))
+    kb = InlineKeyboardBuilder()
+    sizes = []
+    if end > 0:
+        kb.button(text=t(lang, "btn_cancel_in", s=lock) if lock > 0 else t(lang, "btn_rent_cancel"),
+                  callback_data=Ord(a="cancel", id=order.id))
+        sizes.append(1)
+    if active:
+        kb.button(text=t(lang, "btn_refresh"), callback_data=Ord(a="view", id=order.id))
+    if st != "buying":
+        kb.button(text=t(lang, "btn_rent"), callback_data=Rn(a="home"))
+    kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+    kb.adjust(*sizes, 2)
+    return "\n".join(lines), kb.as_markup()
+
+
+def rental_sms(member: Member, order: Order, m: dict) -> str:
+    """An SMS that arrived on a rented number, in full."""
+    lang = member.language or "en"
+    return "\n".join([t(lang, "rent_msg_sms", phone=esc(phone_fmt(order.phone)))] + _sms_lines(lang, m, 900))
+
+
+def rental_refunded(member: Member, order: Order) -> str:
+    return t(member.language or "en", "rent_msg_refunded", phone=esc(phone_fmt(order.phone)),
+             price=money(order.member_price))
+
+
+def rental_ended(member: Member, order: Order) -> str:
+    return t(member.language or "en", "rent_msg_ended", phone=esc(phone_fmt(order.phone)))
+
+
 _CALLER = re.compile(r"^\+?\d{10,15}$")
 
 
@@ -286,6 +400,14 @@ OWNER_ALERTS = {
                           "your customer got their money back.\nIf a package from that time shows in your "
                           "NumberHub account under your orders, your wallet paid for it: pass its details to "
                           "the customer once they have paid you, or use it yourself."),
+    "rent_unpaid": ("⚠️ <b>A number was rented on your NumberHub account, and your customer's balance no "
+                    "longer covered it.</b>\nIt could not be given back. You find it in your NumberHub account "
+                    "under your orders, with every SMS it receives: use it yourself, or pass it to the customer "
+                    "once they have paid you."),
+    "rent_unconfirmed": ("⚠️ <b>A number rental got no clear answer from NumberHub for 20 hours</b>, so your "
+                         "customer got their money back.\nIf a rental from that time shows in your NumberHub "
+                         "account under your orders, your wallet paid for it: pass the number to the customer "
+                         "once they have paid you, or use it yourself."),
     "number_cycler": ("⚠️ <b>New numbers are paused for one customer until tomorrow.</b>\n"
                       "Customer {who}<code>{id}</code> took {n} numbers in a day and {got} got a code. Your "
                       "NumberHub account is judged on how many of your numbers get a code, and it pauses new "

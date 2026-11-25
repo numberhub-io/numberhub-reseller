@@ -17,12 +17,12 @@ from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app import payments, repo, selling
-from app.bots.callbacks import AZ, Adm, Buy, Cty, Em, Lang, Nav, Noop, Ord, Pay, Px, Svc, SvcPage
+from app.bots.callbacks import AZ, Adm, Buy, Cty, Em, Lang, Nav, Noop, Ord, Pay, Px, Rn, Svc, SvcPage
 from app.catalog_ui import ANY_OTHER, LETTERS, POPULAR, by_letter, icon, letter_counts, more_popular, nice_name
 from app.i18n import LANGS, resolve, t
 from app.models import Member, Reseller
 from app.selling import SellError
-from app.texts import after_credit_kb, esc, money, order_card, proxy_card
+from app.texts import after_credit_kb, esc, money, order_card, proxy_card, rent_period, rent_service_label
 
 log = logging.getLogger(__name__)
 AZ_PAGE = 30
@@ -185,6 +185,9 @@ async def menu_screen(reseller: Reseller, member: Member, lang: str, is_owner: b
         sizes.append(1)
     if selling.proxy_on(reseller) and await selling.proxy_packages(reseller):
         kb.button(text=t(lang, "btn_proxy"), callback_data=Px(a="home"))
+        sizes.append(1)
+    if selling.rent_on(reseller) and await selling.rent_periods(reseller):
+        kb.button(text=t(lang, "btn_rent"), callback_data=Rn(a="home"))
         sizes.append(1)
     if member.last_service and member.last_country:
         from app.numberhub import flag
@@ -376,7 +379,11 @@ async def orders_screen(member: Member, lang: str):
         return t(lang, "orders_empty"), kb.as_markup()
     from app.numberhub import flag
     for o in rows:
-        if getattr(o, "kind", "sms") == "proxy":
+        if getattr(o, "kind", "sms") == "rent":
+            mark = "✅" if o.status in ("waiting", "received") else STATUS_ICON.get(o.status, "•")
+            label = (f"{mark} 📅 {rent_service_label(lang, o.service, o.service_name)} · {flag(o.country_iso)} "
+                     f"{o.phone and ('+' + o.phone.lstrip('+')) or ''} · {money(o.member_price)}")
+        elif getattr(o, "kind", "sms") == "proxy":
             label = f"{STATUS_ICON.get(o.status, '•')} 🌐 {o.country} GB · {money(o.member_price)}"
         elif getattr(o, "kind", "sms") == "email":
             label = f"{STATUS_ICON.get(o.status, '•')} 📧 {o.service_name or o.service} · {money(o.member_price)}"
@@ -631,6 +638,97 @@ def proxy_confirm_screen(member: Member, lang: str, row: dict, note: str = ""):
     return (note + "\n\n" if note else "") + text, kb.as_markup()
 
 
+# ─── rented numbers ──────────────────────────────────────────────────────────
+RENT_CTY_PAGE = 16
+RENT_SVC_PAGE = 12
+
+
+def _page_nav(kb, page: int, pages: int, make) -> int:
+    """⬅️ 2/5 ➡️ under a list; returns how many buttons it added."""
+    if pages <= 1:
+        return 0
+    n = 1
+    if page > 0:
+        kb.button(text="⬅️", callback_data=make(page - 1))
+        n += 1
+    kb.button(text=f"{page + 1}/{pages}", callback_data=Noop())
+    if page < pages - 1:
+        kb.button(text="➡️", callback_data=make(page + 1))
+        n += 1
+    return n
+
+
+def rent_home_screen(lang: str, periods: list[dict]):
+    """For how long: the periods the shop's API rents numbers for."""
+    kb = InlineKeyboardBuilder()
+    for p in periods:
+        kb.button(text=rent_period(lang, p["h"]), callback_data=Rn(a="cty", h=p["h"]))
+    kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+    kb.adjust(*_pairs(len(periods)), 1)
+    return t(lang, "rent_pick_period"), kb.as_markup()
+
+
+def rent_countries_screen(lang: str, h: int, rows: list[dict], page: int = 0):
+    kb = InlineKeyboardBuilder()
+    if not rows:
+        kb.button(text=t(lang, "btn_back"), callback_data=Rn(a="home"))
+        kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+        kb.adjust(2)
+        return t(lang, "rent_none"), kb.as_markup()
+    pages = max(1, (len(rows) + RENT_CTY_PAGE - 1) // RENT_CTY_PAGE)
+    page = max(0, min(page, pages - 1))
+    chunk = rows[page * RENT_CTY_PAGE:(page + 1) * RENT_CTY_PAGE]
+    for r in chunk:
+        kb.button(text=f"{r['emoji']} {r['name']}"[:32], callback_data=Rn(a="svc", h=h, cc=r["country"]))
+    sizes = _pairs(len(chunk))
+    nav = _page_nav(kb, page, pages, lambda p: Rn(a="cty", h=h, p=p))
+    kb.button(text=t(lang, "btn_back"), callback_data=Rn(a="home"))
+    kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+    kb.adjust(*sizes, *([nav] if nav else []), 2)
+    return t(lang, "rent_pick_country", period=rent_period(lang, h)), kb.as_markup()
+
+
+def rent_services_screen(lang: str, h: int, place: dict, rows: list[dict], page: int = 0):
+    """What the number is for, each with the shop's price for the whole period."""
+    kb = InlineKeyboardBuilder()
+    cc = place["country"]
+    if not rows:
+        kb.button(text=t(lang, "btn_back"), callback_data=Rn(a="cty", h=h))
+        kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+        kb.adjust(2)
+        return t(lang, "rent_none"), kb.as_markup()
+    pages = max(1, (len(rows) + RENT_SVC_PAGE - 1) // RENT_SVC_PAGE)
+    page = max(0, min(page, pages - 1))
+    chunk = rows[page * RENT_SVC_PAGE:(page + 1) * RENT_SVC_PAGE]
+    for r in chunk:
+        kb.button(text=f"{rent_service_label(lang, r['code'], r['name'])} · {money(r['member_price'])}"[:60],
+                  callback_data=Rn(a="ok", h=h, cc=cc, s=r["code"]))
+    nav = _page_nav(kb, page, pages, lambda p: Rn(a="svc", h=h, cc=cc, p=p))
+    kb.button(text=t(lang, "btn_back"), callback_data=Rn(a="cty", h=h))
+    kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+    kb.adjust(*([1] * len(chunk)), *([nav] if nav else []), 2)
+    return (t(lang, "rent_pick_service", flag=place["emoji"], country=esc(place["name"]), period=rent_period(lang, h)),
+            kb.as_markup())
+
+
+def rent_confirm_screen(member: Member, lang: str, h: int, place: dict, row: dict, note: str = ""):
+    price, cc = row["member_price"], place["country"]
+    kb = InlineKeyboardBuilder()
+    kb.button(text=t(lang, "btn_rent_buy", price=money(price)),
+              callback_data=Rn(a="buy", h=h, cc=cc, s=row["code"], c=int(price * 100)))
+    sizes = [1]
+    if member.available < price:
+        kb.button(text=t(lang, "btn_topup"), callback_data=Nav(to="balance"))
+        sizes.append(1)
+    kb.button(text=t(lang, "btn_back"), callback_data=Rn(a="svc", h=h, cc=cc))
+    kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+    kb.adjust(*sizes, 2)
+    text = t(lang, "rent_confirm", service=esc(rent_service_label(lang, row["code"], row["name"])), flag=place["emoji"],
+             country=esc(place["name"]), period=rent_period(lang, h), price=money(price),
+             balance=money(member.available))
+    return (note + "\n\n" if note else "") + text, kb.as_markup()
+
+
 def _email_rows(rows: list[dict]) -> list[dict]:
     """What the session keeps of a domain list: plain values only."""
     return [{"domain": r["domain"], "cents": int(r["member_price"] * 100), "delivery": r.get("delivery")}
@@ -646,6 +744,8 @@ def error_text(exc: SellError, reseller: Reseller, member: Member, lang: str) ->
     key = {"paused": "err_paused", "sold_out": "err_sold_out", "too_many_open": "err_too_many",
            "busy": "err_busy", "processing": "err_processing", "blocked": "blocked",
            "email_limit": "err_email_limit", "number_limit": "err_number_limit"}.get(exc.reason, "err_failed")
+    if exc.reason == "rent_limit":
+        return t(lang, "err_rent_limit", n=selling.RENT_MAX_ACTIVE)
     return t(lang, key)
 
 
@@ -1002,6 +1102,90 @@ def build_router(reseller_id: int) -> Router:
             return
         await _proxy_card(c, reseller, await repo.get_member(member.id) or member, order)
 
+    # ── rented numbers ──
+    @r.callback_query(Rn.filter())
+    async def rent_(c: CallbackQuery, callback_data: Rn, reseller: Reseller, member: Member, lang: str,
+                    state: FSMContext):
+        await state.clear()             # a site or an amount being typed is over: no later text is read as one
+        periods = await selling.rent_periods(reseller) if selling.rent_on(reseller) else []
+        if not periods:
+            await c.answer(t(lang, "err_paused"), show_alert=True)
+            return
+        a, h, cc = callback_data.a, callback_data.h, callback_data.cc
+        if a == "home" or h not in {p["h"] for p in periods}:
+            await _show(c, *rent_home_screen(lang, periods))
+            await c.answer()
+            return
+        try:
+            places = await selling.rent_countries(reseller, h)
+            place = next((x for x in places if x["country"] == cc), None)
+            if a == "cty" or place is None:
+                await _show(c, *rent_countries_screen(lang, h, places, callback_data.p))
+                await c.answer()
+                return
+            rows = await selling.rent_services(reseller, h, cc)
+        except SellError as exc:
+            await c.answer(re.sub(r"<[^>]+>", "", error_text(exc, reseller, member, lang)), show_alert=True)
+            return
+        row = next((x for x in rows if x["code"] == callback_data.s), None)
+        if a == "svc" or row is None:
+            await _show(c, *rent_services_screen(lang, h, place, rows, callback_data.p))
+            if a in ("ok", "buy"):      # what they tapped is no longer offered: say so, next to the list
+                await c.answer(t(lang, "rent_unavailable"), show_alert=True)
+            else:
+                await c.answer()
+            return
+        if a == "buy":
+            await _rent_buy(c, callback_data, reseller, member, lang, place, row)
+            return
+        await _show(c, *rent_confirm_screen(member, lang, h, place, row))
+        await c.answer()
+
+    async def _rent_buy(c: CallbackQuery, callback_data: Rn, reseller: Reseller, member: Member, lang: str,
+                        place: dict, row: dict) -> None:
+        await c.answer("⏳")
+        h, cc = callback_data.h, callback_data.cc
+        try:
+            order = await selling.buy_rental(reseller, member, h, cc, row["code"], Decimal(callback_data.c) / 100)
+        except SellError as exc:
+            if exc.reason == "duplicate":
+                return                  # a double tap: the first tap is renting and shows the card
+            fresh = await repo.get_member(member.id) or member
+            if exc.reason == "price_changed":
+                try:
+                    now = next((x for x in await selling.rent_services(reseller, h, cc) if x["code"] == row["code"]), None)
+                except SellError:
+                    now = None
+                if now is not None:
+                    await _show(c, *rent_confirm_screen(fresh, lang, h, place, now,
+                                                        t(lang, "err_price_changed", price=money(exc.price))))
+                    return
+                exc = SellError("sold_out")
+            kb = InlineKeyboardBuilder()
+            if exc.reason == "no_credit" and (payments.connected(reseller) or reseller.deposit_info):
+                kb.button(text=t(lang, "btn_topup"), callback_data=Nav(to="deposit"))
+            elif exc.reason == "no_credit" and support_url(reseller):
+                kb.button(text=t(lang, "btn_support"), url=support_url(reseller))
+            if exc.reason in ("processing", "rent_limit"):
+                kb.button(text=t(lang, "btn_orders"), callback_data=Nav(to="orders"))
+            else:
+                kb.button(text=t(lang, "btn_back"), callback_data=Rn(a="svc", h=h, cc=cc))
+            kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+            kb.adjust(1)
+            text = t(lang, "rent_unavailable") if exc.reason == "sold_out" else error_text(exc, reseller, fresh, lang)
+            await _show(c, text, kb.as_markup())
+            return
+        except Exception:  # noqa: BLE001
+            log.exception("rent buy crashed")
+            kb = InlineKeyboardBuilder()
+            kb.button(text=t(lang, "btn_orders"), callback_data=Nav(to="orders"))
+            kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+            kb.adjust(1)
+            await _show(c, t(lang, "err_failed"), kb.as_markup())
+            return
+        await _show(c, *order_card(await repo.get_member(member.id) or member, order))
+        await repo.set_card(order.id, c.message.chat.id, c.message.message_id)
+
     # ── orders ──
     @r.callback_query(Ord.filter())
     async def ord_(c: CallbackQuery, callback_data: Ord, reseller: Reseller, member: Member, lang: str):
@@ -1013,6 +1197,19 @@ def build_router(reseller_id: int) -> Router:
             # A data package has nothing to cancel: every button on it opens its card.
             await _proxy_card(c, reseller, member, order)
             await c.answer()
+            return
+        if getattr(order, "kind", "sms") == "rent":
+            # A rented number is given back for a refund, inside NumberHub's refund time only.
+            toast = None
+            if callback_data.a == "cancel":
+                ok, why = await selling.cancel_rental(reseller, member, order.id)
+                order = await repo.get_order(order.id)
+                toast = (t(lang, "toast_cancelled", price=money(order.member_price)) if ok else
+                         t(lang, {"locked": "rent_toast_locked", "closed": "rent_toast_closed", "sms": "rent_toast_sms",
+                                  "refused": "rent_toast_refused", "busy": "err_busy"}.get(why, "toast_closed")))
+            await _show(c, *order_card(member, order))
+            await repo.set_card(order.id, c.message.chat.id, c.message.message_id)
+            await c.answer(toast, show_alert=toast is not None)
             return
         if callback_data.a == "cancel":
             ok, why, secs = await selling.cancel(reseller, member, order.id)
