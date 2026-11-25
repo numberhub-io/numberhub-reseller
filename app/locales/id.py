@@ -130,9 +130,9 @@ T = {
     'pay_bad_amount_idr': '❌ Kirim jumlah dari <b>{min}</b> sampai <b>{max}</b>, atau dalam rupiah dari <b>{idr_min}</b> sampai <b>{idr_max}</b>, misalnya <code>Rp 30.000</code>.',
     # email codes
     'btn_email': '📧 Kode email',
-    'email_pick_site': '📧 <b>Kode email</b>\n\nKotak surat yang menerima satu email verifikasi. Anda hanya membayar saat email masuk.\n\nSitus mana yang mengirim kode? Ketuk salah satu, atau ketik namanya.',
+    'email_pick_site': '📧 <b>Kode email untuk situs apa pun</b>\n\nKotak surat yang menerima satu email verifikasi. Anda hanya membayar saat email masuk.\n\n✍️ <b>Ketik alamat situsnya</b>, misalnya <code>example.com</code>. Situs apa pun bisa.',
     'email_none_found': 'Tidak ada yang cocok dengan nama itu. Ketik alamat situsnya, misalnya <code>example.com</code>.',
-    'email_type_any': 'Situs apa pun bisa: ketik alamatnya, misalnya <code>example.com</code>.',
+    'email_type_any': 'Atau ketuk salah satu yang sering dicari:',
     'email_typed_site': '⚠️ Anda mengetik <b>{site}</b>. Periksa ejaannya: kotak surat dibuka persis untuk situs ini.',
     # proxy data packages
     'btn_proxy': '🌐 Data proxy',
@@ -236,4 +236,6 @@ T = {
     # the way to the first payment
     'btn_topup_gap': '💳 Tambah {amount}',
     'pay_qris_phone': '📱 Bayar dari HP ini? Simpan gambar ini, buka aplikasi bank atau e-wallet Anda, pilih QRIS, lalu pilih gambar ini dari galeri.',
+    # every mailbox of a site
+    'email_type_domain': 'Ada {n} jenis kotak surat. Ketik sebagian namanya untuk mencari, misalnya <code>gmail</code>.',
 }

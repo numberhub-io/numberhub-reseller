@@ -130,9 +130,9 @@ T = {
     'pay_bad_amount_idr': '❌ Envie um valor de <b>{min}</b> a <b>{max}</b>, ou em rupias de <b>{idr_min}</b> a <b>{idr_max}</b>, por exemplo <code>Rp 30.000</code>.',
     # email codes
     'btn_email': '📧 Códigos por e-mail',
-    'email_pick_site': '📧 <b>Códigos por e-mail</b>\n\nUma caixa de e-mail que recebe um e-mail de verificação. Você só paga quando o e-mail chega.\n\nQual site envia o código? Toque em um ou digite o nome.',
+    'email_pick_site': '📧 <b>Códigos por e-mail para qualquer site</b>\n\nUma caixa de e-mail que recebe um e-mail de verificação. Você só paga quando o e-mail chega.\n\n✍️ <b>Digite o endereço do site</b>, por exemplo <code>example.com</code>. Qualquer site funciona.',
     'email_none_found': 'Nada encontrado com esse nome. Digite o endereço do site, por exemplo <code>example.com</code>.',
-    'email_type_any': 'Qualquer site funciona: digite o endereço, por exemplo <code>example.com</code>.',
+    'email_type_any': 'Ou toque em um dos mais pedidos:',
     'email_typed_site': '⚠️ Você digitou <b>{site}</b>. Confira a grafia: a caixa é aberta exatamente para este site.',
     # proxy data packages
     'btn_proxy': '🌐 Dados de proxy',
@@ -236,4 +236,6 @@ T = {
     # the way to the first payment
     'btn_topup_gap': '💳 Adicionar {amount}',
     'pay_qris_phone': '📱 Vai pagar por este telefone? Salve esta imagem, abra o app do seu banco ou carteira, escolha QRIS e selecione a imagem na galeria.',
+    # every mailbox of a site
+    'email_type_domain': '{n} tipos de caixa de e-mail. Digite parte do nome para encontrar uma, por exemplo <code>gmail</code>.',
 }

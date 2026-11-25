@@ -130,9 +130,9 @@ T = {
     'pay_bad_amount_idr': '❌ <b>{min}</b> ile <b>{max}</b> arasında bir tutar gönderin veya rupiah olarak <b>{idr_min}</b> ile <b>{idr_max}</b> arasında, örneğin <code>Rp 30.000</code>.',
     # email codes
     'btn_email': '📧 E-posta kodları',
-    'email_pick_site': '📧 <b>E-posta kodları</b>\n\nTek bir doğrulama e-postası alan bir posta kutusu. Yalnızca e-posta geldiğinde ödersiniz.\n\nKodu hangi site gönderiyor? Birine dokunun ya da adını yazın.',
+    'email_pick_site': '📧 <b>Her site için e-posta kodları</b>\n\nTek bir doğrulama e-postası alan bir posta kutusu. Yalnızca e-posta geldiğinde ödersiniz.\n\n✍️ <b>Sitenin adresini yazın</b>, örneğin <code>example.com</code>. Her site olur.',
     'email_none_found': 'Bu adla bir şey bulunamadı. Sitenin adresini yazın, örneğin <code>example.com</code>.',
-    'email_type_any': 'Her site olur: adresini yazın, örneğin <code>example.com</code>.',
+    'email_type_any': 'Ya da en çok istenenlerden birine dokunun:',
     'email_typed_site': '⚠️ <b>{site}</b> yazdınız. Yazımı kontrol edin: posta kutusu tam olarak bu site için açılır.',
     # proxy data packages
     'btn_proxy': '🌐 Proxy verisi',
@@ -236,4 +236,6 @@ T = {
     # the way to the first payment
     'btn_topup_gap': '💳 {amount} ekle',
     'pay_qris_phone': "📱 Bu telefondan mı ödüyorsunuz? Bu resmi kaydedin, banka veya cüzdan uygulamanızı açın, QRIS'i seçin ve resmi galerinizden seçin.",
+    # every mailbox of a site
+    'email_type_domain': '{n} tür posta kutusu var. Bulmak için adının bir kısmını yazın, örneğin <code>gmail</code>.',
 }

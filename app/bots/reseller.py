@@ -701,7 +701,15 @@ async def pay_amount_screen(reseller: Reseller, member: Member, lang: str):
 
 # ─── email codes ─────────────────────────────────────────────────────────────
 EMAIL_SITES_SHOWN = 16
-EMAIL_DOMAINS_SHOWN = 10
+EMAIL_DOMAINS_PAGE = 10         # mailboxes on one page of a site's list
+EMAIL_DOMAINS_MAX = 80          # ...and in the whole list (NumberHub offers about 47 for one site)
+EMAIL_DOMAINS_FOUND = 20        # shown for a typed name
+# The names everybody knows come before the rest. Until 2026-11-25 a shop showed the
+# first 10 mailboxes and had no second page: for a site with little history those are
+# the 10 cheapest, so gmail.com (the dearest, the most asked for and the one that
+# delivers best) and icloud.com were never offered.
+KNOWN_MAILBOXES = ("gmail.com", "outlook.com", "hotmail.com", "icloud.com", "yahoo.com", "gmx.com", "mail.com",
+                   "email.com")
 DELIVERY_MARK = {"high": "✅", "low": "⚠️"}
 
 
@@ -719,16 +727,27 @@ def email_home_screen(lang: str, sites: list[dict], note: str = ""):
             kb.as_markup())
 
 
-def email_domains_screen(lang: str, site: dict, rows: list[dict]):
+def email_domains_screen(lang: str, site: dict, rows: list[dict], page: int = 0, only: list[int] | None = None):
+    """Every mailbox the shop has for this site, EMAIL_DOMAINS_PAGE to a page. `only` =
+    the places in `rows` that a typed name matched: those alone, and Back shows all."""
     kb = InlineKeyboardBuilder()
-    for i, r in enumerate(rows[:EMAIL_DOMAINS_SHOWN]):
+    places = list(range(len(rows))) if only is None else only[:EMAIL_DOMAINS_FOUND]
+    pages = 1 if only is not None else max(1, -(-len(places) // EMAIL_DOMAINS_PAGE))
+    page = max(0, min(page, pages - 1))
+    chunk = places if only is not None else places[page * EMAIL_DOMAINS_PAGE:(page + 1) * EMAIL_DOMAINS_PAGE]
+    for i in chunk:
+        r = rows[i]
         mark = DELIVERY_MARK.get(r.get("delivery"), "✉️")
         kb.button(text=f"{mark} {r['domain']} · {money(Decimal(r['cents']) / 100)}"[:60],
                   callback_data=Em(a="dom", i=i, t=_tok(site["site"], r["domain"])))
-    kb.button(text=t(lang, "btn_back"), callback_data=Em(a="home"))
+    nav = _page_nav(kb, page, pages, lambda p: Em(a="doms", i=p, t=_tok(site["site"])))
+    kb.button(text=t(lang, "btn_back"),
+              callback_data=Em(a="home") if only is None else Em(a="doms", t=_tok(site["site"])))
     kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
-    kb.adjust(*([1] * len(rows[:EMAIL_DOMAINS_SHOWN]) + [2]))
+    kb.adjust(*([1] * len(chunk)), *([nav] if nav else []), 2)
     text = t(lang, "email_pick_domain", site=esc(site["name"]))
+    if len(rows) > EMAIL_DOMAINS_PAGE:
+        text += "\n\n" + t(lang, "email_type_domain", n=len(rows))
     if site.get("typed") or site.get("known") is False:
         # An address the customer typed, or one guessed from a name: a wrong one opens
         # a mailbox for the wrong site.
@@ -741,7 +760,8 @@ def email_confirm_screen(member: Member, lang: str, site: dict, row: dict, i: in
     kb = InlineKeyboardBuilder()
     kb.button(text=t(lang, "btn_email_buy", price=money(price)),
               callback_data=Em(a="buy", i=i, c=int(row["cents"]), t=_tok(site["site"], row["domain"])))
-    kb.button(text=t(lang, "btn_back"), callback_data=Em(a="doms", t=_tok(site["site"])))
+    # Back to the page of the list this mailbox is on.
+    kb.button(text=t(lang, "btn_back"), callback_data=Em(a="doms", i=i // EMAIL_DOMAINS_PAGE, t=_tok(site["site"])))
     kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
     kb.adjust(1, 2)
     text = t(lang, "email_confirm", site=esc(site["name"]), domain=esc(row["domain"]), price=money(price),
@@ -951,9 +971,17 @@ def rent_confirm_screen(member: Member, lang: str, h: int, place: dict, row: dic
 
 
 def _email_rows(rows: list[dict]) -> list[dict]:
-    """What the session keeps of a domain list: plain values only."""
+    """What the session keeps of a site's mailboxes: plain values only, every one of them,
+    in the order they are shown. First the ones that deliver best for this site (✅),
+    then the names everybody knows, then the rest as NumberHub ranks them; the ones that
+    deliver badly for this site come last."""
+    def place(pair):
+        n, r = pair
+        known = KNOWN_MAILBOXES.index(r["domain"]) if r["domain"] in KNOWN_MAILBOXES else len(KNOWN_MAILBOXES)
+        return (0 if r.get("delivery") == "high" else 2 if r.get("delivery") == "low" else 1, known, n)
+    ordered = [r for _, r in sorted(enumerate(rows), key=place)]
     return [{"domain": r["domain"], "cents": int(r["member_price"] * 100), "delivery": r.get("delivery")}
-            for r in rows[:EMAIL_DOMAINS_SHOWN]]
+            for r in ordered[:EMAIL_DOMAINS_MAX]]
 
 
 def error_text(exc: SellError, reseller: Reseller, member: Member, lang: str) -> str:
@@ -1160,7 +1188,7 @@ def build_router(reseller_id: int) -> Router:
         await c.answer()
 
     async def _email_domains(c: CallbackQuery | Message, reseller: Reseller, lang: str, state: FSMContext,
-                             site: dict) -> None:
+                             site: dict, page: int = 0) -> None:
         """The mailboxes for one site, after a tap or after the customer typed its address."""
         tapped = isinstance(c, CallbackQuery)
         try:
@@ -1179,7 +1207,7 @@ def build_router(reseller_id: int) -> Router:
             kb.adjust(2)
             await _show(c, t(lang, "email_no_domains", site=esc(site["name"])), kb.as_markup())
         else:
-            await _show(c, *email_domains_screen(lang, site, rows))
+            await _show(c, *email_domains_screen(lang, site, rows, page))
         if tapped:
             await c.answer()
 
@@ -1193,7 +1221,7 @@ def build_router(reseller_id: int) -> Router:
         if a == "site" and 0 <= i < len(sites) and made_for == _tok(sites[i]["site"]):
             await _email_domains(c, reseller, lang, state, sites[i])
         elif a == "doms" and site and made_for == _tok(site["site"]):
-            await _email_domains(c, reseller, lang, state, site)
+            await _email_domains(c, reseller, lang, state, site, page=i)      # i = the page of the list
         elif a == "dom" and site and 0 <= i < len(rows) and made_for == _tok(site["site"], rows[i]["domain"]):
             await _show(c, *email_confirm_screen(member, lang, site, rows[i], i))
             await c.answer()
@@ -1258,6 +1286,15 @@ def build_router(reseller_id: int) -> Router:
 
     @r.message(StateFilter(EmailForm.site), F.text, ~F.text.startswith("/"))
     async def email_typed(m: Message, reseller: Reseller, lang: str, state: FSMContext):
+        # On a site's list of mailboxes a typed name finds a mailbox ("gmail", "yandex").
+        data = await state.get_data()
+        on_site, rows = data.get("em_site"), data.get("em_domains") or []
+        q = m.text.strip().lower().lstrip("@")
+        if on_site and rows and 2 <= len(q) <= 40 and selling.email_on(reseller):
+            hits = [i for i, row in enumerate(rows) if q in row["domain"]]
+            if hits:
+                await _show(m, *email_domains_screen(lang, on_site, rows, only=hits))
+                return
         site = selling.email_site(m.text) if selling.email_on(reseller) else None
         if site:
             # A website address: straight to its mailboxes, whether the list knows it or not.

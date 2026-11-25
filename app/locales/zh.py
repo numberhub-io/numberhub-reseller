@@ -130,9 +130,9 @@ T = {
     'pay_bad_amount_idr': '❌ 请发送 <b>{min}</b> 到 <b>{max}</b> 之间的金额，或 <b>{idr_min}</b> 到 <b>{idr_max}</b> 之间的印尼盾金额，例如 <code>Rp 30.000</code>。',
     # email codes
     'btn_email': '📧 邮箱验证码',
-    'email_pick_site': '📧 <b>邮箱验证码</b>\n\n一个用来接收一封验证邮件的邮箱。邮件到达后才扣费。\n\n哪个网站发送验证码？点选一个，或输入名称。',
+    'email_pick_site': '📧 <b>任何网站的邮箱验证码</b>\n\n一个用来接收一封验证邮件的邮箱。邮件到达后才扣费。\n\n✍️ <b>请输入网址</b>，例如 <code>example.com</code>。任何网站都可以。',
     'email_none_found': '没有找到这个名称。请输入网站地址，例如 <code>example.com</code>。',
-    'email_type_any': '任何网站都可以：请输入网址，例如 <code>example.com</code>。',
+    'email_type_any': '或点选常用网站：',
     'email_typed_site': '⚠️ 您输入的是 <b>{site}</b>。请检查拼写：邮箱只为这个网站开通。',
     # proxy data packages
     'btn_proxy': '🌐 代理流量',
@@ -236,4 +236,6 @@ T = {
     # the way to the first payment
     'btn_topup_gap': '💳 充值 {amount}',
     'pay_qris_phone': '📱 就在这部手机上付款？请保存这张图片，打开您的银行或钱包应用，选择 QRIS，然后从相册中选取这张图片。',
+    # every mailbox of a site
+    'email_type_domain': '共有 {n} 种邮箱。输入名称的一部分即可查找，例如 <code>gmail</code>。',
 }

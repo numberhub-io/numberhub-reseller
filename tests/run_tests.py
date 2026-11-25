@@ -2347,7 +2347,7 @@ async def test_email_codes():
     check("the menu has an Email codes button", button(session, "Email codes") == Em(a="home").pack())
     await dp.feed_update(bot, tap(cust, button(session, "Email codes")))
     check("the customer is asked which site sends the code, with the most asked for as buttons",
-          "Which site sends the code" in session.last_text() and labels()[:3] == ["OpenAI", "Google", "Reddit"],
+          "Type the website's address" in session.last_text() and labels()[:3] == ["OpenAI", "Google", "Reddit"],
           str(labels()))
     await dp.feed_update(bot, tap(cust, button(session, "OpenAI")))
     check("the mail domains in stock, the reliable first, at the shop's price (NumberHub's plus 30%, rounded up)",
@@ -2447,7 +2447,7 @@ async def test_email_codes():
     await dp.feed_update(bot, msg(cust, "/start"))
     await dp.feed_update(bot, tap(cust, button(session, "Email codes")))
     await dp.feed_update(bot, msg(cust, "redd"))
-    check("typing a name finds the site", labels()[0] == "Reddit" and "Which site sends the code" in session.last_text())
+    check("typing a name finds the site", labels()[0] == "Reddit" and "Type the website's address" in session.last_text())
     await dp.feed_update(bot, tap(cust, button(session, "Reddit")))
     check("a site with no mailbox in stock says so", "No mailbox is available for <b>Reddit</b>" in session.last_text())
     await dp.feed_update(bot, tap(cust, button(session, "Back")))
@@ -3592,7 +3592,7 @@ async def test_review_2026_11_24():
     n_mail = len(api.email_bodies)
     await dp.feed_update(bot, tap(cust, old_buy))
     check("a 'Get the address' button from another site's screen buys nothing: the picker again",
-          len(api.email_bodies) == n_mail and "Which site sends the code" in session.last_text())
+          len(api.email_bodies) == n_mail and "Type the website's address" in session.last_text())
     await dp.feed_update(bot, tap(cust, Em(a="buy", i=0, c=99).pack()))
     check("…and neither does a button made by hand", len(api.email_bodies) == n_mail)
     await dp.feed_update(bot, msg(cust, "shopee"))
@@ -5207,6 +5207,103 @@ async def test_first_payment_path():
     runtime._bots.pop(r.id, None)
 
 
+async def test_every_mailbox():
+    """The platform's owner, 2026-11-25: "still email domain static, we can do any domain".
+    The wallet offered 47 kinds of mailbox for any site; a shop showed the first 10, which
+    for most sites are the 10 cheapest, so gmail.com was never among them."""
+    print("email codes: every mailbox of a site")
+    from app.bots.callbacks import Em
+    from app.bots.reseller import EMAIL_DOMAINS_PAGE, _tok, build_router
+    own = 5201
+    api = FakeNumberHub()
+    # As the wallet lists them for a site with no history: cheapest first, gmail.com last.
+    cheap = ["mail.com", "gmx.com", "email.com"] + [f"gmx.{x}" for x in ("us", "fr", "es", "it", "pt", "se", "ie", "ca")]
+    mid = [f"yandex.{x}" for x in ("com", "kz", "by", "lt", "lv", "ee", "fi", "fr", "kg", "md", "tj", "tm", "uz", "az")]
+    listed = ([{"domain": d, "price": "0.01", "in_stock": True, "delivery": None} for d in cheap]
+              + [{"domain": d, "price": "0.02", "in_stock": True, "delivery": None} for d in mid]
+              + [{"domain": "libero.it", "price": "0.02", "in_stock": True, "delivery": "low"},
+                 {"domain": "caramail.fr", "price": "0.02", "in_stock": True, "delivery": "high"},
+                 {"domain": "icloud.com", "price": "0.03", "in_stock": True, "delivery": None},
+                 {"domain": "gmail.com", "price": "0.04", "in_stock": True, "delivery": None}])
+    api.email_domains["shop-site.io"] = listed
+    r = await make_reseller(api, owner=own, bot_id=88851)
+    session = FakeSession(bot_id=88851)
+    bot = fake_bot(session)
+    runtime._bots[r.id] = bot
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(build_router(r.id))
+    cust = 99101
+    m = await member(r, cust, "5.00")
+    labels = lambda: [b.text for row in (session.last_markup().inline_keyboard if session.last_markup() else [])  # noqa: E731
+                      for b in row]
+    names = lambda: [x.split(" ")[1] for x in labels() if "·" in x and "$" in x]     # noqa: E731
+
+    await dp.feed_update(bot, msg(cust, "/start"))
+    await dp.feed_update(bot, tap(cust, button(session, "Email codes")))
+    text = session.last_text()
+    check("the first screen says any website and asks for its address before it shows a list",
+          "Email codes for any website" in text and "Type the website's address" in text and "Any website works" in text
+          and text.index("Type the website's address") < text.index("Or tap one that is often asked for"), text[:200])
+    await dp.feed_update(bot, msg(cust, "shop-site.io"))
+    first = names()
+    check("29 mailboxes for the site: the first page leads with the one that delivers best here, then the names "
+          "everybody knows, gmail.com and icloud.com among them (they were never shown)",
+          len(listed) == 29 and first[:6] == ["caramail.fr", "gmail.com", "icloud.com", "gmx.com", "mail.com", "email.com"]
+          and len(first) == EMAIL_DOMAINS_PAGE == 10 and "1/3" in labels() and "➡️" in labels(), str(first))
+    check("the screen says how many there are and that a name can be typed",
+          "29 kinds of mailbox" in session.last_text() and "<code>gmail</code>" in session.last_text())
+    seen = list(first)
+    await dp.feed_update(bot, tap(cust, button(session, "➡️")))
+    seen += names()
+    check("page two has ten more", len(names()) == 10 and "2/3" in labels() and "⬅️" in labels())
+    await dp.feed_update(bot, tap(cust, button(session, "➡️")))
+    seen += names()
+    check("the last page has the rest, with the one that delivers badly for this site at the very end",
+          len(names()) == 9 and names()[-1] == "libero.it" and "3/3" in labels() and "➡️" not in labels(), str(names()))
+    check("every mailbox the wallet offers can be reached, each once",
+          sorted(seen) == sorted(x["domain"] for x in listed), f"{len(seen)} {len(set(seen))}")
+    await dp.feed_update(bot, tap(cust, button(session, "yandex.tm")))
+    back = button(session, "Back")
+    check("a mailbox from page three: its price to confirm",
+          "yandex.tm" in session.last_text() and button(session, "Get the address") is not None
+          and back == Em(a="doms", i=2, t=_tok("shop-site.io")).pack(),
+          session.last_text()[:80])
+    await dp.feed_update(bot, tap(cust, back))
+    check("Back returns to the page it was on, not to the first", "3/3" in labels() and "yandex.tm" in names())
+
+    # ── a typed name ──
+    await dp.feed_update(bot, msg(cust, "gmail"))
+    check("'gmail' typed on the list finds gmail.com", names() == ["gmail.com"] and "shop-site.io" in session.last_text(),
+          str(labels()))
+    await dp.feed_update(bot, msg(cust, "Yandex"))
+    check("'Yandex' finds all 14 yandex mailboxes, and Back shows every mailbox again",
+          len(names()) == 14 and all(x.startswith("yandex.") for x in names())
+          and button(session, "Back") == Em(a="doms", t=_tok("shop-site.io")).pack(), str(names()))
+    await dp.feed_update(bot, tap(cust, button(session, "yandex.kz")))
+    await dp.feed_update(bot, tap(cust, button(session, "Get the address")))
+    o = (await repo.member_orders(m.id, 1))[0]
+    check("the mailbox bought is the one tapped in the found list",
+          o.kind == "email" and o.country == "yandex.kz" and o.service == "shop-site.io" and o.member_price == D("0.03"),
+          f"{o.kind} {o.country} {o.member_price}")
+    await dp.feed_update(bot, tap(cust, button(session, "Email codes") or Em(a="home").pack()))
+    await dp.feed_update(bot, msg(cust, "shop-site.io"))
+    await dp.feed_update(bot, msg(cust, "discord.com"))
+    check("a website's address typed on a mailbox list is still a website (no mailbox has that name)",
+          "discord.com" in session.last_text() and "shop-site.io" not in session.last_text(), session.last_text()[:80])
+    await dp.feed_update(bot, tap(cust, Em(a="home").pack()))
+    await dp.feed_update(bot, msg(cust, "gmail"))
+    check("on the list of sites the same word is a search for a site, not for a mailbox",
+          names() == [] and "kinds of mailbox" not in session.last_text(), str(labels()))
+    api.email_domains["small.io"] = listed[:4]
+    await dp.feed_update(bot, msg(cust, "small.io"))
+    check("a site with a few mailboxes: one page, no page buttons, no hint to type",
+          len(names()) == 4 and "1/1" not in labels() and "kinds of mailbox" not in session.last_text())
+    missing = [lang for lang in LANGS if "email_type_domain" not in _table(lang)
+               or (lang != "en" and _table(lang)["email_type_domain"] == _table("en")["email_type_domain"])]
+    check("the new line exists in all 14 languages, translated", not missing, str(missing))
+    runtime._bots.pop(r.id, None)
+
+
 async def main():
     await init_db()
     test_prices()
@@ -5216,6 +5313,7 @@ async def main():
                test_review_sync, test_review_bots, test_review_runtime, test_small_topups_and_rupiah,
                test_proxy_data, test_rentals, test_esim, test_review_2026_11_24, test_number_cycling,
                test_review_defects_2026_11_25, test_commission_per_product, test_first_payment_path,
+               test_every_mailbox,
                test_back_to_the_purchase,
                test_cards_render):
         try:

@@ -162,6 +162,8 @@ Besides phone numbers, every shop sells **email codes**: a mailbox that receives
 - One customer may have 3 mailboxes waiting and ask for 10 an hour; a shop 50 an hour. A customer whose six mailboxes in a day all ended with no mail waits until the day has passed. NumberHub limits each account and pauses one whose mailboxes rarely get a mail, so a careless customer must not use up your limit.
 - On by default. ⚙️ Admin panel → 📧 Email codes: on / off. The button also stays hidden while your NumberHub API lists no email sites.
 
+**Every mailbox, for any website.** A customer types any website's address; the list of popular sites is only a shortcut. For that site the bot lists every kind of mailbox NumberHub has (about 47: gmail.com, icloud.com, mail.com, gmx, yandex and more), 10 to a page. First the ones that deliver best for the site (✅), then the names everybody knows, then the rest; the ones that deliver badly (⚠️) come last. Typing part of a name on that screen (`gmail`, `yandex`) finds a mailbox.
+
 ### Proxy data
 
 Every shop also sells **proxy data**: residential IPs worldwide, bought in GB and used within the package's days (30). A customer taps 🌐 Proxy data, picks a package, confirms the price and gets a card with the host, the ports (HTTP and SOCKS5), a login and a password, three ready lines to paste (any country, one country, the same IP for a while), what is used and left, and a one-tap button that sets the proxy up in Telegram.

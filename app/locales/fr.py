@@ -130,9 +130,9 @@ T = {
     'pay_bad_amount_idr': '❌ Envoyez un montant de <b>{min}</b> à <b>{max}</b>, ou en roupies de <b>{idr_min}</b> à <b>{idr_max}</b>, par exemple <code>Rp 30.000</code>.',
     # email codes
     'btn_email': '📧 Codes par e-mail',
-    'email_pick_site': "📧 <b>Codes par e-mail</b>\n\nUne boîte mail qui reçoit un e-mail de vérification. Vous ne payez que lorsque l'e-mail arrive.\n\nQuel site envoie le code ? Touchez-en un, ou tapez son nom.",
+    'email_pick_site': "📧 <b>Codes par e-mail pour n'importe quel site</b>\n\nUne boîte mail qui reçoit un e-mail de vérification. Vous ne payez que lorsque l'e-mail arrive.\n\n✍️ <b>Tapez l'adresse du site</b>, par exemple <code>example.com</code>. N'importe quel site fonctionne.",
     'email_none_found': "Rien trouvé pour ce nom. Tapez l'adresse du site, par exemple <code>example.com</code>.",
-    'email_type_any': "N'importe quel site fonctionne : tapez son adresse, par exemple <code>example.com</code>.",
+    'email_type_any': "Ou touchez l'un des plus demandés :",
     'email_typed_site': "⚠️ Vous avez tapé <b>{site}</b>. Vérifiez l'orthographe : la boîte est ouverte pour ce site exactement.",
     # proxy data packages
     'btn_proxy': '🌐 Données proxy',
@@ -236,4 +236,6 @@ T = {
     # the way to the first payment
     'btn_topup_gap': '💳 Ajouter {amount}',
     'pay_qris_phone': "📱 Vous payez depuis ce téléphone ? Enregistrez cette image, ouvrez l'application de votre banque ou portefeuille, choisissez QRIS, puis sélectionnez l'image dans votre galerie.",
+    # every mailbox of a site
+    'email_type_domain': '{n} types de boîte mail. Tapez une partie du nom pour en trouver une, par exemple <code>gmail</code>.',
 }

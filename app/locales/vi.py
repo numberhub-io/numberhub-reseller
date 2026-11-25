@@ -130,9 +130,9 @@ T = {
     'pay_bad_amount_idr': '❌ Gửi số tiền từ <b>{min}</b> đến <b>{max}</b>, hoặc bằng rupiah từ <b>{idr_min}</b> đến <b>{idr_max}</b>, ví dụ <code>Rp 30.000</code>.',
     # email codes
     'btn_email': '📧 Mã qua email',
-    'email_pick_site': '📧 <b>Mã qua email</b>\n\nMột hộp thư nhận một email xác minh. Bạn chỉ trả tiền khi email đến.\n\nTrang nào gửi mã? Chạm vào một trang, hoặc gõ tên.',
+    'email_pick_site': '📧 <b>Mã qua email cho mọi trang web</b>\n\nMột hộp thư nhận một email xác minh. Bạn chỉ trả tiền khi email đến.\n\n✍️ <b>Nhập địa chỉ trang web</b>, ví dụ <code>example.com</code>. Trang web nào cũng được.',
     'email_none_found': 'Không tìm thấy gì với tên đó. Hãy gõ địa chỉ trang, ví dụ <code>example.com</code>.',
-    'email_type_any': 'Trang web nào cũng được: hãy nhập địa chỉ, ví dụ <code>example.com</code>.',
+    'email_type_any': 'Hoặc chạm vào một trang hay được chọn:',
     'email_typed_site': '⚠️ Bạn đã nhập <b>{site}</b>. Hãy kiểm tra chính tả: hộp thư được mở cho đúng trang này.',
     # proxy data packages
     'btn_proxy': '🌐 Dữ liệu proxy',
@@ -236,4 +236,6 @@ T = {
     # the way to the first payment
     'btn_topup_gap': '💳 Nạp {amount}',
     'pay_qris_phone': '📱 Thanh toán ngay trên điện thoại này? Lưu ảnh này, mở ứng dụng ngân hàng hoặc ví của bạn, chọn QRIS rồi chọn ảnh từ thư viện.',
+    # every mailbox of a site
+    'email_type_domain': 'Có {n} loại hộp thư. Gõ một phần tên để tìm, ví dụ <code>gmail</code>.',
 }

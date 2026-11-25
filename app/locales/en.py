@@ -139,9 +139,9 @@ T = {
     'pay_bad_amount_idr': '❌ Send an amount from <b>{min}</b> to <b>{max}</b>, or in rupiah from <b>{idr_min}</b> to <b>{idr_max}</b>, for example <code>Rp 30.000</code>.',
     # email codes
     'btn_email': '📧 Email codes',
-    'email_pick_site': '📧 <b>Email codes</b>\n\nA mailbox that receives one verification mail. You pay only when the mail arrives.\n\nWhich site sends the code? Tap one, or type its name.',
+    'email_pick_site': "📧 <b>Email codes for any website</b>\n\nA mailbox that receives one verification mail. You pay only when the mail arrives.\n\n✍️ <b>Type the website's address</b>, for example <code>example.com</code>. Any website works.",
     'email_none_found': "Nothing found for that name. Type the site's address, for example <code>example.com</code>.",
-    'email_type_any': 'Any website works: type its address, for example <code>example.com</code>.',
+    'email_type_any': 'Or tap one that is often asked for:',
     'email_typed_site': '⚠️ You typed <b>{site}</b>. Check the spelling: the mailbox is opened for exactly this site.',
     # proxy data packages
     'btn_proxy': '🌐 Proxy data',
@@ -245,4 +245,6 @@ T = {
     # the way to the first payment
     'btn_topup_gap': '💳 Add {amount}',
     'pay_qris_phone': '📱 Paying on this phone? Save this picture, open your bank or wallet app, choose QRIS, and pick the picture from your gallery.',
+    # every mailbox of a site
+    'email_type_domain': '{n} kinds of mailbox. Type part of a name to find one, for example <code>gmail</code>.',
 }
