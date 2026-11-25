@@ -233,4 +233,7 @@ T = {
     'esim_msg_refunded': '❌ eSIM Anda <b>{plan}</b> tidak bisa dikirim. {price} kembali ke saldo Anda.',
     'err_esim_limit': 'Anda sudah punya {n} eSIM yang sedang disiapkan. Tunggu sampai salah satunya tiba.',
     'esim_unavailable': '😕 Paket ini belum bisa dibeli sekarang. Pilih yang lain atau coba lagi nanti.',
+    # the way to the first payment
+    'btn_topup_gap': '💳 Tambah {amount}',
+    'pay_qris_phone': '📱 Bayar dari HP ini? Simpan gambar ini, buka aplikasi bank atau e-wallet Anda, pilih QRIS, lalu pilih gambar ini dari galeri.',
 }

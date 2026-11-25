@@ -233,4 +233,7 @@ T = {
     'esim_msg_refunded': '❌ Không giao được eSIM <b>{plan}</b> của bạn. {price} đã về số dư của bạn.',
     'err_esim_limit': 'Bạn đang có {n} eSIM được chuẩn bị. Hãy chờ một cái đến.',
     'esim_unavailable': '😕 Hiện không mua được gói này. Hãy chọn gói khác hoặc thử lại sau.',
+    # the way to the first payment
+    'btn_topup_gap': '💳 Nạp {amount}',
+    'pay_qris_phone': '📱 Thanh toán ngay trên điện thoại này? Lưu ảnh này, mở ứng dụng ngân hàng hoặc ví của bạn, chọn QRIS rồi chọn ảnh từ thư viện.',
 }

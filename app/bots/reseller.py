@@ -3,12 +3,13 @@ panel. One router per reseller (build_router), mounted on that bot's own
 Dispatcher by app.runtime."""
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import logging
 import hashlib
 import re
 import time
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_CEILING, Decimal, InvalidOperation
 
 from aiogram import BaseMiddleware, F, Router
 from aiogram.filters import Command, CommandStart, StateFilter
@@ -114,10 +115,65 @@ class Context(BaseMiddleware):
             await _reply(event, t(lang, "blocked"))
             return None
         data.update(reseller=reseller, member=member, lang=lang, is_owner=is_owner)
+        if not is_owner:
+            await _note_steps(event, reseller.id, member.id)
         try:
             return await handler(event, data)
         finally:
             await _stamp_form(state)
+
+
+def _step_of(event) -> str | None:
+    """Which step of the way to a purchase this tap is (repo.STEPS), from the button's
+    own data. None = none of them."""
+    if isinstance(event, Message):
+        # Plain text outside a form is a search for something to buy.
+        return "browse" if event.text and not event.text.startswith("/") else None
+    data = event.data or ""
+    if data.startswith("c:"):
+        return "price"
+    if data.startswith("b:"):
+        return "buy"
+    if data.startswith(("e:", "px:", "rn:", "es:")):       # email codes, proxy data, rentals, eSIM
+        a = data.split(":", 2)[1] if data.count(":") else ""
+        return "buy" if a == "buy" else "price" if a in ("ok", "dom", "pkg") else "browse"
+    if data.startswith(("s:", "sp:", "az:", "n:buy", "n:apps")):
+        return "browse"
+    if data.startswith(("n:deposit", "n:balance", "p:")):
+        return "topup"
+    return None
+
+
+async def _note_steps(event, reseller_id: int, member_id: int) -> None:
+    """Count how far this customer got today. Counting must never cost them a tap."""
+    try:
+        await repo.note_step(reseller_id, member_id, "open")
+        step = _step_of(event)
+        if step:
+            await repo.note_step(reseller_id, member_id, step)
+    except Exception:  # noqa: BLE001
+        log.warning("step not counted for member %s", member_id, exc_info=True)
+
+
+def _gap_button(kb, reseller: Reseller, member: Member, lang: str, price) -> bool:
+    """On a price the balance does not cover: one tap opens a payment for what is
+    missing (never less than the smallest payment this shop takes). False = no such
+    button was added: the shop takes no automatic payment, or the amount is more than
+    one payment can be, and the caller keeps its own way to Add balance.
+
+    Until 2026-11-25 the button there opened the balance screen: three more taps and an
+    amount to work out. Of 705 customers 28 had ever opened a payment."""
+    if not payments.connected(reseller):
+        return False
+    gap = Decimal(price) - member.available
+    if gap <= 0:
+        return False
+    low, high = pay_limits(reseller)
+    amount = max(gap, low).quantize(Decimal("0.01"), rounding=ROUND_CEILING)
+    if amount > high:
+        return False
+    kb.button(text=t(lang, "btn_topup_gap", amount=money(amount)), callback_data=Pay(a="amt", c=int(amount * 100)))
+    return True
 
 
 # The buttons that belong to each form. Anything else ends it.
@@ -440,7 +496,8 @@ async def confirm_screen(reseller: Reseller, member: Member, lang: str, code: st
               callback_data=Buy(code=code, cc=str(cc), cents=int(price * 100)))
     sizes = [1]
     if member.available < price:
-        kb.button(text=t(lang, "btn_topup"), callback_data=Nav(to="balance"))
+        if not _gap_button(kb, reseller, member, lang, price):
+            kb.button(text=t(lang, "btn_topup"), callback_data=Nav(to="balance"))
         sizes.append(1)
     kb.button(text=t(lang, "btn_back"), callback_data=Svc(code=code, page=back_page))
     kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
@@ -548,7 +605,8 @@ async def send_qris(target, p, lang: str) -> None:
     msg = target.message if isinstance(target, CallbackQuery) else target
     await msg.answer_photo(BufferedInputFile(payments.qr_png(d.get("qr", "")), filename="qris.png"),
                            caption=t(lang, "pay_qris", idr=rupiah(d.get("idr", 0)), amount=money(p.amount),
-                                     minutes=max(1, left)), reply_markup=kb.as_markup())
+                                     minutes=max(1, left)) + "\n\n" + t(lang, "pay_qris_phone"),
+                           reply_markup=kb.as_markup())
 
 
 def address_screen(p, lang: str):
@@ -772,14 +830,16 @@ def esim_plans_screen(lang: str, place: dict, rows: list[dict], page: int = 0):
     return t(lang, "esim_pick_plan", flag=place["emoji"], region=esc(place["name"])), kb.as_markup()
 
 
-def esim_confirm_screen(member: Member, lang: str, place: dict, row: dict, note: str = ""):
+def esim_confirm_screen(member: Member, lang: str, place: dict, row: dict, note: str = "",
+                        reseller: Reseller | None = None):
     price = row["member_price"]
     kb = InlineKeyboardBuilder()
     kb.button(text=t(lang, "btn_proxy_buy", price=money(price)),          # "✅ Buy · $x", the same words
               callback_data=Es(a="buy", r=place["code"], k=row["code"], c=int(price * 100)))
     sizes = [1]
     if member.available < price:
-        kb.button(text=t(lang, "btn_topup"), callback_data=Nav(to="balance"))
+        if reseller is None or not _gap_button(kb, reseller, member, lang, price):
+            kb.button(text=t(lang, "btn_topup"), callback_data=Nav(to="balance"))
         sizes.append(1)
     kb.button(text=t(lang, "btn_back"), callback_data=Es(a="reg", r=place["code"]))
     kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
@@ -870,14 +930,16 @@ def rent_services_screen(lang: str, h: int, place: dict, rows: list[dict], page:
             kb.as_markup())
 
 
-def rent_confirm_screen(member: Member, lang: str, h: int, place: dict, row: dict, note: str = ""):
+def rent_confirm_screen(member: Member, lang: str, h: int, place: dict, row: dict, note: str = "",
+                        reseller: Reseller | None = None):
     price, cc = row["member_price"], place["country"]
     kb = InlineKeyboardBuilder()
     kb.button(text=t(lang, "btn_rent_buy", price=money(price)),
               callback_data=Rn(a="buy", h=h, cc=cc, s=row["code"], c=int(price * 100)))
     sizes = [1]
     if member.available < price:
-        kb.button(text=t(lang, "btn_topup"), callback_data=Nav(to="balance"))
+        if reseller is None or not _gap_button(kb, reseller, member, lang, price):
+            kb.button(text=t(lang, "btn_topup"), callback_data=Nav(to="balance"))
         sizes.append(1)
     kb.button(text=t(lang, "btn_back"), callback_data=Rn(a="svc", h=h, cc=cc))
     kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
@@ -895,6 +957,12 @@ def _email_rows(rows: list[dict]) -> list[dict]:
 
 
 def error_text(exc: SellError, reseller: Reseller, member: Member, lang: str) -> str:
+    if exc.reason == "no_credit" and member.telegram_id != reseller.owner_id:
+        # Counted: this customer wanted to buy and was short of balance.
+        try:
+            asyncio.ensure_future(repo.note_step(reseller.id, member.id, "short"))
+        except RuntimeError:            # no running loop (a screen drawn outside the bot)
+            pass
     if exc.reason == "no_credit" and payments.connected(reseller):
         return t(lang, "err_no_credit_auto", price=money(exc.price), available=money(member.available))
     if exc.reason == "no_credit":
@@ -1048,7 +1116,9 @@ def build_router(reseller_id: int) -> Router:
                 except SellError as again:
                     exc = again
             kb = InlineKeyboardBuilder()
-            if exc.reason == "no_credit" and (payments.connected(reseller) or reseller.deposit_info):
+            if exc.reason == "no_credit" and _gap_button(kb, reseller, fresh, lang, exc.price):
+                pass                    # one tap to the money that is missing
+            elif exc.reason == "no_credit" and (payments.connected(reseller) or reseller.deposit_info):
                 kb.button(text=t(lang, "btn_topup"), callback_data=Nav(to="deposit"))
             elif exc.reason == "no_credit" and support_url(reseller):
                 kb.button(text=t(lang, "btn_support"), url=support_url(reseller))
@@ -1157,7 +1227,9 @@ def build_router(reseller_id: int) -> Router:
                     return
                 exc = SellError("sold_out")
             kb = InlineKeyboardBuilder()
-            if exc.reason == "no_credit" and (payments.connected(reseller) or reseller.deposit_info):
+            if exc.reason == "no_credit" and _gap_button(kb, reseller, fresh, lang, exc.price):
+                pass                    # one tap to the money that is missing
+            elif exc.reason == "no_credit" and (payments.connected(reseller) or reseller.deposit_info):
                 kb.button(text=t(lang, "btn_topup"), callback_data=Nav(to="deposit"))
             elif exc.reason == "no_credit" and support_url(reseller):
                 kb.button(text=t(lang, "btn_support"), url=support_url(reseller))
@@ -1242,7 +1314,9 @@ def build_router(reseller_id: int) -> Router:
                     return
                 exc = SellError("sold_out")
             kb = InlineKeyboardBuilder()
-            if exc.reason == "no_credit" and (payments.connected(reseller) or reseller.deposit_info):
+            if exc.reason == "no_credit" and _gap_button(kb, reseller, fresh, lang, exc.price):
+                pass                    # one tap to the money that is missing
+            elif exc.reason == "no_credit" and (payments.connected(reseller) or reseller.deposit_info):
                 kb.button(text=t(lang, "btn_topup"), callback_data=Nav(to="deposit"))
             elif exc.reason == "no_credit" and support_url(reseller):
                 kb.button(text=t(lang, "btn_support"), url=support_url(reseller))
@@ -1310,7 +1384,7 @@ def build_router(reseller_id: int) -> Router:
         if a == "buy":
             await _esim_buy(c, callback_data, reseller, member, lang, place, row)
             return
-        await _show(c, *esim_confirm_screen(member, lang, place, row))
+        await _show(c, *esim_confirm_screen(member, lang, place, row, reseller=reseller))
         await c.answer()
 
     async def _esim_buy(c: CallbackQuery, callback_data: Es, reseller: Reseller, member: Member, lang: str,
@@ -1329,11 +1403,13 @@ def build_router(reseller_id: int) -> Router:
                     now = None
                 if now is not None:
                     await _show(c, *esim_confirm_screen(fresh, lang, place, now,
-                                                        t(lang, "err_price_changed", price=money(exc.price))))
+                                                        t(lang, "err_price_changed", price=money(exc.price)), reseller))
                     return
                 exc = SellError("sold_out")
             kb = InlineKeyboardBuilder()
-            if exc.reason == "no_credit" and (payments.connected(reseller) or reseller.deposit_info):
+            if exc.reason == "no_credit" and _gap_button(kb, reseller, fresh, lang, exc.price):
+                pass                    # one tap to the money that is missing
+            elif exc.reason == "no_credit" and (payments.connected(reseller) or reseller.deposit_info):
                 kb.button(text=t(lang, "btn_topup"), callback_data=Nav(to="deposit"))
             elif exc.reason == "no_credit" and support_url(reseller):
                 kb.button(text=t(lang, "btn_support"), url=support_url(reseller))
@@ -1412,7 +1488,7 @@ def build_router(reseller_id: int) -> Router:
         if a == "buy":
             await _rent_buy(c, callback_data, reseller, member, lang, place, row)
             return
-        await _show(c, *rent_confirm_screen(member, lang, h, place, row))
+        await _show(c, *rent_confirm_screen(member, lang, h, place, row, reseller=reseller))
         await c.answer()
 
     async def _rent_buy(c: CallbackQuery, callback_data: Rn, reseller: Reseller, member: Member, lang: str,
@@ -1432,11 +1508,13 @@ def build_router(reseller_id: int) -> Router:
                     now = None
                 if now is not None:
                     await _show(c, *rent_confirm_screen(fresh, lang, h, place, now,
-                                                        t(lang, "err_price_changed", price=money(exc.price))))
+                                                        t(lang, "err_price_changed", price=money(exc.price)), reseller))
                     return
                 exc = SellError("sold_out")
             kb = InlineKeyboardBuilder()
-            if exc.reason == "no_credit" and (payments.connected(reseller) or reseller.deposit_info):
+            if exc.reason == "no_credit" and _gap_button(kb, reseller, fresh, lang, exc.price):
+                pass                    # one tap to the money that is missing
+            elif exc.reason == "no_credit" and (payments.connected(reseller) or reseller.deposit_info):
                 kb.button(text=t(lang, "btn_topup"), callback_data=Nav(to="deposit"))
             elif exc.reason == "no_credit" and support_url(reseller):
                 kb.button(text=t(lang, "btn_support"), url=support_url(reseller))

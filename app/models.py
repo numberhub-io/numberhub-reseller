@@ -104,6 +104,20 @@ class Reseller(Base):
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
+class Step(Base):
+    """One customer reached one step of the way from opening the shop to a purchase,
+    on one day (a row per customer, day and step; the shop's owner is not counted).
+    Read in numbers only: how many customers got how far (repo.funnel)."""
+    __tablename__ = "steps"
+    __table_args__ = (UniqueConstraint("member_id", "day", "step", name="uq_step"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    reseller_id: Mapped[int] = mapped_column(ForeignKey("resellers.id", ondelete="CASCADE"), index=True)
+    member_id: Mapped[int] = mapped_column(Integer, index=True)
+    day: Mapped[str] = mapped_column(String(10), index=True)        # UTC, YYYY-MM-DD
+    step: Mapped[str] = mapped_column(String(12))
+
+
 class Setting(Base):
     """A value the platform keeps for itself across restarts (today's exchange rate)."""
     __tablename__ = "settings"

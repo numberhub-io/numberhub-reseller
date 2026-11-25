@@ -120,6 +120,18 @@ A prompt (welcome text, commission, a gateway key and so on) takes your next mes
 
 Your commission is a percentage added on top of NumberHub's price for each country. With a 30% commission, a number NumberHub prices at $0.25 costs your customer $0.33 (rounded up to the cent) and you keep $0.08. The bot uses NumberHub's highest price for that route (`price_max`) as the base, so NumberHub can never charge you more for a sale than the customer paid.
 
+### The way to the first payment
+
+Most people who open a shop bot never pay. Three things work on that:
+
+- **One tap to the missing money.** On a price the customer's balance does not cover, the button reads 💳 Add $1.00: it opens a payment for exactly what is missing, never less than the smallest payment your shop takes. After the payment, ▶️ Continue brings them back to the number. A shop that takes no automatic payment keeps the plain 💳 Add balance button.
+- **You see where customers stop.** ⚙️ Admin panel → 📊 Statistics has "From a visit to a purchase": how many customers opened the bot, looked at what you sell, saw a price, tapped Buy, were short of balance, opened Add balance, started a payment, paid, and got what they bought. Each customer is counted once a day per step. You are not counted in your own shop.
+- **QRIS from the same phone.** Under the QR the bot says how to pay it from the phone it is on: save the picture, open the bank or wallet app, choose QRIS, pick the picture from the gallery.
+
+### A warning before your wallet runs out
+
+Every sale is paid from your NumberHub wallet, so customers cannot buy once it is empty, whatever their balance in your bot. The bot tells you when your wallet falls under $1.00, or under what your sales cost in the last 24 hours: once a day, and only while customers are using your shop. The message says what your customers hold on their balances and whether their payments reach the wallet by themselves (built-in crypto does; your own gateway and manual deposits do not).
+
 ### A commission for each product
 
 A commission that suits numbers costing a few cents is often too much for a rental or an eSIM that costs dollars. ⚙️ Admin panel → 💲 Commission lists what your shop sells, each with its own button:
@@ -252,6 +264,7 @@ The shop bot messages you, at most once an hour per problem, when:
 - NumberHub rejected your API key (it was revoked or rotated). Send a new one with 🤖 My bots, then 🔑 New API key,
 - the key is missing a permission, or only works from certain IP addresses,
 - your account has as many open orders for one app and country as NumberHub allows (all your shops count together),
+- your NumberHub wallet is low (see "A warning before your wallet runs out"),
 - a proxy data package, an eSIM or a rented number ended up in your NumberHub account with no customer paying for it (their balance no longer covered it, or NumberHub gave no clear answer for 20 hours). The message says where to find it.
 
 While any of these lasts, customers who try to buy are told that buying is paused for a moment, and nothing is held from them.

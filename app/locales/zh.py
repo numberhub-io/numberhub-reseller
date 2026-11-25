@@ -233,4 +233,7 @@ T = {
     'esim_msg_refunded': '❌ 您的 eSIM <b>{plan}</b> 未能交付。{price} 已退回您的余额。',
     'err_esim_limit': '您已有 {n} 个 eSIM 正在准备中。请等其中一个送达。',
     'esim_unavailable': '😕 这个套餐现在无法购买。请选择其他套餐或稍后再试。',
+    # the way to the first payment
+    'btn_topup_gap': '💳 充值 {amount}',
+    'pay_qris_phone': '📱 就在这部手机上付款？请保存这张图片，打开您的银行或钱包应用，选择 QRIS，然后从相册中选取这张图片。',
 }

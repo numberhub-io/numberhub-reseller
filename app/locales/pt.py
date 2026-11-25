@@ -233,4 +233,7 @@ T = {
     'esim_msg_refunded': '❌ Seu eSIM <b>{plan}</b> não pôde ser entregue. {price} voltou ao seu saldo.',
     'err_esim_limit': 'Você já tem {n} eSIMs sendo preparados. Espere até um chegar.',
     'esim_unavailable': '😕 Não dá para comprar este plano agora. Escolha outro ou tente mais tarde.',
+    # the way to the first payment
+    'btn_topup_gap': '💳 Adicionar {amount}',
+    'pay_qris_phone': '📱 Vai pagar por este telefone? Salve esta imagem, abra o app do seu banco ou carteira, escolha QRIS e selecione a imagem na galeria.',
 }

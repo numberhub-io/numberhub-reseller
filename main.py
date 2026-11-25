@@ -100,6 +100,23 @@ async def fx_loop() -> None:
         await asyncio.sleep(fx.REFRESH_SEC if fx.current() is not None and (fx.age_hours() or 0) < 6 else 600)
 
 
+async def wallet_loop() -> None:
+    """Owners whose NumberHub wallet is nearly empty are told before a sale fails
+    (app/reports.wallet_watch), looked at every half hour."""
+    from app import reports
+    await asyncio.sleep(120)
+    while True:
+        try:
+            await reports.wallet_watch()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            if _cancelling():
+                raise
+            log.exception("wallet watch failed")
+        await asyncio.sleep(1800)
+
+
 async def reports_loop() -> None:
     """The owners' morning reports (app/reports.py), looked at every ten minutes."""
     from app import reports
@@ -167,7 +184,8 @@ async def main() -> int:
     provisioning = await provision.start_server()
     loops = [asyncio.create_task(sync_loop()), asyncio.create_task(sweep_loop()),
              asyncio.create_task(warm_loop()), asyncio.create_task(payments_loop()),
-             asyncio.create_task(reports_loop()), asyncio.create_task(fx_loop())]
+             asyncio.create_task(reports_loop()), asyncio.create_task(fx_loop()),
+             asyncio.create_task(wallet_loop())]
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):

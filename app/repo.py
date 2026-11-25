@@ -11,7 +11,7 @@ from sqlalchemy import and_, delete, func, or_, select, update, case
 from sqlalchemy.exc import IntegrityError
 
 from app.db import session_factory
-from app.models import Deposit, Member, MemberTx, Order, Payment, PriceRule, Reseller
+from app.models import Deposit, Member, MemberTx, Order, Payment, PriceRule, Reseller, Setting, Step
 
 
 def _now() -> dt.datetime:
@@ -658,6 +658,103 @@ async def claim_report_day(reseller_id: int, day: str) -> bool:
             .values(report_day=day))
         await s.commit()
         return res.rowcount == 1
+
+
+# ─── what the platform keeps for itself ───────────────────
+async def get_setting(key: str) -> str | None:
+    async with session_factory() as s:
+        row = await s.get(Setting, key)
+        return row.value if row is not None else None
+
+
+async def set_setting(key: str, value: str) -> None:
+    async with session_factory() as s:
+        row = await s.get(Setting, key)
+        if row is None:
+            s.add(Setting(key=key, value=value))
+        else:
+            row.value = value
+        try:
+            await s.commit()
+        except IntegrityError:            # two writers at once: the other one's value stands
+            await s.rollback()
+
+
+# ─── the way from a visit to a purchase ───────────────────
+# The steps, in order. The first six are counted as customers tap (Step rows, once a
+# day per customer); the last three are read from the payments, deposits and orders.
+STEPS = ("open", "browse", "price", "buy", "short", "topup")
+_steps_seen: set[tuple[int, str, str]] = set()      # written already today: no second write for a tap
+
+
+async def note_step(reseller_id: int, member_id: int, step: str) -> None:
+    """This customer reached this step today. One row per customer, day and step; a
+    step already noted today costs nothing."""
+    day = _now().strftime("%Y-%m-%d")
+    key = (member_id, day, step)
+    if key in _steps_seen or step not in STEPS:
+        return
+    if len(_steps_seen) > 50000:
+        _steps_seen.clear()
+    _steps_seen.add(key)
+    async with session_factory() as s:
+        s.add(Step(reseller_id=reseller_id, member_id=member_id, day=day, step=step))
+        try:
+            await s.commit()
+        except IntegrityError:            # noted before a restart
+            await s.rollback()
+
+
+async def funnel(reseller: Reseller | None, days: int = 30) -> dict:
+    """How many customers got how far in `days` days, in one shop or (None) in all of
+    them: {open, browse, price, buy, short, topup, pay, paid, bought, since}. `since` is
+    the first day the tapped steps were counted (None = no step yet). Shop owners are
+    left out: an owner trying their own shop is not a customer."""
+    since = _now() - dt.timedelta(days=days)
+    day = since.strftime("%Y-%m-%d")
+    owners = select(Member.id).join(Reseller, Reseller.id == Member.reseller_id).where(Member.telegram_id == Reseller.owner_id)
+    async with session_factory() as s:
+        q = select(Step.step, func.count(func.distinct(Step.member_id))).where(Step.day >= day).group_by(Step.step)
+        first = select(func.min(Step.day))
+        if reseller is not None:
+            q, first = q.where(Step.reseller_id == reseller.id), first.where(Step.reseller_id == reseller.id)
+        out = {k: 0 for k in STEPS}
+        out.update({step: n for step, n in (await s.execute(q)).all() if step in out})
+        out["since"] = await s.scalar(first)
+
+        def mine(q_, model):
+            q_ = q_.where(model.member_id.not_in(owners))
+            return q_.where(model.reseller_id == reseller.id) if reseller is not None else q_
+        opened = set((await s.execute(mine(select(Payment.member_id).where(Payment.created_at >= since), Payment))).scalars())
+        opened |= set((await s.execute(mine(select(Deposit.member_id).where(Deposit.created_at >= since), Deposit))).scalars())
+        paid = set((await s.execute(mine(select(Payment.member_id).where(
+            Payment.created_at >= since, Payment.status == Payment.PAID), Payment))).scalars())
+        paid |= set((await s.execute(mine(select(Deposit.member_id).where(
+            Deposit.created_at >= since, Deposit.status == Deposit.APPROVED), Deposit))).scalars())
+        bought = await s.scalar(mine(select(func.count(func.distinct(Order.member_id))).where(
+            Order.created_at >= since, Order.settled == Order.CHARGED), Order))
+        out.update(pay=len(opened), paid=len(paid), bought=int(bought or 0))
+        return out
+
+
+async def customers_seen(reseller: Reseller, days: int) -> int:
+    """Customers (not the owner) who used this shop in the last `days` days."""
+    async with session_factory() as s:
+        q = select(func.count()).select_from(Member).where(
+            Member.reseller_id == reseller.id, Member.telegram_id != reseller.owner_id,
+            Member.last_seen_at >= _now() - dt.timedelta(days=days))
+        return int(await s.scalar(q) or 0)
+
+
+async def wallet_facts(reseller_id: int, hours: int = 24) -> tuple[Decimal, Decimal]:
+    """(what this shop's sales cost at NumberHub in the last `hours`, what its customers
+    hold on their balances now)."""
+    async with session_factory() as s:
+        spent = await s.scalar(select(func.sum(Order.nh_price)).where(
+            Order.reseller_id == reseller_id, Order.settled == Order.CHARGED,
+            Order.created_at >= _now() - dt.timedelta(hours=hours)))
+        held = await s.scalar(select(func.sum(Member.balance)).where(Member.reseller_id == reseller_id))
+        return Decimal(spent or 0), Decimal(held or 0)
 
 
 # ─── custom prices ───────────────────────────────────────────────────────────

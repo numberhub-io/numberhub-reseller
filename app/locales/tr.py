@@ -233,4 +233,7 @@ T = {
     'esim_msg_refunded': '❌ eSIM’iniz <b>{plan}</b> teslim edilemedi. {price} bakiyenize geri döndü.',
     'err_esim_limit': 'Zaten hazırlanan {n} eSIM’iniz var. Biri gelene kadar bekleyin.',
     'esim_unavailable': '😕 Bu paket şu anda satın alınamıyor. Başka birini seçin ya da sonra tekrar deneyin.',
+    # the way to the first payment
+    'btn_topup_gap': '💳 {amount} ekle',
+    'pay_qris_phone': "📱 Bu telefondan mı ödüyorsunuz? Bu resmi kaydedin, banka veya cüzdan uygulamanızı açın, QRIS'i seçin ve resmi galerinizden seçin.",
 }

@@ -5011,6 +5011,202 @@ async def test_commission_per_product():
     runtime._bots.pop(r.id, None)
 
 
+async def test_first_payment_path():
+    """Live on 2026-11-25: 705 customers had pressed Start in a shop, 28 had ever opened a
+    payment. The way to the first payment is counted and shortened here; a QRIS QR says
+    how to pay it from the phone it is on; an owner hears of a low wallet before a sale fails."""
+    print("the way to the first payment")
+    import datetime as _dt
+    from aiogram.methods import SendMessage, SendPhoto
+    from sqlalchemy import func, select
+    from app import fx, payments, reports
+    from app.bots import reseller as shop_bot
+    from app.bots.callbacks import Adm, Cty, Es, Nav, Pay, Rn, Svc
+    from app.bots.reseller import build_router
+    from app.db import session_factory
+    from app.models import Step
+    from fakes import FakeFx, FakeGateways
+    own = 5191
+    gw = FakeGateways()
+    gw.next = 15000                   # payment ids of its own
+    payments.TRANSPORT = gw.transport()
+    fakefx = FakeFx()
+    fx.TRANSPORT, fx._rate = fakefx.transport(), None
+    await fx.refresh()
+    api = FakeNumberHub()
+    r = await make_reseller(api, owner=own, bot_id=88841)
+    plain = await make_reseller(api, owner=own + 1, bot_id=88842)        # a shop that takes no automatic payment
+    await payments.set_builtin(r.id, False)
+    await payments.set_builtin(plain.id, False)
+    await payments.connect(r.id, payments.OXAPAY, gw.ox_key)
+    session = FakeSession(bot_id=88841)
+    bot = fake_bot(session)
+    runtime._bots[r.id] = bot
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(build_router(r.id))
+    shop = lambda: repo.get_reseller(r.id)     # noqa: E731
+    labels = lambda: [b.text for row in (session.last_markup().inline_keyboard if session.last_markup() else [])  # noqa: E731
+                      for b in row]
+    sent_to = lambda uid: [x.text or "" for x in session.requests if isinstance(x, SendMessage) and x.chat_id == uid]  # noqa: E731
+    photos = lambda uid: [x for x in session.requests if isinstance(x, SendPhoto) and x.chat_id == uid]  # noqa: E731
+    cust, looker = 99001, 99002
+    m = await member(r, cust, "0.20")
+
+    async def rows():
+        async with session_factory() as s:
+            return int(await s.scalar(select(func.count()).select_from(Step).where(Step.reseller_id == r.id)) or 0)
+
+    # ── one tap to the money that is missing ──
+    await dp.feed_update(bot, msg(cust, "/start"))
+    await dp.feed_update(bot, tap(cust, Nav(to="buy").pack()))
+    await dp.feed_update(bot, tap(cust, Svc(code="wa", page=0).pack()))
+    await dp.feed_update(bot, tap(cust, Cty(code="wa", cc="187").pack()))
+    check("a number at $0.39 with $0.20 on the balance: the button adds the smallest payment the shop takes",
+          button(session, "Add $1.00") == Pay(a="amt", c=100).pack() and "💳 Add balance" not in labels(), str(labels()))
+    await dp.feed_update(bot, tap(cust, button(session, "Buy")))
+    check("after a purchase the balance did not cover: the same one tap, and the way back to the number",
+          "Not enough balance" in session.last_text() and button(session, "Add $1.00") == Pay(a="amt", c=100).pack()
+          and button(session, "Back") == Cty(code="wa", cc="187").pack(), str(labels()))
+    await dp.feed_update(bot, tap(cust, Rn(a="ok", h=24, cc="16", s="full").pack()))
+    check("a rental at $3.90: the button adds exactly what is missing ($3.70)",
+          button(session, "Add $3.70") == Pay(a="amt", c=370).pack(), str(labels()))
+    await dp.feed_update(bot, tap(cust, Es(a="ok", r="US", k="USA5G30").pack()))
+    check("an eSIM at $5.20: $5.00 is missing", button(session, "Add $5.00") == Pay(a="amt", c=500).pack(), str(labels()))
+    await dp.feed_update(bot, tap(cust, Rn(a="ok", h=24, cc="16", s="full").pack()))
+    await dp.feed_update(bot, tap(cust, button(session, "Add $3.70")))
+    opened = await repo.open_payments(m.id)
+    check("the tap opens a payment for that amount at once (one way to pay: no further question)",
+          len(opened) == 1 and opened[0].amount == D("3.70") and opened[0].provider == payments.OXAPAY,
+          str([(p.amount, p.provider) for p in opened]))
+    low, high = payments.limits(await shop())
+    from aiogram.utils.keyboard import InlineKeyboardBuilder as _KB
+    kb = _KB()
+    check("more than one payment can be, or nothing missing: no such button (the caller keeps its own)",
+          not shop_bot._gap_button(kb, await shop(), await repo.get_member(m.id), "en", high + 5)
+          and not shop_bot._gap_button(kb, await shop(), await repo.get_member(m.id), "en", D("0.10"))
+          and not list(kb.buttons))
+    psession = FakeSession(bot_id=88842)
+    pbot = fake_bot(psession)
+    pdp = Dispatcher(storage=MemoryStorage())
+    pdp.include_router(build_router(plain.id))
+    await member(plain, cust, "0.20")
+    await pdp.feed_update(pbot, tap(cust, Cty(code="wa", cc="187").pack()))
+    check("a shop that takes no automatic payment keeps the plain Add balance button",
+          button(psession, "Add balance") == Nav(to="balance").pack() and button(psession, "Add $") is None)
+
+    # ── the steps are counted ──
+    f = await repo.funnel(await shop(), 30)
+    today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
+    check("one customer's way so far: opened, looked, saw a price, tapped Buy, was short, opened the top-up, started a payment",
+          {k: f[k] for k in ("open", "browse", "price", "buy", "short", "topup", "pay", "paid", "bought")}
+          == {"open": 1, "browse": 1, "price": 1, "buy": 1, "short": 1, "topup": 1, "pay": 1, "paid": 0, "bought": 0}
+          and f["since"] == today, str(f))
+    before = await rows()
+    for _ in range(3):
+        await dp.feed_update(bot, tap(cust, Svc(code="wa", page=0).pack()))
+        await dp.feed_update(bot, tap(cust, Cty(code="wa", cc="187").pack()))
+    check("the same steps again on the same day add no row (one row per customer, day and step)", await rows() == before == 6)
+    await member(r, looker, "0")
+    await dp.feed_update(bot, msg(looker, "/start"))
+    await dp.feed_update(bot, msg(own, "/start"))
+    await dp.feed_update(bot, tap(own, Svc(code="wa", page=0).pack()))
+    f = await repo.funnel(await shop(), 30)
+    check("a customer who only opened the bot counts once at the top; the shop's owner is not counted at all",
+          f["open"] == 2 and f["browse"] == 1 and f["price"] == 1, str(f))
+    gw.ox[opened[0].invoice_id]["status"] = "Paid"
+    await payments.poll_all()
+    await dp.feed_update(bot, tap(cust, Cty(code="wa", cc="187").pack()))
+    await dp.feed_update(bot, tap(cust, button(session, "Buy")))
+    number = (await repo.member_orders(m.id, 1))[0]
+    api.set_status(number.nh_id, "received", "112233")
+    await selling.sync_reseller(await shop())
+    f = await repo.funnel(await shop(), 30)
+    check("the payment arrives and a number gets its code: paid and bought are read from the money itself",
+          f["paid"] == 1 and f["bought"] == 1 and (await repo.get_member(m.id)).balance == D("3.51"),
+          f"{f} {(await repo.get_member(m.id)).balance}")
+    everywhere = await repo.funnel(None, 30)
+    check("all shops together count at least this shop", all(everywhere[k] >= f[k] for k in ("open", "price", "pay", "paid")))
+    sp = lambda data: shop_bot._step_of(tap(cust, data).callback_query)     # noqa: E731
+    check("every product's buttons are told apart by what they are for",
+          [sp(x) for x in (Es(a="buy", r="US", k="A", c=1).pack(), Rn(a="ok", h=24, cc="1", s="full").pack(),
+                           "px:pkg:5:0", "e:dom:1:0:abc", "e:home:0:0:", Es(a="home").pack(), Nav(to="orders").pack(),
+                           Pay(a="amt", c=100).pack(), Nav(to="deposit").pack(), "o:view:5")]
+          == ["buy", "price", "price", "price", "browse", "browse", None, "topup", "topup", None]
+          and shop_bot._step_of(msg(cust, "whatsapp").message) == "browse" and shop_bot._step_of(msg(cust, "/start").message) is None)
+    await dp.feed_update(bot, tap(own, Adm(a="stats").pack()))
+    text = session.last_text()
+    check("the owner's statistics show how far their customers got, one line a step",
+          "From a visit to a purchase" in text and f"counted since {today}" in text
+          and "Opened the bot: <b>2</b>" in text and "Saw a price: <b>1</b>" in text and "Were short of balance: <b>1</b>" in text
+          and "Started a payment: <b>1</b>" in text and "Paid: <b>1</b>" in text and "Got what they bought: <b>1</b>" in text,
+          text[-420:])
+    untouched = await make_reseller(api, owner=own + 2, bot_id=88843)
+    check("a shop where no step was counted yet shows no such block",
+          "From a visit" not in await reports.stats_text(untouched, 30))
+
+    # ── QRIS: how to pay from the phone the QR is on ──
+    await payments.connect(r.id, payments.KASERA, gw.ks_key)
+    await repo.update_reseller(r.id, kasera_auto=1)
+    await repo.set_member_language((await member(r, 99003, "0")).id, "id")
+    await dp.feed_update(bot, tap(99003, Pay(a="via", g="kq", c=100).pack(), lang="id"))
+    caption = (photos(99003)[-1].caption or "") if photos(99003) else ""
+    check("the QR's caption says how to pay from the same phone, in the customer's language",
+          "Bayar dari HP ini?" in caption and "galeri" in caption, caption[-160:])
+    await dp.feed_update(bot, tap(looker, Cty(code="wa", cc="187").pack()))
+    check("a shop that takes QRIS from $0.50: the button for a $0.39 number adds $0.50",
+          button(session, "Add $0.50") == Pay(a="amt", c=50).pack(), str(labels()))
+    long = [lang for lang in LANGS if len(_table(lang)["pay_qris"].format(idr="Rp 1.000.000", amount="$60.00", minutes=60)
+                                          + "\n\n" + _table(lang)["pay_qris_phone"]) > 1024 or "pay_qris_phone" not in _table(lang)
+            or "btn_topup_gap" not in _table(lang)]
+    check("both new texts exist in all 14 languages, and the caption fits Telegram's 1,024 characters in each", not long, str(long))
+
+    # ── the owner hears of a low wallet before a sale fails ──
+    keep_pause = reports.WALLET_PAUSE_SEC
+    reports.WALLET_PAUSE_SEC = 0
+    try:
+        async def watch(now=None):
+            """What the owner of this shop is told by one look at the wallets."""
+            n = len(sent_to(own))
+            await reports.wallet_watch(now)
+            return sent_to(own)[n:]
+        check("a wallet with money in it: nothing is sent", await watch() == [])
+        api.wallet = D("0.30")
+        told = await watch()
+        check("the wallet falls to $0.30 while customers use the shop: the owner is told, with what customers hold "
+              "and that their own gateway's money does not reach the wallet",
+              len(told) == 1 and "Your NumberHub wallet is low: $0.30" in told[0]
+              and "Your customers hold <b>$3.51</b>" in told[0] and "through your own gateway" in told[0]
+              and "numberhub.io" in told[0], str(told)[:300])
+        check("not twice on the same day, also after a restart (it is kept in the database)",
+              await watch() == [] and await repo.get_setting(f"wallet_low:{r.id}") == today)
+        tomorrow = _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(days=1)
+        check("still low the next day: told once more", len(await watch(tomorrow)) == 1)
+        api.wallet = D("2.00")
+        day3 = tomorrow + _dt.timedelta(days=1)
+        check("$2.00 against sales that cost $0.30 a day: enough, nothing is sent", await watch(day3) == [])
+        api.wallet = D("10.00")
+        big = await member(r, 99004, "9.00")
+        await selling.buy_esim(await shop(), big, "US", "USA5G30", D("5.20"))
+        api.wallet = D("2.00")
+        told = await watch(day3)
+        check("the same $2.00 after a day in which sales cost $4.30: less than a day of sales, the owner is told",
+              len(told) == 1 and "In the last 24 hours your sales cost <b>$4.30</b>" in told[0], str(told)[:200])
+        quiet = await make_reseller(FakeNumberHub(wallet="0.05"), owner=own + 3, bot_id=88844)
+        qsession = FakeSession(bot_id=88844)
+        runtime._bots[quiet.id] = fake_bot(qsession)
+        await reports.wallet_watch(day3 + _dt.timedelta(days=1))
+        check("an empty wallet in a shop nobody uses: its owner is left alone", not qsession.texts())
+        runtime._bots.pop(quiet.id, None)
+        await payments.set_builtin(r.id, True)
+        text = reports.wallet_low_text(await shop(), D("0.30"), D("0"), D("0"))
+        check("a shop with built-in payments is told that those land in the wallet by themselves",
+              payments.builtin_on(await shop()) and "built-in crypto lands in this wallet by itself" in text
+              and "sales cost" not in text and "hold" not in text, text[-200:])
+    finally:
+        reports.WALLET_PAUSE_SEC = keep_pause
+    runtime._bots.pop(r.id, None)
+
+
 async def main():
     await init_db()
     test_prices()
@@ -5019,7 +5215,7 @@ async def main():
                test_races_and_limits, test_bot_flow, test_builder, test_provision, test_custom_prices, test_picker_pages, test_rank_order, test_dead_token, test_rejected_key, test_deposits, test_auto_payments, test_builtin_payments, test_owner_stats, test_kasera_qris, test_paid_left, test_email_codes, test_paused_shop, test_review_money,
                test_review_sync, test_review_bots, test_review_runtime, test_small_topups_and_rupiah,
                test_proxy_data, test_rentals, test_esim, test_review_2026_11_24, test_number_cycling,
-               test_review_defects_2026_11_25, test_commission_per_product,
+               test_review_defects_2026_11_25, test_commission_per_product, test_first_payment_path,
                test_back_to_the_purchase,
                test_cards_render):
         try:
