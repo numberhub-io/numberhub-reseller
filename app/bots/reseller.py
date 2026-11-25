@@ -665,7 +665,7 @@ def rent_home_screen(lang: str, periods: list[dict]):
         kb.button(text=rent_period(lang, p["h"]), callback_data=Rn(a="cty", h=p["h"]))
     kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
     kb.adjust(*_pairs(len(periods)), 1)
-    return t(lang, "rent_pick_period"), kb.as_markup()
+    return t(lang, "rent_pick_period" if periods else "rent_none"), kb.as_markup()
 
 
 def rent_countries_screen(lang: str, h: int, rows: list[dict], page: int = 0):
@@ -1113,7 +1113,7 @@ def build_router(reseller_id: int) -> Router:
             return
         a, h, cc = callback_data.a, callback_data.h, callback_data.cc
         if a == "home" or h not in {p["h"] for p in periods}:
-            await _show(c, *rent_home_screen(lang, periods))
+            await _show(c, *rent_home_screen(lang, await selling.rent_periods_open(reseller)))
             await c.answer()
             return
         try:

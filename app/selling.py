@@ -910,6 +910,21 @@ async def rent_countries(reseller: Reseller, h: int) -> list[dict]:
     return out
 
 
+async def rent_periods_open(reseller: Reseller) -> list[dict]:
+    """The periods that have a country to rent in right now. The list of periods is
+    fixed, and the longest often has no number anywhere: offered, it led to an empty
+    screen (the real lists on 2026-11-25: 1 month, no country). A period that cannot
+    be asked about just now stays listed."""
+    out = []
+    for p in await rent_periods(reseller):
+        try:
+            if await rent_countries(reseller, p["h"]):
+                out.append(p)
+        except SellError:
+            out.append(p)
+    return out
+
+
 async def rent_services(reseller: Reseller, h: int, country: str, fresh: bool = False) -> list[dict]:
     """What a number of this country can be rented for, in stock only, at the shop's
     price: [{code, name, nh_price, member_price, popular}]. "Any service" (every SMS)

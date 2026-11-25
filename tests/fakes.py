@@ -95,6 +95,7 @@ class FakeNumberHub:
                     {"code": "tg", "name": "Telegram", "price": "1.20", "in_stock": False, "popular": True}],
             "16": [{"code": "full", "name": "Any service (all SMS)", "price": "3.00", "in_stock": True, "popular": True}],
         }
+        self.rent_empty_periods: set[int] = set()    # periods with no country to rent in right now
         self.rent_bodies: list[dict] = []
         self.rent_down = False                       # the price lists cannot be read: 503 rent_unavailable
         self.rent_buy_down = False                   # ...at the purchase itself, before anything is bought
@@ -313,7 +314,8 @@ class FakeNumberHub:
             if self.rent_down:
                 return self._json(503, {"error": "rent_unavailable"})
             if len(parts) == 4 and parts[3] == "countries":
-                return self._json(200, {"h": int(parts[2]), "countries": self.rent_places})
+                return self._json(200, {"h": int(parts[2]), "countries": (
+                    [] if int(parts[2]) in self.rent_empty_periods else self.rent_places)})
             if len(parts) == 5 and parts[4] == "services":
                 return self._json(200, {"h": int(parts[2]), "country": parts[3],
                                         "services": self.rent_list.get(parts[3], [])})

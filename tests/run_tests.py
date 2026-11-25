@@ -4186,6 +4186,21 @@ async def test_rentals():
     await dp.feed_update(bot, tap(own, button(session, "Rented numbers: off")))
     await dp.feed_update(bot, msg(cust, "/start"))
     check("switched on again: the button is back", button(session, "Rent a number") is not None)
+    api.rent_empty_periods = {720}
+    selling._rent_countries.clear()
+    await dp.feed_update(bot, tap(cust, Rn(a="home").pack()))
+    check("a period with no country to rent in right now is not offered",
+          labels()[:3] == ["1 day", "3 days", "1 week"] and "1 month" not in labels(), str(labels()))
+    await dp.feed_update(bot, tap(cust, Rn(a="cty", h=720).pack()))
+    check("...and its old button says there is nothing to rent, with a way back",
+          "Nothing to rent here" in session.last_text() and button(session, "Back") == Rn(a="home").pack())
+    api.rent_empty_periods = {24, 72, 168, 720}
+    selling._rent_countries.clear()
+    await dp.feed_update(bot, tap(cust, Rn(a="home").pack()))
+    check("no period has a country: said so, with the way to the menu",
+          "Nothing to rent here" in session.last_text() and labels() == ["🏠 Menu"], str(labels()))
+    api.rent_empty_periods = set()
+    selling._rent_countries.clear()
     api2 = FakeNumberHub()
     api2.rent_periods = []
     r2 = await make_reseller(api2, owner=own, bot_id=88802)
