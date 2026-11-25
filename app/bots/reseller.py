@@ -17,12 +17,13 @@ from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app import payments, repo, selling
-from app.bots.callbacks import AZ, Adm, Buy, Cty, Em, Lang, Nav, Noop, Ord, Pay, Px, Rn, Svc, SvcPage
+from app.bots.callbacks import AZ, Adm, Buy, Cty, Em, Es, Lang, Nav, Noop, Ord, Pay, Px, Rn, Svc, SvcPage
 from app.catalog_ui import ANY_OTHER, LETTERS, POPULAR, by_letter, icon, letter_counts, more_popular, nice_name
 from app.i18n import LANGS, resolve, t
-from app.models import Member, Reseller
+from app.models import Member, Order, Reseller
 from app.selling import SellError
-from app.texts import after_credit_kb, esc, money, order_card, proxy_card, rent_period, rent_service_label
+from app.texts import (after_credit_kb, days_label, esc, esim_card, money, order_card, proxy_card, rent_period,
+                       rent_service_label)
 
 log = logging.getLogger(__name__)
 AZ_PAGE = 30
@@ -66,6 +67,10 @@ class EmailForm(StatesGroup):
     site = State()             # email codes: the customer may type the name of a site
 
 
+class EsimForm(StatesGroup):
+    region = State()           # eSIM: the customer may type the name of a destination
+
+
 class Context(BaseMiddleware):
     """Loads the reseller and the member for every update; stops paused bots and
     blocked members before any handler runs."""
@@ -107,7 +112,8 @@ class Context(BaseMiddleware):
 
 
 # The buttons that belong to each form. Anything else ends it.
-_FORM_BUTTONS = {"AdminForm": ("a:", "d:"), "EmailForm": ("e:",), "PayForm": ("p:",), "DepositForm": ()}
+_FORM_BUTTONS = {"AdminForm": ("a:", "d:"), "EmailForm": ("e:",), "PayForm": ("p:",), "DepositForm": (),
+                 "EsimForm": ("es:",)}
 
 
 async def _leave_form(event, state: FSMContext | None) -> None:
@@ -188,6 +194,9 @@ async def menu_screen(reseller: Reseller, member: Member, lang: str, is_owner: b
         sizes.append(1)
     if selling.rent_on(reseller) and await selling.rent_periods(reseller):
         kb.button(text=t(lang, "btn_rent"), callback_data=Rn(a="home"))
+        sizes.append(1)
+    if selling.esim_on(reseller) and await selling.esim_regions(reseller):
+        kb.button(text=t(lang, "btn_esim"), callback_data=Es(a="home"))
         sizes.append(1)
     if member.last_service and member.last_country:
         from app.numberhub import flag
@@ -379,7 +388,9 @@ async def orders_screen(member: Member, lang: str):
         return t(lang, "orders_empty"), kb.as_markup()
     from app.numberhub import flag
     for o in rows:
-        if getattr(o, "kind", "sms") == "rent":
+        if getattr(o, "kind", "sms") == "esim":
+            label = f"{STATUS_ICON.get(o.status, '•')} 🌍 {o.service_name or o.service} · {money(o.member_price)}"
+        elif getattr(o, "kind", "sms") == "rent":
             mark = "✅" if o.status in ("waiting", "received") else STATUS_ICON.get(o.status, "•")
             label = (f"{mark} 📅 {rent_service_label(lang, o.service, o.service_name)} · {flag(o.country_iso)} "
                      f"{o.phone and ('+' + o.phone.lstrip('+')) or ''} · {money(o.member_price)}")
@@ -638,6 +649,83 @@ def proxy_confirm_screen(member: Member, lang: str, row: dict, note: str = ""):
     return (note + "\n\n" if note else "") + text, kb.as_markup()
 
 
+# ─── eSIM data plans ─────────────────────────────────────────────────────────
+ESIM_PAGE = 16
+ESIM_PLAN_PAGE = 10
+ESIM_COUNTRIES_SHOWN = 14
+
+
+def esim_home_screen(lang: str, rows: list[dict], page: int = 0, note: str = "", found: bool = False):
+    """Where the data is for: the most asked for first, in pages, or type a name.
+    `found` = `rows` are what a typed name matched (one page, with a way back to all)."""
+    kb = InlineKeyboardBuilder()
+    pages = 1 if found else max(1, (len(rows) + ESIM_PAGE - 1) // ESIM_PAGE)
+    page = max(0, min(page, pages - 1))
+    chunk = rows[:ESIM_PAGE] if found else rows[page * ESIM_PAGE:(page + 1) * ESIM_PAGE]
+    for r in chunk:
+        kb.button(text=f"{r['emoji']} {r['name']}"[:32], callback_data=Es(a="reg", r=r["code"]))
+    sizes = _pairs(len(chunk))
+    nav = _page_nav(kb, page, pages, lambda p: Es(a="home", p=p))
+    if found:
+        kb.button(text=t(lang, "btn_back"), callback_data=Es(a="home"))
+    kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+    kb.adjust(*sizes, *([nav] if nav else []), 2 if found else 1)
+    return (note + "\n\n" if note else "") + t(lang, "esim_pick_region"), kb.as_markup()
+
+
+def _esim_plan_label(lang: str, r: dict) -> str:
+    """'1GB · 7 days · $1.03'. A plan that also works in other countries shows how many
+    (🌍 139): next to a local plan with the same data and days it costs more, and
+    without the mark the two looked alike."""
+    wide = f" · 🌍 {r['countries']}" if r["countries"] > 1 else ""
+    return f"{r['data']} · {days_label(lang, r['days'])}{wide} · {money(r['member_price'])}"
+
+
+def esim_plans_screen(lang: str, place: dict, rows: list[dict], page: int = 0):
+    """The plans for one destination, cheapest first: data, days and the shop's price."""
+    kb = InlineKeyboardBuilder()
+    if not rows:
+        kb.button(text=t(lang, "btn_back"), callback_data=Es(a="home"))
+        kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+        kb.adjust(2)
+        return t(lang, "esim_no_plans", region=esc(place["name"])), kb.as_markup()
+    pages = max(1, (len(rows) + ESIM_PLAN_PAGE - 1) // ESIM_PLAN_PAGE)
+    page = max(0, min(page, pages - 1))
+    chunk = rows[page * ESIM_PLAN_PAGE:(page + 1) * ESIM_PLAN_PAGE]
+    for r in chunk:
+        kb.button(text=_esim_plan_label(lang, r)[:60], callback_data=Es(a="ok", r=place["code"], k=r["code"]))
+    nav = _page_nav(kb, page, pages, lambda p: Es(a="reg", r=place["code"], p=p))
+    kb.button(text=t(lang, "btn_back"), callback_data=Es(a="home"))
+    kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+    kb.adjust(*([1] * len(chunk)), *([nav] if nav else []), 2)
+    return t(lang, "esim_pick_plan", flag=place["emoji"], region=esc(place["name"])), kb.as_markup()
+
+
+def esim_confirm_screen(member: Member, lang: str, place: dict, row: dict, note: str = ""):
+    price = row["member_price"]
+    kb = InlineKeyboardBuilder()
+    kb.button(text=t(lang, "btn_proxy_buy", price=money(price)),          # "✅ Buy · $x", the same words
+              callback_data=Es(a="buy", r=place["code"], k=row["code"], c=int(price * 100)))
+    sizes = [1]
+    if member.available < price:
+        kb.button(text=t(lang, "btn_topup"), callback_data=Nav(to="balance"))
+        sizes.append(1)
+    kb.button(text=t(lang, "btn_back"), callback_data=Es(a="reg", r=place["code"]))
+    kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+    kb.adjust(*sizes, 2)
+    lines = [t(lang, "esim_confirm", plan=esc(row["name"]), flag=place["emoji"], region=esc(place["name"]),
+               data=esc(row["data"]), days=days_label(lang, row["days"]))]
+    if row["countries"] > 1 and row["country_names"]:
+        shown = row["country_names"][:ESIM_COUNTRIES_SHOWN]
+        more = max(0, max(row["countries"], len(row["country_names"])) - len(shown))
+        lines.append(t(lang, "esim_covers", countries=esc(", ".join(shown)) + (f" +{more}" if more else "")))
+    if row["active_type"] in (1, 2, 3):
+        lines.append(t(lang, f"esim_act_{row['active_type']}"))
+    lines += ["", t(lang, "esim_confirm_pay", price=money(price), balance=money(member.available)), "",
+              t(lang, "esim_confirm_note")]
+    return (note + "\n\n" if note else "") + "\n".join(lines), kb.as_markup()
+
+
 # ─── rented numbers ──────────────────────────────────────────────────────────
 RENT_CTY_PAGE = 16
 RENT_SVC_PAGE = 12
@@ -746,6 +834,8 @@ def error_text(exc: SellError, reseller: Reseller, member: Member, lang: str) ->
            "email_limit": "err_email_limit", "number_limit": "err_number_limit"}.get(exc.reason, "err_failed")
     if exc.reason == "rent_limit":
         return t(lang, "err_rent_limit", n=selling.RENT_MAX_ACTIVE)
+    if exc.reason == "esim_limit":
+        return t(lang, "err_esim_limit", n=selling.ESIM_MAX_WAITING)
     return t(lang, key)
 
 
@@ -1102,6 +1192,115 @@ def build_router(reseller_id: int) -> Router:
             return
         await _proxy_card(c, reseller, await repo.get_member(member.id) or member, order)
 
+    # ── eSIM data plans ──
+    async def _esim_qr(message: Message, lang: str, live: dict | None) -> bool:
+        """The QR of a ready eSIM, drawn here from its install code."""
+        ac = str(selling.esim_profile(live).get("ac") or "")
+        if not ac:
+            return False
+        await message.answer_photo(BufferedInputFile(payments.qr_png(ac), filename="esim.png"),
+                                   caption=t(lang, "esim_qr_caption"))
+        return True
+
+    @r.callback_query(Es.filter())
+    async def esim_(c: CallbackQuery, callback_data: Es, reseller: Reseller, member: Member, lang: str,
+                    state: FSMContext):
+        regions = await selling.esim_regions(reseller) if selling.esim_on(reseller) else []
+        if not regions:
+            await state.clear()
+            await c.answer(t(lang, "err_paused"), show_alert=True)
+            return
+        a = callback_data.a
+        place = next((x for x in regions if x["code"] == callback_data.r), None)
+        if a == "home" or place is None:
+            await state.clear()
+            await state.set_state(EsimForm.region)       # a typed name is searched among the destinations
+            await _show(c, *esim_home_screen(lang, regions, callback_data.p))
+            await c.answer()
+            return
+        try:
+            rows = await selling.esim_plans(reseller, place["code"])
+        except SellError as exc:
+            await c.answer(re.sub(r"<[^>]+>", "", error_text(exc, reseller, member, lang)), show_alert=True)
+            return
+        row = next((x for x in rows if x["code"] == callback_data.k), None)
+        if a == "reg" or row is None:
+            await _show(c, *esim_plans_screen(lang, place, rows, callback_data.p))
+            if a in ("ok", "buy"):      # the plan they tapped is no longer sold: said next to the list
+                await c.answer(t(lang, "esim_unavailable"), show_alert=True)
+            else:
+                await c.answer()
+            return
+        await state.clear()             # a plan is chosen: no later text is read as a destination
+        if a == "buy":
+            await _esim_buy(c, callback_data, reseller, member, lang, place, row)
+            return
+        await _show(c, *esim_confirm_screen(member, lang, place, row))
+        await c.answer()
+
+    async def _esim_buy(c: CallbackQuery, callback_data: Es, reseller: Reseller, member: Member, lang: str,
+                        place: dict, row: dict) -> None:
+        await c.answer("⏳")
+        try:
+            order = await selling.buy_esim(reseller, member, place["code"], row["code"], Decimal(callback_data.c) / 100)
+        except SellError as exc:
+            if exc.reason == "duplicate":
+                return                  # a double tap: the first tap is buying and shows the card
+            fresh = await repo.get_member(member.id) or member
+            if exc.reason == "price_changed":
+                try:
+                    now = next((x for x in await selling.esim_plans(reseller, place["code"]) if x["code"] == row["code"]), None)
+                except SellError:
+                    now = None
+                if now is not None:
+                    await _show(c, *esim_confirm_screen(fresh, lang, place, now,
+                                                        t(lang, "err_price_changed", price=money(exc.price))))
+                    return
+                exc = SellError("sold_out")
+            kb = InlineKeyboardBuilder()
+            if exc.reason == "no_credit" and (payments.connected(reseller) or reseller.deposit_info):
+                kb.button(text=t(lang, "btn_topup"), callback_data=Nav(to="deposit"))
+            elif exc.reason == "no_credit" and support_url(reseller):
+                kb.button(text=t(lang, "btn_support"), url=support_url(reseller))
+            if exc.reason in ("processing", "esim_limit"):
+                kb.button(text=t(lang, "btn_orders"), callback_data=Nav(to="orders"))
+            else:
+                kb.button(text=t(lang, "btn_back"), callback_data=Es(a="reg", r=place["code"]))
+            kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+            kb.adjust(1)
+            text = t(lang, "esim_unavailable") if exc.reason == "sold_out" else error_text(exc, reseller, fresh, lang)
+            await _show(c, text, kb.as_markup())
+            return
+        except Exception:  # noqa: BLE001
+            log.exception("esim buy crashed")
+            kb = InlineKeyboardBuilder()
+            kb.button(text=t(lang, "btn_orders"), callback_data=Nav(to="orders"))
+            kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+            kb.adjust(1)
+            await _show(c, t(lang, "err_failed"), kb.as_markup())
+            return
+        fresh = await repo.get_member(member.id) or member
+        live = None
+        if order.status in Order.CHARGED_STATUSES:
+            # It came with the purchase: shown here and now, so the order sync sends nothing.
+            await repo.set_codes_announced(order.id, 1)
+            live = await selling.esim_live(reseller, order)
+        await _show(c, *esim_card(fresh, await repo.get_order(order.id) or order, live))
+        await repo.set_card(order.id, c.message.chat.id, c.message.message_id)
+        await _esim_qr(c.message, lang, live)
+
+    @r.message(StateFilter(EsimForm.region), F.text, ~F.text.startswith("/"))
+    async def esim_typed(m: Message, reseller: Reseller, lang: str):
+        rows = await selling.esim_regions(reseller) if selling.esim_on(reseller) else []
+        q = " ".join(m.text.split()).casefold()[:40]
+        found = [x for x in rows if q and (q in x["name"].casefold() or q == x["code"].casefold())]
+        if not found:
+            await _show(m, *esim_home_screen(lang, rows, 0, t(lang, "esim_none_found")))
+            return
+        # The closest names first: one that starts with what was typed, then the shorter.
+        found.sort(key=lambda x: (not x["name"].casefold().startswith(q), len(x["name"])))
+        await _show(m, *esim_home_screen(lang, found, 0, found=True))
+
     # ── rented numbers ──
     @r.callback_query(Rn.filter())
     async def rent_(c: CallbackQuery, callback_data: Rn, reseller: Reseller, member: Member, lang: str,
@@ -1196,6 +1395,17 @@ def build_router(reseller_id: int) -> Router:
         if getattr(order, "kind", "sms") == "proxy":
             # A data package has nothing to cancel: every button on it opens its card.
             await _proxy_card(c, reseller, member, order)
+            await c.answer()
+            return
+        if getattr(order, "kind", "sms") == "esim":
+            # An eSIM has nothing to cancel: every button on it opens its card with how to
+            # install it, read from NumberHub now; "qr" sends its QR code again.
+            live = await selling.esim_live(reseller, order)
+            order = await repo.get_order(order.id) or order
+            await _show(c, *esim_card(member, order, live))
+            await repo.set_card(order.id, c.message.chat.id, c.message.message_id)
+            if callback_data.a == "qr" and order.status in Order.CHARGED_STATUSES:
+                await _esim_qr(c.message, lang, live)
             await c.answer()
             return
         if getattr(order, "kind", "sms") == "rent":

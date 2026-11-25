@@ -82,6 +82,8 @@ class Reseller(Base):
     proxy_on: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Rented numbers in this shop: 0 = switched off by the owner, anything else on.
     rent_on: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # eSIM data plans in this shop: 0 = switched off by the owner, anything else on.
+    esim_on: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # The morning report to the owner (app/reports.py): 0 = off, anything else on.
     # report_day = the UTC day it was last sent for, so it goes out once a day.
     daily_report: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -179,6 +181,9 @@ class Order(Base):
     # in `country` and the mailbox address in `phone`, as NumberHub's own orders do.
     # "proxy" = a data package, paid when bought: `country` holds its size in GB and
     # `phone` its login; it stays "received" while it works (expires_at = its end).
+    # "esim" = a mobile data plan: `service` is the plan's code, `country` the
+    # destination's; it is "waiting" while it is prepared and "completed" once
+    # delivered (how to install it is read from NumberHub, never stored here).
     # "rent" = a number rented for days: it stays "waiting" for its whole period,
     # `rent_hours` is the period, `messages` every SMS it got, and it can be given back
     # for a refund from `cancel_available_at` until `refund_until`.

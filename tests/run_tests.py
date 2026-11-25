@@ -4242,6 +4242,306 @@ async def test_rentals():
     runtime._bots.pop(r.id, None)
 
 
+async def test_esim():
+    """eSIM data plans in a shop: the last product of the wallet that shops did not sell.
+    The owner's wallet pays when the plan is ordered; the customer's price is held and
+    charged when the wallet reports the eSIM delivered, released if it gives the order up."""
+    print("eSIM data plans")
+    from aiogram.methods import SendMessage, SendPhoto
+    from app.bots.callbacks import Adm, Es, Nav, Ord
+    from app.bots.reseller import build_router, esim_confirm_screen
+    from app.models import Member
+    from app.numberhub import NumberHubError
+    from app.texts import esim_card, order_card
+    own = 5161
+    api = FakeNumberHub()
+    r = await make_reseller(api, owner=own, bot_id=88811)
+    session = FakeSession(bot_id=88811)
+    bot = fake_bot(session)
+    runtime._bots[r.id] = bot
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(build_router(r.id))
+    cust = 96001
+    m = await member(r, cust, "10.00")
+    labels = lambda: [b.text for row in (session.last_markup().inline_keyboard if session.last_markup() else [])  # noqa: E731
+                      for b in row]
+    sent_to = lambda uid: [x.text or "" for x in session.requests if isinstance(x, SendMessage) and x.chat_id == uid]  # noqa: E731
+    photos = lambda uid: [x for x in session.requests if isinstance(x, SendPhoto) and x.chat_id == uid]  # noqa: E731
+    wallet0 = api.wallet
+    push_after = selling.ESIM_PUSH_AFTER_SEC
+    selling.ESIM_PUSH_AFTER_SEC = -1
+
+    async def state_of(mem):
+        fresh = await repo.get_member(mem.id)
+        return fresh.balance, fresh.held
+
+    def buy(region, code, cents, uid=cust):
+        return tap(uid, Es(a="buy", r=region, k=code, c=cents).pack())
+
+    # ── the way in ──
+    await dp.feed_update(bot, msg(cust, "/start"))
+    check("the menu has an eSIM data button", button(session, "eSIM data") == Es(a="home").pack())
+    await dp.feed_update(bot, tap(cust, button(session, "eSIM data")))
+    check("the destinations in the wallet's order, with flags; a group of countries gets a globe",
+          labels()[:4] == ["🇺🇸 United States", "🇮🇩 Indonesia", "🌍 Europe (42 areas)", "🇦🇹 Austria"]
+          and "type its name" in session.last_text(), str(labels()))
+    await dp.feed_update(bot, msg(cust, "euro"))
+    check("a typed name finds the destination, with a way back to all of them",
+          labels()[0] == "🌍 Europe (42 areas)" and len(labels()) == 3 and button(session, "Back") == Es(a="home").pack(),
+          str(labels()))
+    await dp.feed_update(bot, msg(cust, "atlantis"))
+    check("a name that matches nothing says so and shows the list again",
+          "Nothing found" in session.last_text() and labels()[0] == "🇺🇸 United States")
+    await dp.feed_update(bot, tap(cust, Es(a="reg", r="ID").pack()))
+    check("a destination with no plan says so, with a way back",
+          "No plans for <b>Indonesia</b>" in session.last_text() and button(session, "Back") == Es(a="home").pack())
+    await dp.feed_update(bot, tap(cust, Es(a="reg", r="US").pack()))
+    check("the plans of a destination, cheapest first: data, days and the shop's price",
+          labels()[:3] == ["500 MB · 1 day · $0.65", "1 GB · 7 days · $1.30", "5 GB · 30 days · $5.20"]
+          and "United States" in session.last_text(), str(labels()))
+    api.esim_plans["AT"] = [dict(api.esim_plans["US"][2], code=f"AT{i}", price=f"{1 + i / 100:.2f}") for i in range(95)]
+    await dp.feed_update(bot, tap(cust, Es(a="reg", r="AT").pack()))
+    check("a destination with 95 plans lists every one of them, in pages",
+          len(await selling.esim_plans(r, "AT")) == 95 and any(x == "1/10" for x in labels()), str(labels()[-4:]))
+    await dp.feed_update(bot, tap(cust, Es(a="reg", r="EU-42").pack()))
+    check("a plan that works in many countries says in how many",
+          labels()[0] == "3 GB · 15 days · 🌍 42 · $3.90", str(labels()))
+    await dp.feed_update(bot, tap(cust, Es(a="reg", r="US").pack()))
+    await dp.feed_update(bot, tap(cust, button(session, "1 GB")))
+    text = session.last_text()
+    check("the plan is confirmed before anything is bought: data, days, when they start, paid now, no return",
+          "United States 1GB 7Days" in text and "Data: <b>1 GB</b>" in text and "<b>7 days</b>" in text
+          and "first connects" in text and "Price: <b>$1.30</b>, paid now" in text
+          and "Your balance: <b>$10.00</b>" in text and "cannot be returned" in text and not api.esim_bodies
+          and button(session, "Buy · $1.30") == Es(a="buy", r="US", k="USA1G7", c=130).pack(), text[:300])
+
+    # ── delivered with the purchase ──
+    await dp.feed_update(bot, tap(cust, button(session, "Buy · $1.30")))
+    o = (await repo.member_orders(m.id, 1))[0]
+    check("delivered with the purchase: charged at once, nothing stays held",
+          await state_of(m) == (D("8.70"), D("0")) and o.kind == "esim" and o.status == "completed"
+          and o.settled == Order.CHARGED and o.service == "USA1G7" and o.country == "US" and o.codes_announced == 1,
+          f"{await state_of(m)} {o.status} {o.settled}")
+    check("one purchase at the wallet for exactly this plan, paid there at once",
+          api.esim_bodies == [{"pkg": "USA1G7", "region": "US", "max_price": "1.00"}]
+          and api.wallet == wallet0 - D("1.00") and api.held == 0, str(api.esim_bodies))
+    text = session.last_text()
+    check("the card says it is ready and how to install it by hand",
+          "eSIM · United States 1GB 7Days" in text and "Your eSIM is ready" in text
+          and "SM-DP+ address: <code>rsp.example.net</code>" in text
+          and f"Activation code: <code>CODE{o.nh_id}</code>" in text
+          and f"<code>LPA:1$rsp.example.net$CODE{o.nh_id}</code>" in text and "Paid: $1.30" in text, text[:400])
+    urls = [b.url for row in session.last_markup().inline_keyboard for b in row if b.url]
+    check("one tap installs it on an iPhone or on Android",
+          len(urls) == 2 and urls[0].startswith("https://esimsetup.apple.com/")
+          and urls[1].startswith("https://esimsetup.android.com/"), str(urls))
+    check("its QR is sent as a picture the platform drew itself, saying what to do with it",
+          len(photos(cust)) == 1 and "Scan this QR code" in (photos(cust)[0].caption or "")
+          and type(photos(cust)[0].photo).__name__ == "BufferedInputFile")
+    check("the wallet's own picture and short link never reach the customer",
+          "source.example" not in " ".join(session.texts()) and "source.example" not in " ".join(str(u) for u in urls))
+    await selling.sync_reseller(r)
+    await selling.sync_reseller(r)
+    check("the order sync sends it no second time", len(photos(cust)) == 1)
+    await dp.feed_update(bot, tap(cust, Ord(a="qr", id=o.id).pack()))
+    check("the QR button sends the QR again", len(photos(cust)) == 2)
+    await dp.feed_update(bot, tap(cust, Ord(a="cancel", id=o.id).pack()))
+    check("an eSIM has nothing to cancel: an old cancel button just opens its card",
+          (await repo.get_order(o.id)).status == "completed" and await state_of(m) == (D("8.70"), D("0"))
+          and "Your eSIM is ready" in session.last_text() and len(photos(cust)) == 2)
+    cli = api.client()
+    try:
+        await cli.number(o.nh_id)
+        as_number = "found"
+    except NumberHubError as exc:
+        as_number = exc.status
+    check("it is read as an eSIM, not as a number (a new API key is checked against it that way)",
+          as_number == 404 and (await cli.order_of(o.nh_id, "esim"))["esim"]["id"] == o.nh_id)
+    await cli.close()
+
+    # ── ready a little later ──
+    await dp.feed_update(bot, tap(cust, Es(a="ok", r="EU-42", k="EU3G15").pack()))
+    check("a plan for many countries names them, and says when its days start",
+          "Works in: France, Germany, Italy, Spain +38" in session.last_text()
+          and "as soon as you buy it" in session.last_text(), session.last_text()[:300])
+    api.esim_slow = True
+    await dp.feed_update(bot, buy("EU-42", "EU3G15", 390))
+    o2 = (await repo.member_orders(m.id, 1))[0]
+    check("not ready with the purchase: the price is held, the card says it is being prepared, no QR yet",
+          await state_of(m) == (D("8.70"), D("3.90")) and o2.status == "waiting" and o2.settled == Order.UNSETTLED
+          and "being prepared" in session.last_text() and "$3.90 reserved" in session.last_text()
+          and len(photos(cust)) == 2, f"{await state_of(m)} {o2.status}")
+    n_sent = len(sent_to(cust))
+    await selling.sync_reseller(r)
+    check("while it is being prepared nothing is sent and nothing is charged",
+          len(sent_to(cust)) == n_sent and len(photos(cust)) == 2 and await state_of(m) == (D("8.70"), D("3.90")))
+    api.esim_ready(o2.nh_id)
+    await selling.sync_reseller(r)
+    await selling.sync_reseller(r)
+    o2 = await repo.get_order(o2.id)
+    check("when it is ready: charged once, and its QR and its card go out once",
+          o2.status == "completed" and o2.settled == Order.CHARGED and await state_of(m) == (D("4.80"), D("0"))
+          and len(photos(cust)) == 3 and sum("Your eSIM is ready" in x for x in sent_to(cust)[n_sent:]) == 1
+          and o2.codes_announced == 1, f"{o2.status} {await state_of(m)} {len(photos(cust))}")
+
+    # ── the wallet gives an order up ──
+    await dp.feed_update(bot, buy("US", "USA1G7", 130))
+    o3 = (await repo.member_orders(m.id, 1))[0]
+    api.esim_give_up(o3.nh_id)
+    n_sent = len(sent_to(cust))
+    await selling.sync_reseller(r)
+    await selling.sync_reseller(r)
+    o3 = await repo.get_order(o3.id)
+    check("an eSIM the wallet could not deliver and refunded: the hold is released, the customer is told once",
+          o3.status == "canceled" and o3.settled == Order.RELEASED and await state_of(m) == (D("4.80"), D("0"))
+          and sum("could not be delivered. $1.30 is back" in x for x in sent_to(cust)[n_sent:]) == 1
+          and len(photos(cust)) == 3, f"{o3.status} {await state_of(m)}")
+    check("...and its card says so", "could not be delivered — $1.30 returned" in order_card(m, o3)[0])
+
+    # ── what must not buy ──
+    api.esim_slow = False
+    poor = await member(r, 96002, "0.50")
+    n = len(api.esim_bodies)
+    await dp.feed_update(bot, buy("US", "USA1G7", 130, uid=96002))
+    check("not enough balance: nothing bought, nothing held", "$1.30" in session.last_text()
+          and len(api.esim_bodies) == n and await state_of(poor) == (D("0.50"), D("0")))
+    await dp.feed_update(bot, buy("US", "USA1G7", 1))
+    check("a button made by hand with a lower price buys nothing: the real price to confirm",
+          len(api.esim_bodies) == n and "price just changed to <b>$1.30</b>" in session.last_text()
+          and button(session, "Buy · $1.30") is not None)
+    await dp.feed_update(bot, buy("US", "NOPE", 130))
+    check("a plan that is no longer sold: said so, next to the plans that are",
+          "can't be bought right now" in session.alerts()[-1] and len(api.esim_bodies) == n
+          and "Pick a plan" in session.last_text())
+    await dp.feed_update(bot, buy("XX", "USA1G7", 130))
+    check("a destination that does not exist shows the destinations", "Where do you need data?" in session.last_text()
+          and len(api.esim_bodies) == n)
+    api.fail_next_buy = "price_exceeded"
+    await dp.feed_update(bot, buy("US", "USA1G7", 130))
+    check("the wallet says the price is higher: nothing held, and the price it named is the one to confirm",
+          "price just changed to <b>$1.95</b>" in session.last_text() and button(session, "Buy · $1.95") is not None
+          and await state_of(m) == (D("4.80"), D("0")), session.last_text()[:160])
+    selling._esim_learned.clear()
+    selling._esim_plans.clear()
+    api.esim_buy_down = True
+    await dp.feed_update(bot, buy("US", "USA1G7", 130))
+    stuck = [x for x in await repo.stale_buying(older_than_sec=-5) if x.member_id == m.id]
+    check("the wallet cannot read its plans at the purchase itself: nothing was bought, nothing stays held or open",
+          "Busy right now" in session.last_text() and await state_of(m) == (D("4.80"), D("0")) and not stuck,
+          f"{session.last_text()[:60]} {await state_of(m)} {len(stuck)}")
+    api.esim_buy_down = False
+    n = len(api.esim_bodies)
+    await asyncio.gather(dp.feed_update(bot, buy("US", "USA1G7", 130)), dp.feed_update(bot, buy("US", "USA1G7", 130)))
+    check("a double tap buys one eSIM", len(api.esim_bodies) == n + 1 and await state_of(m) == (D("3.50"), D("0")),
+          f"{len(api.esim_bodies) - n} {await state_of(m)}")
+    api.esim_slow = True
+    limit = selling.ESIM_MAX_WAITING
+    selling.ESIM_MAX_WAITING = 1
+    await dp.feed_update(bot, buy("US", "USA1G7", 130))
+    waiting = (await repo.member_orders(m.id, 1))[0]
+    n = len(api.esim_bodies)
+    await dp.feed_update(bot, buy("US", "USA1G7", 130))
+    selling.ESIM_MAX_WAITING = limit
+    check("a customer with the most eSIMs still being prepared is told so, and nothing is bought",
+          "already have 1 eSIMs being prepared" in session.last_text() and len(api.esim_bodies) == n
+          and await state_of(m) == (D("3.50"), D("1.30")), session.last_text()[:100])
+    api.esim_ready(waiting.nh_id)
+    await selling.sync_reseller(r)
+    api.esim_slow = False
+    shown, asked, pics = len(session.texts()), len(api.calls), len(photos(96002))
+    await dp.feed_update(bot, tap(96002, Ord(a="qr", id=o.id).pack()))
+    check("another customer can neither open it nor get its QR: told it is closed, the wallet is not asked",
+          "closed" in session.alerts()[-1] and len(session.texts()) == shown and len(api.calls) == asked
+          and len(photos(96002)) == pics)
+    await dp.feed_update(bot, tap(cust, Nav(to="orders").pack()))
+    check("My orders lists the eSIMs", sum("🌍" in x and "United States 1GB 7Days" in x for x in labels()) >= 2,
+          str(labels()))
+
+    # ── a reply that never came ──
+    other = await member(r, 96003, "9.00")
+    api.lose_replies = 3
+    wallet1, n_orders = api.wallet, len(api.orders)
+    try:
+        await selling.buy_esim(r, other, "EU-42", "EU3G15", D("3.90"))
+        check("three lost replies -> processing", False)
+    except SellError as e:
+        check("the wallet's answer is lost: 'processing', the customer's money held",
+              e.reason == "processing" and await state_of(other) == (D("9.00"), D("3.90")))
+    from app import repo as _r
+    orig = _r.stale_buying
+    _r.stale_buying = lambda older_than_sec=60: orig(older_than_sec=0)
+    try:
+        await selling.recover_buying()
+        await selling.recover_buying()
+    finally:
+        _r.stale_buying = orig
+    await selling.sync_reseller(r)
+    rec = (await repo.member_orders(other.id, 1))[0]
+    check("recovery asks again with the same request: ONE eSIM, charged once, and the customer gets its QR and card once",
+          len(api.orders) == n_orders + 1 and api.wallet == wallet1 - D("3.00") and rec.status == "completed"
+          and rec.settled == Order.CHARGED and await state_of(other) == (D("5.10"), D("0"))
+          and api.esim_bodies[-1] == {"pkg": "EU3G15", "region": "EU-42", "max_price": "3.00"}
+          and len(photos(96003)) == 1 and sum("Your eSIM is ready" in x for x in sent_to(96003)) == 1
+          and rec.codes_announced == 1, f"{len(api.orders) - n_orders} {rec.status} {await state_of(other)} {len(photos(96003))}")
+
+    # ── the owner's switch ──
+    await dp.feed_update(bot, msg(own, "/admin"))
+    check("the owner's panel says it is on, with a switch",
+          "🌍 eSIM: <b>on</b>" in session.last_text() and button(session, "eSIM: on") == Adm(a="esim", arg="off").pack())
+    await dp.feed_update(bot, tap(own, button(session, "eSIM: on")))
+    check("switched off", (await repo.get_reseller(r.id)).esim_on == 0 and "🌍 eSIM: <b>off</b>" in session.last_text()
+          and button(session, "eSIM: off") is not None)
+    await dp.feed_update(bot, msg(cust, "/start"))
+    n = len(api.esim_bodies)
+    gone = button(session, "eSIM data") is None
+    await dp.feed_update(bot, buy("US", "USA1G7", 130))
+    check("off: the button is gone and an old button buys nothing", gone and len(api.esim_bodies) == n)
+    await dp.feed_update(bot, tap(cust, Ord(a="view", id=o.id).pack()))
+    check("...and an eSIM bought before still opens with how to install it",
+          "SM-DP+ address: <code>rsp.example.net</code>" in session.last_text())
+    await dp.feed_update(bot, msg(own, "/admin"))
+    await dp.feed_update(bot, tap(own, button(session, "eSIM: off")))
+    await dp.feed_update(bot, msg(cust, "/start"))
+    check("switched on again: the button is back", button(session, "eSIM data") is not None)
+    api2 = FakeNumberHub()
+    api2.esim_regions_list = []
+    r2 = await make_reseller(api2, owner=own, bot_id=88812)
+    check("a wallet that sells no eSIM: no button, nothing to buy", await selling.esim_regions(r2) == [])
+
+    # ── every language ──
+    keys = ["btn_esim", "esim_pick_region", "esim_none_found", "esim_pick_plan", "esim_no_plans", "esim_confirm",
+            "esim_covers", "esim_act_1", "esim_act_2", "esim_act_3", "esim_confirm_pay", "esim_confirm_note",
+            "esim_preparing", "esim_ready", "esim_install", "esim_card_closed", "esim_refunded", "esim_failed",
+            "esim_held", "btn_esim_ios", "btn_esim_android", "btn_esim_qr", "btn_esim_show", "esim_qr_caption",
+            "esim_msg_refunded", "err_esim_limit", "esim_unavailable"]
+    missing = [(lang, k) for lang in LANGS for k in keys if k not in _table(lang)]
+    same = [(lang, k) for lang in LANGS if lang != "en" for k in keys if _table(lang).get(k) == _table("en")[k]]
+    check("the eSIM texts exist in all 14 languages, translated", not missing and not same, f"{missing[:3]} {same[:3]}")
+    live = api.esim_public(api.orders[o.nh_id])
+    place = {"code": "EU-42", "name": "Europe (42 areas)", "iso": None, "emoji": "🌍"}
+    errs = []
+    for lang in LANGS:
+        mem = Member(id=1, reseller_id=1, telegram_id=1, language=lang, balance=D("1"), held=D("0"))
+        for st, settled in (("buying", 0), ("waiting", 0), ("completed", 1), ("canceled", 2), ("failed", 2)):
+            row = Order(id=1, reseller_id=1, member_id=1, kind="esim", service="USA1G7",
+                        service_name="United States 1GB 7Days", country="US", country_name="United States",
+                        country_iso="US", member_price=D("1.30"), status=st, settled=settled)
+            for card in (esim_card(mem, row, live), esim_card(mem, row, None), order_card(mem, row)):
+                if "{" in card[0] or not card[1].inline_keyboard or len(card[0]) > 3900:
+                    errs.append(f"{lang}/{st}")
+        for act in (1, 2, 3, None):
+            plan = {"code": "EU3G15", "name": "Europe 3GB 15Days", "data": "3 GB", "days": 15, "nh_price": D("3"),
+                    "member_price": D("3.90"), "countries": 42, "country_names": ["France", "Germany"],
+                    "active_type": act, "region_name": "Europe"}
+            text, kb = esim_confirm_screen(mem, lang, place, plan)
+            if "{" in text or not kb.inline_keyboard:
+                errs.append(f"{lang}/confirm/{act}")
+    check("the card and the confirm screen render cleanly in every language and state, with and without the wallet's answer",
+          not errs, str(errs[:5]))
+    selling.ESIM_PUSH_AFTER_SEC = push_after
+    runtime._bots.pop(r.id, None)
+
+
 async def main():
     await init_db()
     test_prices()
@@ -4249,7 +4549,7 @@ async def main():
     for fn in (test_buy_and_code, test_no_code_refund, test_failures, test_lost_reply, test_cancel,
                test_races_and_limits, test_bot_flow, test_builder, test_provision, test_custom_prices, test_picker_pages, test_rank_order, test_dead_token, test_rejected_key, test_deposits, test_auto_payments, test_builtin_payments, test_owner_stats, test_kasera_qris, test_paid_left, test_email_codes, test_paused_shop, test_review_money,
                test_review_sync, test_review_bots, test_review_runtime, test_small_topups_and_rupiah,
-               test_proxy_data, test_rentals, test_review_2026_11_24, test_number_cycling,
+               test_proxy_data, test_rentals, test_esim, test_review_2026_11_24, test_number_cycling,
                test_back_to_the_purchase,
                test_cards_render):
         try:

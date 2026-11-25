@@ -82,6 +82,25 @@ class FakeNumberHub:
         self.proxy_bodies: list[dict] = []
         self.proxy_usage_down = False                # GET /proxies/{id}/usage answers 502
         self.proxy_down = False                      # every GET /proxies/... answers 503
+        # eSIM data plans (GET /esim/regions, .../{region}/packages, POST /esims, GET /esims/{id})
+        self.esim_regions_list = [{"code": "US", "name": "United States", "flag": "US"},
+                                  {"code": "ID", "name": "Indonesia", "flag": "ID"},
+                                  {"code": "EU-42", "name": "Europe (42 areas)", "flag": ""},
+                                  {"code": "AT", "name": "Austria", "flag": "AT"}]
+        plan = lambda code, name, gb, days, price, act, n=1, names=(): {  # noqa: E731
+            "code": code, "name": name, "gb": gb, "duration": days, "unit": "day", "price": price, "scope": "",
+            "is_local": n == 1, "countries": n, "active_type": act, "country_names": list(names)}
+        self.esim_plans = {
+            "US": [plan("USA1D", "United States 500MB 1Day", "500 MB", 1, "0.50", 2),
+                   plan("USA5G30", "United States 5GB 30Days", "5 GB", 30, "4.00", 1),
+                   plan("USA1G7", "United States 1GB 7Days", "1 GB", 7, "1.00", 2)],
+            "EU-42": [plan("EU3G15", "Europe 3GB 15Days", "3 GB", 15, "3.00", 3, 42, ("France", "Germany", "Italy", "Spain"))],
+            "ID": [], "AT": [],
+        }
+        self.esim_bodies: list[dict] = []
+        self.esim_slow = False                       # not ready with the purchase: "waiting" until esim_ready()
+        self.esim_down = False                       # the plans cannot be read: 503 esim_busy
+        self.esim_buy_down = False                   # ...at the purchase itself, before anything is bought
         # rented numbers (GET /rent/..., POST /rentals, GET and DELETE /rentals/{id})
         self.rent_periods = [{"h": 24, "label": "1 day"}, {"h": 72, "label": "3 days"},
                              {"h": 168, "label": "1 week"}, {"h": 720, "label": "1 month"}]
@@ -113,7 +132,7 @@ class FakeNumberHub:
         if path == "/balance":
             return "wallet:read"
         if (path in ("/services", "/countries") or path.startswith("/email/") or path.startswith("/proxy/")
-                or path.startswith("/rent/")):
+                or path.startswith("/rent/") or path.startswith("/esim/")):
             return "catalog:read"
         if path.startswith("/topups"):
             return "orders:write" if method == "POST" else "wallet:read"
@@ -258,7 +277,7 @@ class FakeNumberHub:
         if request.method == "GET" and path == "/countries":
             svc = request.url.params.get("service")
             return self._json(200, {"service": svc, "countries": self.countries.get(svc, [])})
-        if request.method == "POST" and path in ("/numbers", "/emails", "/proxies", "/rentals"):
+        if request.method == "POST" and path in ("/numbers", "/emails", "/proxies", "/rentals", "/esims"):
             return self._buy(request)
         if request.method == "GET" and path == "/proxy/packages":
             return self._json(200, {"enabled": self.proxy_enabled, "validity_days": 30, "currency": "USD",
@@ -305,6 +324,23 @@ class FakeNumberHub:
                     return self._json(200, {"ok": False, "email": self.email_public(o), "reason": "code_received"})
                 self.set_status(o["id"], "canceled")
                 return self._json(200, {"ok": True, "email": self.email_public(o)})
+        if request.method == "GET" and path == "/esim/regions":
+            return self._json(200, {"regions": self.esim_regions_list})
+        if request.method == "GET" and path.startswith("/esim/regions/") and path.endswith("/packages"):
+            from urllib.parse import unquote
+            region = unquote(path.split("/")[3])
+            if self.esim_down:
+                return self._json(503, {"error": "esim_busy"})
+            name = next((r["name"] for r in self.esim_regions_list if r["code"] == region), None)
+            if name is None:
+                return self._json(404, {"error": "unknown_region"})
+            return self._json(200, {"region": region, "region_name": name, "packages": self.esim_plans.get(region, [])})
+        if request.method == "GET" and path.startswith("/esims/"):
+            tail = path.split("/")[2]
+            o = self.orders.get(int(tail)) if tail.isdigit() else None
+            if o is None or o.get("kind") != "esim":
+                return self._json(404, {"error": "not_found"})
+            return self._json(200, {"esim": self.esim_public(o)})
         if request.method == "GET" and path.startswith("/rent/"):
             parts = path.split("/")                  # "", "rent", h | "durations", country | "countries", "services"
             if parts[2] == "durations":
@@ -436,6 +472,63 @@ class FakeNumberHub:
         self.orders[o["id"]] = o
         return 201, {"proxy": self.proxy_public(o)}
 
+    # ── eSIM data plans ──
+    def esim_public(self, o: dict) -> dict:
+        """GET /esims/{id}: the order plus its `esim` block (how to install it, once it is ready)."""
+        ac = o.get("_ac")
+        return {**self.public(o), "esim": {
+            "ready": bool(ac), "qr": "https://qr.source.example/img.png" if ac else None, "ac": ac,
+            "smdp": "rsp.example.net" if ac else None, "matchingId": o.get("_code") if ac else None,
+            "iccid": o["phone"] or None, "short_url": "https://source.example/s/1" if ac else None,
+            "install": ({"ios": f"https://esimsetup.apple.com/esim_qrcode_provisioning?carddata={ac}",
+                         "android": f"https://esimsetup.android.com/esim_qrcode_provisioning?carddata={ac}"} if ac else {})}}
+
+    def esim_ready(self, nh_id: int) -> None:
+        """The eSIM is delivered: it has its install code now."""
+        o = self.orders[nh_id]
+        o["_code"], o["_ac"] = f"CODE{nh_id}", f"LPA:1$rsp.example.net$CODE{nh_id}"
+        o["phone"], o["status"] = f"8900000{nh_id}", "completed"
+
+    def esim_give_up(self, nh_id: int) -> None:
+        """The wallet gives an eSIM order up that was never delivered, and refunds it."""
+        o = self.orders[nh_id]
+        o["status"] = "canceled"
+        self.wallet += Decimal(o["price"])
+
+    def _do_buy_esim(self, body: dict) -> tuple[int, dict]:
+        self.esim_bodies.append(body)
+        if self.esim_down or self.esim_buy_down:
+            return 503, {"error": "esim_busy"}
+        if self.fail_next_buy:
+            code, self.fail_next_buy = self.fail_next_buy, None
+            if code == "price_exceeded":
+                return 409, {"error": code, "price": "1.50", "max_price": body["max_price"]}
+            return (402 if code == "insufficient_funds" else 409), {"error": code}
+        region = str(body.get("region"))
+        name = next((r["name"] for r in self.esim_regions_list if r["code"] == region), None)
+        if name is None:
+            return 400, {"error": "unknown_region"}
+        row = next((p for p in self.esim_plans.get(region, []) if p["code"] == body.get("pkg")), None)
+        if row is None:
+            return 409, {"error": "changed"}
+        price = Decimal(row["price"])
+        if Decimal(body["max_price"]) < price:
+            return 409, {"error": "price_exceeded", "price": f"{price:.2f}", "max_price": body["max_price"]}
+        if self.wallet - self.held < price:
+            return 402, {"error": "insufficient_funds"}
+        self.wallet -= price                         # paid when ordered: nothing is held
+        self.next_id += 1
+        now = dt.datetime.now(UTC)
+        o = {"id": self.next_id, "kind": "esim", "service": row["code"], "service_name": row["name"], "country": region,
+             "country_name": name, "phone": None, "verification": "sms", "status": "waiting", "status_label": "",
+             "price": f"{price:.2f}", "code": None, "codes": [], "operator": None, "created_at": iso(now),
+             "expires_at": iso(now + dt.timedelta(hours=1)), "cancel_available_at": None,
+             "_charged": True, "_ac": None, "_code": None}
+        self.orders[o["id"]] = o
+        if not self.esim_slow:
+            self.esim_ready(o["id"])
+        return 201, {"esim": self.esim_public(o)}
+
     # ── rented numbers ──
     REFUND_FROM, REFUND_UNTIL = dt.timedelta(minutes=2), dt.timedelta(minutes=20)
 
@@ -528,6 +621,8 @@ class FakeNumberHub:
             return self._do_buy_proxy(body)
         if "h" in body:
             return self._do_buy_rental(body)
+        if "pkg" in body:
+            return self._do_buy_esim(body)
         if self.fail_next_buy:
             code, self.fail_next_buy = self.fail_next_buy, None
             if code == "insufficient_funds":

@@ -248,6 +248,8 @@ def forget_prices(reseller_id: int) -> None:
     _proxy_pkgs.pop(reseller_id, None)
     for k in [k for k in _rent_services if k[0] == reseller_id]:
         _rent_services.pop(k, None)
+    for k in [k for k in _esim_plans if k[0] == reseller_id]:
+        _esim_plans.pop(k, None)
     for k in [k for k in _from_price if k[0] == reseller_id]:
         _from_price.pop(k, None)
 
@@ -325,7 +327,7 @@ def _map_error(exc: NumberHubError, reseller: Reseller) -> SellError:
         asyncio.ensure_future(warn_owner(reseller, problem))
         return SellError("paused")
     if code in ("sold_out", "purchase_failed", "unknown_service", "operators_unavailable", "unknown_package",
-                "invalid_country", "invalid_duration"):
+                "invalid_country", "invalid_duration", "changed", "unknown_region"):
         return SellError("sold_out")
     if code == "price_exceeded":
         return SellError("price_changed", member_price(dec(exc.data.get("price")), reseller.markup_pct))
@@ -334,7 +336,7 @@ def _map_error(exc: NumberHubError, reseller: Reseller) -> SellError:
         # shops), not this member: the route is busy, not the member's fault.
         asyncio.ensure_future(warn_owner(reseller, "route_cap"))
         return SellError("busy")
-    if code in ("rate_limited", "rent_unavailable") or isinstance(exc, TransportError):
+    if code in ("rate_limited", "rent_unavailable", "esim_busy", "esim_disabled") or isinstance(exc, TransportError):
         return SellError("busy")
     return SellError("failed")
 
@@ -830,6 +832,219 @@ async def proxy_live(reseller: Reseller, order: Order) -> dict | None:
     return nh
 
 
+# ─── eSIM data plans ─────────────────────────────────────────────────────────
+# Mobile data for a destination: the customer picks where and a plan, and installs it
+# with one tap or a QR. The owner's NumberHub wallet pays when the plan is ordered. In
+# the shop the customer's price is held with the order and charged when NumberHub
+# reports the eSIM delivered, which is usually with the purchase itself. If NumberHub
+# gives the order up it refunds the wallet, and the hold is released: the same path as
+# a number. An eSIM that was delivered cannot be returned. How to install it is read
+# from NumberHub when it is shown; the shop's database never holds it.
+ESIM_MAX_WAITING = 3            # eSIMs one customer may have being prepared at once
+ESIM_PLANS_MAX = 200            # plans listed for one destination (the real lists run to about 100)
+ESIM_PUSH_AFTER_SEC = 20        # the purchase itself sends an eSIM that came with it; the sync only later ones
+_ESIM_CODE = re.compile(r"^[A-Za-z0-9_.\-]{1,24}$")
+_esim_regions: dict[int, tuple[float, list[dict]]] = {}
+_esim_plans: dict[tuple[int, str], tuple[float, list[dict]]] = {}
+_esim_learned: dict[tuple[int, str, str], tuple[float, Decimal]] = {}     # the price a refused purchase named
+_esim_live: dict[int, tuple[float, dict]] = {}
+
+
+def esim_on(reseller: Reseller) -> bool:
+    return getattr(reseller, "esim_on", None) != 0
+
+
+async def esim_regions(reseller: Reseller) -> list[dict]:
+    """Where plans are sold, the most asked for first: [{code, name, iso, emoji}].
+    Empty when the shop's API sells none or cannot be asked (the menu button hides)."""
+    hit = _esim_regions.get(reseller.id)
+    if hit and time.monotonic() - hit[0] < 3600:
+        return hit[1]
+    cli = client_for(reseller.id)
+    if cli is None:
+        return []
+    try:
+        rows = await cli.esim_regions()
+    except NumberHubError:
+        if hit is None:
+            _esim_regions[reseller.id] = (time.monotonic() - 3540, [])      # asked again in a minute
+        return hit[1] if hit else []
+    out = []
+    for r in rows:
+        code = str(r["code"])
+        if not _ESIM_CODE.match(code):
+            continue
+        iso = str(r.get("flag") or "").upper()
+        iso = iso if len(iso) == 2 and iso.isalpha() else None
+        out.append({"code": code, "name": str(r.get("name") or code)[:60], "iso": iso,
+                    "emoji": flag(iso) if iso else "🌍"})
+    _esim_regions[reseller.id] = (time.monotonic(), out)
+    return out
+
+
+async def esim_plans(reseller: Reseller, region: str, fresh: bool = False) -> list[dict]:
+    """The plans for one destination at the shop's price, cheapest first: [{code,
+    name, data, days, nh_price, member_price, countries, country_names, active_type,
+    region_name}]. Raises SellError."""
+    key = (reseller.id, str(region))
+    hit = _esim_plans.get(key)
+    if hit and not fresh and time.monotonic() - hit[0] < 300:
+        return hit[1]
+    cli = client_for(reseller.id)
+    if cli is None:
+        raise SellError("paused")
+    try:
+        data = await cli.esim_packages(region)
+    except NumberHubError as exc:
+        if exc.status == 401:
+            await key_rejected(reseller.id, cli)
+        raise _map_error(exc, reseller) from exc
+    listed = data.get("packages")
+    out = []
+    for p in listed if isinstance(listed, list) else []:
+        if not isinstance(p, dict) or not _ESIM_CODE.match(str(p.get("code") or "")):
+            continue
+        code, price = str(p["code"]), dec(p.get("price"))
+        try:
+            days = int(p.get("duration") or 0)
+        except (TypeError, ValueError):
+            days = 0
+        if price <= 0 or days <= 0:
+            continue
+        if str(p.get("unit") or "day").lower().startswith("month"):
+            days *= 30
+        learned = _esim_learned.get((reseller.id, str(region), code))
+        if learned and time.monotonic() - learned[0] < LEARNED_TTL:
+            price = max(price, learned[1])
+        names = p.get("country_names") if isinstance(p.get("country_names"), list) else []
+        try:
+            countries = max(1, int(p.get("countries") or 1))
+        except (TypeError, ValueError):
+            countries = 1
+        out.append({"code": code, "name": str(p.get("name") or code)[:80], "data": str(p.get("gb") or "")[:16],
+                    "days": days, "nh_price": price, "member_price": shop_price(reseller, {}, "esim", code, price),
+                    "countries": countries, "country_names": [str(x)[:40] for x in names[:80] if x],
+                    "active_type": p.get("active_type") if p.get("active_type") in (1, 2, 3) else None,
+                    "region_name": str(data.get("region_name") or "")[:80]})
+    out.sort(key=lambda r: (r["member_price"], r["name"]))
+    out = out[:ESIM_PLANS_MAX]
+    if len(_esim_plans) > 3000:
+        for k in [k for k, v in list(_esim_plans.items()) if time.monotonic() - v[0] > 600]:
+            _esim_plans.pop(k, None)
+    _esim_plans[key] = (time.monotonic(), out)
+    return out
+
+
+async def buy_esim(reseller: Reseller, member: Member, region: str, code: str,
+                   shown_price: Decimal | None = None) -> Order:
+    if reseller.status != Reseller.ACTIVE or not esim_on(reseller):
+        raise SellError("paused")
+    if member.is_blocked:
+        raise SellError("blocked")
+    if member.id in _members_buying:
+        raise SellError("duplicate")
+    _members_buying.add(member.id)
+    try:
+        return await _buy_esim(reseller, member, str(region), str(code), shown_price)
+    finally:
+        _members_buying.discard(member.id)
+
+
+async def _buy_esim(reseller: Reseller, member: Member, region: str, code: str,
+                    shown_price: Decimal | None) -> Order:
+    if await repo.member_open_count(member.id, kind="esim") >= ESIM_MAX_WAITING:
+        raise SellError("esim_limit")
+    cli = client_for(reseller.id)
+    if cli is None:
+        raise SellError("paused")
+    row = next((r for r in await esim_plans(reseller, region, fresh=True) if r["code"] == code), None)
+    if row is None:
+        raise SellError("sold_out")
+    price = row["member_price"]
+    if shown_price is not None and price > shown_price:
+        raise SellError("price_changed", price)
+    place = next((x for x in await esim_regions(reseller) if x["code"] == region), None)
+    values = dict(reseller_id=reseller.id, member_id=member.id, kind="esim", service=code,
+                  service_name=row["name"][:128], country=region,
+                  country_name=(row["region_name"] or (place or {}).get("name") or region)[:128],
+                  country_iso=(place or {}).get("iso"), member_price=price, markup_pct_at_buy=reseller.markup_pct,
+                  ceiling_at_buy=row["nh_price"])
+
+    async def repriced(exc: NumberHubError) -> Decimal:
+        # The plan's price is read again when it is ordered and can differ from the
+        # list: what the refusal names wins for a while, or the customer would confirm,
+        # be refused, and confirm again.
+        real = dec(exc.data.get("price"))
+        if real > 0:
+            _esim_learned[(reseller.id, region, code)] = (time.monotonic(), real)
+        _esim_plans.pop((reseller.id, region), None)
+        return shop_price(reseller, {}, "esim", code, real)
+
+    order = await _backed_place(reseller, member, cli, values,
+                                lambda o: cli.buy_esim(region, code, row["nh_price"], idempotency_key(o)), repriced)
+    # Most eSIMs are delivered with the purchase: then it is charged now.
+    await settle_order(await repo.get_order(order.id))
+    return await repo.get_order(order.id) or order
+
+
+def esim_profile(live: dict | None) -> dict:
+    """How to install it, from NumberHub's answer: {ac, smdp, matchingId, iccid,
+    install}. Empty while there is nothing to install yet, or no answer."""
+    p = live.get("esim") if isinstance(live, dict) and isinstance(live.get("esim"), dict) else {}
+    return p if str(p.get("ac") or "").upper().startswith("LPA:") else {}
+
+
+async def esim_live(reseller: Reseller, order: Order) -> dict | None:
+    """NumberHub's own view of an eSIM order, with how to install it once it is ready.
+    None when it cannot be read now. A ready one never changes and is kept ten minutes;
+    one still being prepared a few seconds, so a Refresh tap costs no request each time."""
+    if order.kind != "esim" or order.nh_id is None:
+        return None
+    hit = _esim_live.get(order.id)
+    if hit and time.monotonic() - hit[0] < (600 if esim_profile(hit[1]) else 10):
+        return hit[1]
+    cli = client_for(reseller.id)
+    if cli is None:
+        return None
+    try:
+        nh = await cli.esim(order.nh_id)
+    except (NumberHubError, KeyError):
+        return None
+    if not isinstance(nh, dict) or not isinstance(nh.get("esim"), dict):
+        return None
+    if len(_esim_live) > 2000:
+        _esim_live.clear()
+    _esim_live[order.id] = (time.monotonic(), nh)
+    if nh.get("id") is not None:
+        await repo.apply_nh_state(order.id, nh)
+        await settle_order(await repo.get_order(order.id))
+    return nh
+
+
+async def send_esim(bot, reseller: Reseller, member: Member, order: Order) -> bool:
+    """The eSIM is ready: its QR and its card go to the customer. The QR is drawn here
+    from the install code, so no picture comes from anywhere else. False = not sent
+    (asked again on a later pass)."""
+    from aiogram.types import BufferedInputFile
+    from app import payments, texts
+    from app.i18n import t
+    live = await esim_live(reseller, order)
+    ac = str(esim_profile(live).get("ac") or "")
+    if not ac:
+        return False                    # delivered, but how to install it cannot be read yet
+    fresh = await repo.get_order(order.id) or order
+    text, kb = texts.esim_card(member, fresh, live)
+    try:
+        await bot.send_photo(member.telegram_id, BufferedInputFile(payments.qr_png(ac), filename="esim.png"),
+                             caption=t(member.language or "en", "esim_qr_caption"))
+        msg = await bot.send_message(member.telegram_id, text, reply_markup=kb, disable_web_page_preview=True)
+    except Exception as exc:  # noqa: BLE001
+        from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+        return isinstance(exc, (TelegramForbiddenError, TelegramBadRequest))     # blocked the bot: stop trying
+    await repo.set_card(order.id, msg.chat.id, msg.message_id)
+    return True
+
+
 # ─── rented numbers ──────────────────────────────────────────────────────────
 # A number that is the customer's for days: every SMS sent to it reaches them. The
 # owner's NumberHub wallet pays for it when it is rented. In the shop the customer's
@@ -1121,11 +1336,11 @@ async def _attach(reseller: Reseller, order_id: int, nh: dict) -> bool:
                     order_id, nh.get("id"))
         return True
     kind = cur.kind if cur is not None else str(nh.get("kind") or "sms")
-    if kind == "proxy":
-        # A data package is paid for when bought and cannot be given back: the owner
-        # has it in their NumberHub account, and nobody paid the shop for it.
-        log.error("order %s: data package %s exists but the member no longer covers it", order_id, nh.get("id"))
-        asyncio.ensure_future(warn_owner(reseller, "proxy_unpaid"))
+    if kind in ("proxy", "esim"):
+        # A data package or an eSIM is paid for when bought and cannot be given back:
+        # the owner has it in their NumberHub account, and nobody paid the shop for it.
+        log.error("order %s: %s %s exists but the member no longer covers it", order_id, kind, nh.get("id"))
+        asyncio.ensure_future(warn_owner(reseller, kind + "_unpaid"))
         return False
     # A rented number is paid for when rented too, but NumberHub takes it back inside
     # its refund time: tried there, and the owner is told when it cannot be done.
@@ -1217,7 +1432,7 @@ async def _recover_one(order: Order) -> None:
             # Any number from back then has long expired: give the hold back.
             if await repo.fail_order(order.id, "no_answer"):
                 log.warning("order %s: no answer from NumberHub for 20 h; member hold released", order.id)
-                if order.kind in ("proxy", "rent"):
+                if order.kind in ("proxy", "rent", "esim"):
                     # Both are paid when bought and last for days: if the purchase
                     # happened after all, the owner has it and paid for it. Say so.
                     shop = await repo.get_reseller(order.reseller_id)
@@ -1242,6 +1457,8 @@ async def _recover_one(order: Order) -> None:
             elif order.kind == "rent":
                 nh = await cli.buy_rental(int(order.rent_hours or 0), order.country, order.service, ceiling,
                                           idempotency_key(order))
+            elif order.kind == "esim":
+                nh = await cli.buy_esim(order.country, order.service, ceiling, idempotency_key(order))
             else:
                 nh = await cli.buy(order.service, order.country, ceiling, idempotency_key(order))
         except TransportError:
@@ -1256,8 +1473,8 @@ async def _recover_one(order: Order) -> None:
             _inflight.discard(order.id)
         if await _attach(reseller, order.id, nh):
             log.info("order %s: recovered purchase (nh %s)", order.id, nh.get("id"))
-            if order.kind == "proxy":
-                await settle_order(await repo.get_order(order.id))     # paid when bought
+            if order.kind in ("proxy", "esim"):
+                await settle_order(await repo.get_order(order.id))     # paid when bought (an eSIM: once delivered)
             await _show_recovered(reseller, order.id)
 
 
@@ -1268,6 +1485,11 @@ async def _show_recovered(reseller: Reseller, order_id: int) -> None:
     order = await repo.get_order(order_id)
     member = await repo.get_member(order.member_id) if order else None
     if bot is None or member is None:
+        return
+    if order.kind == "esim" and order.status in Order.CHARGED_STATUSES:
+        # Delivered with the recovered purchase: its QR and card, as a fresh purchase gets.
+        if await send_esim(bot, reseller, member, order):
+            await repo.set_codes_announced(order.id, 1)
         return
     text, kb = texts.order_card(member, order)
     try:
@@ -1358,7 +1580,9 @@ async def sync_reseller(reseller: Reseller) -> None:
     now = time.monotonic()
     if _backoff_until.get(reseller.id, 0) > now:
         return
-    live = await repo.open_orders(reseller.id) + await repo.recently_received(reseller.id)
+    live = (await repo.open_orders(reseller.id) + await repo.recently_received(reseller.id)
+            + await repo.esim_unannounced(reseller.id))
+    live = list({o.id: o for o in live}.values())
     if not live:
         _track(reseller.id, set())
         return
@@ -1390,7 +1614,8 @@ async def sync_reseller(reseller: Reseller) -> None:
             _offlist_polled[order.id] = now
             try:
                 nh = await (cli.email(order.nh_id) if order.kind == "email" else
-                            cli.rental(order.nh_id) if order.kind == "rent" else cli.number(order.nh_id))
+                            cli.rental(order.nh_id) if order.kind == "rent" else
+                            cli.esim(order.nh_id) if order.kind == "esim" else cli.number(order.nh_id))
             except NumberHubError as exc:
                 if exc.status in (401, 403, 429):
                     await _sync_trouble(reseller, exc, cli)
@@ -1434,6 +1659,18 @@ async def sync_reseller(reseller: Reseller) -> None:
                 await send(bot, member.telegram_id, texts.rental_refunded(member, fresh))
             elif changed and fresh.status in ("completed", "expired"):
                 await send(bot, member.telegram_id, texts.rental_ended(member, fresh))
+        elif fresh.kind == "esim":
+            # Delivered: its QR and its card go out once. The purchase sends an eSIM that
+            # came with it and marks it; here are the ones that were ready later, or
+            # whose message failed (asked again on the next pass).
+            new_codes = False
+            if fresh.status in Order.CHARGED_STATUSES:
+                if (fresh.codes_announced == 0 and _age_sec(fresh) > ESIM_PUSH_AFTER_SEC
+                        and await send_esim(bot, reseller, member, fresh)):
+                    await repo.set_codes_announced(fresh.id, 1)
+                continue                # a delivered eSIM's card is the full one: the sync never redraws it
+            if changed and fresh.status in ("canceled", "expired"):
+                await send(bot, member.telegram_id, texts.refunded(member, fresh))
         elif fresh.kind == "email":
             # One mail per mailbox, and it may carry a link and no code at all: tell
             # the customer once, when the order shows it received its mail.
@@ -1462,8 +1699,8 @@ async def sync_reseller(reseller: Reseller) -> None:
         elif changed and fresh.status in ("canceled", "expired") and not codes:
             await send(bot, member.telegram_id, texts.refunded(member, fresh))
         due = time.monotonic() - _last_card_edit.get(fresh.id, 0) >= CARD_TICK_SEC
-        if fresh.kind == "rent" and fresh.settled != Order.UNSETTLED:
-            due = False                 # nothing counts down on it once its refund time is over
+        if (fresh.kind == "rent" and fresh.settled != Order.UNSETTLED) or fresh.kind == "esim":
+            due = False                 # nothing counts down on these: redrawn only when something changes
         if changed or new_codes or due or settled_now:
             await refresh_card(bot, member, fresh)
     _track(reseller.id, {o.id for o in live})

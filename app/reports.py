@@ -16,6 +16,7 @@ REPORT_HOUR_UTC = 5
 WHY = {
     "insufficient_funds": "your NumberHub wallet was empty",
     "rent_unavailable": "numbers to rent could not be priced at that moment",
+    "esim_busy": "the eSIM plans could not be read at that moment", "changed": "that eSIM plan was withdrawn",
     "sold_out": "no number in stock", "purchase_failed": "no number in stock",
     "price_exceeded": "the price moved while they were buying",
     "duplicate_order": "too many open orders for that app and country",

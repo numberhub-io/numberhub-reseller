@@ -55,6 +55,9 @@ def order_card(member: Member, order: Order) -> tuple[str, InlineKeyboardMarkup]
     from app.selling import order_codes
     if getattr(order, "kind", "sms") == "rent":
         return rental_card(member, order)
+    if getattr(order, "kind", "sms") == "esim":
+        # Without NumberHub's live answer: the short card; opening it loads the rest.
+        return esim_card(member, order, None)
     if getattr(order, "kind", "sms") == "proxy":
         # Whoever draws a card without NumberHub's live answer (a recovered purchase,
         # a refresh) gets the short one; opening it loads the rest.
@@ -207,6 +210,59 @@ def proxy_card(member: Member, order: Order, live: dict | None = None):
     return "\n".join(lines), kb.as_markup()
 
 
+def esim_card(member: Member, order: Order, live: dict | None = None):
+    """An eSIM. With NumberHub's live answer (`live`: its order with the `esim` block)
+    a delivered one says how to install it: one tap, the QR, or the two codes typed by
+    hand. Without it the card says what was bought and offers to load the rest."""
+    from app.bots.callbacks import Es
+    from app.selling import esim_profile
+    lang = member.language or "en"
+    st = order.status
+    p = esim_profile(live)
+    lines = [f"🌍 <b>eSIM · {esc(order.service_name or order.service)}</b>",
+             f"{flag(order.country_iso) if order.country_iso else '🌍'} {esc(order.country_name or order.country)}", ""]
+    ready = st in Order.CHARGED_STATUSES
+    if st == "buying":
+        lines.append(t(lang, "err_processing"))
+    elif st == "failed":
+        lines.append(t(lang, "esim_failed", price=money(order.member_price)))
+    elif st in ("canceled", "expired"):
+        lines.append(t(lang, "esim_refunded", price=money(order.member_price)))
+    elif not ready:
+        lines.append(t(lang, "esim_preparing"))
+    else:
+        lines.append(t(lang, "esim_ready"))
+        if p:
+            lines += ["", t(lang, "esim_install", smdp=esc(p.get("smdp") or ""), code=esc(p.get("matchingId") or ""),
+                            ac=esc(p.get("ac") or ""), iccid=esc(p.get("iccid") or order.phone or ""))]
+        else:
+            lines += ["", t(lang, "esim_card_closed")]
+    if order.settled == Order.CHARGED:
+        lines += ["", t(lang, "card_paid", price=money(order.member_price))]
+    elif st in ("buying", "pending", "waiting"):
+        lines += ["", t(lang, "esim_held", price=money(order.member_price))]
+    kb = InlineKeyboardBuilder()
+    sizes = []
+    if ready and p:
+        links = p.get("install") if isinstance(p.get("install"), dict) else {}
+        urls = [(k, str(links.get(k) or "")) for k in ("ios", "android")]
+        urls = [(k, u) for k, u in urls if u.startswith("https://esimsetup.")]
+        for k, u in urls:
+            kb.button(text=t(lang, "btn_esim_ios" if k == "ios" else "btn_esim_android"), url=u)
+        if urls:
+            sizes.append(len(urls))
+        kb.button(text=t(lang, "btn_esim_qr"), callback_data=Ord(a="qr", id=order.id))
+        sizes.append(1)
+    elif ready or st in ("pending", "waiting"):
+        kb.button(text=t(lang, "btn_esim_show" if ready else "btn_refresh"), callback_data=Ord(a="view", id=order.id))
+        sizes.append(1)
+    if st != "buying":
+        kb.button(text=t(lang, "btn_esim"), callback_data=Es(a="home"))
+    kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+    kb.adjust(*sizes, 2)
+    return "\n".join(lines), kb.as_markup()
+
+
 RENT_SMS_SHOWN = 5              # the newest SMS a rented number's card lists
 
 
@@ -219,6 +275,12 @@ def rent_period(lang: str, hours) -> str:
     if h in (24, 72, 168, 720):
         return t(lang, f"rent_p_{h}")
     return t(lang, "rent_p_days", n=max(1, -(-h // 24)))
+
+
+def days_label(lang: str, n) -> str:
+    """'1 day', '7 days': a number of days in the customer's language."""
+    n = int(n or 0)
+    return t(lang, "rent_p_24") if n == 1 else t(lang, "rent_p_72") if n == 3 else t(lang, "rent_p_days", n=n)
 
 
 def rent_service_label(lang: str, code: str, name: str | None) -> str:
@@ -365,6 +427,9 @@ def number_ready(member: Member, order: Order) -> str:
 
 
 def refunded(member: Member, order: Order) -> str:
+    if getattr(order, "kind", "sms") == "esim":
+        return t(member.language or "en", "esim_msg_refunded", plan=esc(order.service_name or order.service),
+                 price=money(order.member_price))
     if getattr(order, "kind", "sms") == "email":
         return t(member.language or "en", "email_msg_refunded", site=esc(order.service_name or order.service),
                  price=money(order.member_price))
@@ -400,6 +465,14 @@ OWNER_ALERTS = {
                           "your customer got their money back.\nIf a package from that time shows in your "
                           "NumberHub account under your orders, your wallet paid for it: pass its details to "
                           "the customer once they have paid you, or use it yourself."),
+    "esim_unpaid": ("⚠️ <b>An eSIM was bought on your NumberHub account, and your customer's balance no "
+                    "longer covered it.</b>\nIt cannot be given back. You find it in your NumberHub account under "
+                    "your orders, with its QR code: use it yourself, or pass it to the customer once they have "
+                    "paid you."),
+    "esim_unconfirmed": ("⚠️ <b>An eSIM purchase got no clear answer from NumberHub for 20 hours</b>, so your "
+                         "customer got their money back.\nIf an eSIM from that time shows in your NumberHub "
+                         "account under your orders, your wallet paid for it: pass its QR code to the customer "
+                         "once they have paid you, or use it yourself."),
     "rent_unpaid": ("⚠️ <b>A number was rented on your NumberHub account, and your customer's balance no "
                     "longer covered it.</b>\nIt could not be given back. You find it in your NumberHub account "
                     "under your orders, with every SMS it receives: use it yourself, or pass it to the customer "

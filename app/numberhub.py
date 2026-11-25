@@ -43,7 +43,7 @@ NOT_AUTHORITATIVE_CODES = ("idempotency_in_progress", "idempotency_conflict", "r
 
 # 5xx answers a purchase handler gives BEFORE it does anything (its price list could
 # not be read just now). Unlike every other 5xx they prove that nothing was bought.
-NOTHING_DONE_5XX = ("rent_unavailable",)
+NOTHING_DONE_5XX = ("rent_unavailable", "esim_busy", "esim_disabled")
 
 
 def authoritative(exc: NumberHubError) -> bool:
@@ -188,7 +188,7 @@ class NumberHub:
         """One order of this account, asked for as what it is. Each kind has its own
         address, and a mailbox or a rented number asked about as a number answers "not
         found" even on its own account. 404 = this account has no such order."""
-        path = {"email": "emails", "rent": "rentals", "proxy": "proxies"}.get(kind, "numbers")
+        path = {"email": "emails", "rent": "rentals", "proxy": "proxies", "esim": "esims"}.get(kind, "numbers")
         return await self._req("GET", f"/{path}/{int(nh_id)}")
 
     async def orders(self, limit: int = 100) -> list[dict]:
@@ -252,6 +252,33 @@ class NumberHub:
             return (await self._req("GET", f"/proxies/{int(nh_id)}/usage"))["proxy"]
         except TransportError:
             return (await self._req("GET", f"/proxies/{int(nh_id)}"))["proxy"]
+
+    # ── eSIM data plans: paid up front, delivered as an install code ──────────
+    async def esim_regions(self) -> list[dict]:
+        """Where plans are sold, the most asked for first: [{code, name, flag}]
+        (flag = the country's two letters, empty for a group of countries)."""
+        rows = (await self._req("GET", "/esim/regions")).get("regions", [])
+        return [r for r in rows if isinstance(r, dict) and r.get("code")] if isinstance(rows, list) else []
+
+    async def esim_packages(self, region: str) -> dict:
+        """{region, region_name, packages: [{code, name, gb, duration, unit, price,
+        countries, country_names, active_type}]}."""
+        return await self._req("GET", f"/esim/regions/{quote(str(region), safe='')}/packages")
+
+    @staticmethod
+    def esim_body(region: str, pkg: str, max_price: Decimal) -> bytes:
+        return json.dumps({"region": str(region), "pkg": str(pkg), "max_price": f"{max_price:.2f}"},
+                          separators=(",", ":"), sort_keys=True).encode()
+
+    async def buy_esim(self, region: str, pkg: str, max_price: Decimal, idempotency_key: str) -> dict:
+        """Order one plan. Same rules as buy(): the key makes a retry return the same
+        eSIM, and an unclear answer raises TransportError. It is paid for at once."""
+        return await self._purchase("/esims", self.esim_body(region, pkg, max_price), idempotency_key, "esim")
+
+    async def esim(self, nh_id: int) -> dict:
+        """The order with its `esim` block: {ready, ac (the install code), smdp,
+        matchingId, iccid, install: {ios, android}}."""
+        return (await self._req("GET", f"/esims/{int(nh_id)}"))["esim"]
 
     # ── rented numbers: a number for days, every SMS, paid up front ───────────
     async def rent_durations(self) -> list[dict]:

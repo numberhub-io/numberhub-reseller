@@ -50,6 +50,7 @@ _ADDED_COLUMNS = (
     ("resellers", "pay_note", "TEXT"),
     ("resellers", "proxy_on", "INTEGER"),
     ("resellers", "rent_on", "INTEGER"),
+    ("resellers", "esim_on", "INTEGER"),
     ("orders", "rent_hours", "INTEGER"),
     ("orders", "messages", "TEXT"),
     ("orders", "refund_until", "DATETIME"),

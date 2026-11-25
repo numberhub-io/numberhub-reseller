@@ -157,6 +157,19 @@ Every shop also **rents numbers**: a number that is the customer's for 1 day, 3 
 - On by default. ⚙️ Admin panel → 📅 Rented numbers: on / off. A number rented before it was switched off keeps working. The button stays hidden while your NumberHub API rents no numbers.
 - Not in the bot yet: extending a rental.
 
+### eSIM data
+
+Every shop also sells **eSIM data plans**: mobile data for a trip, installed on the phone without a SIM card. A customer taps 🌍 eSIM data, picks a destination (the most asked for first, or by typing its name) and a plan (data, days, the shop's price), confirms, and gets the eSIM in the chat: a QR code, one-tap install buttons for iPhone and Android, and the two codes to type by hand.
+
+- **Your NumberHub wallet pays when the plan is ordered.** The customer's price is held on their balance at that moment and charged when NumberHub reports the eSIM delivered, which is usually with the purchase itself. If NumberHub gives an order up it refunds your wallet, and the customer's hold is released.
+- An eSIM that was delivered cannot be returned. The confirm screen says so, and asks the customer to check that their phone supports eSIM and is not locked to one carrier.
+- The price is NumberHub's price for the plan plus your commission, rounded up to the cent (your profit cap applies).
+- The QR code is drawn by the platform itself from the install code. How to install an eSIM is read from NumberHub each time its card is opened and is never stored in the shop's database.
+- A plan that works in several countries shows in how many (🌍 139) and lists them on the confirm screen, with when its days start counting.
+- A customer may have 3 eSIMs being prepared at once. A lost reply from NumberHub is asked again with the same key: one eSIM, charged once.
+- On by default. ⚙️ Admin panel → 🌍 eSIM: on / off. An eSIM bought before it was switched off still opens. The button stays hidden while your NumberHub API sells no plans.
+- Not in the bot yet: how much data an eSIM has used.
+
 ### Built-in payments (crypto, nothing to set up)
 
 ⚙️ Admin panel → 💳 Payments → 💵 Turn on built-in crypto. That is the whole setup: no account to open, no key to paste.
@@ -222,7 +235,7 @@ The shop bot messages you, at most once an hour per problem, when:
 - NumberHub rejected your API key (it was revoked or rotated). Send a new one with 🤖 My bots, then 🔑 New API key,
 - the key is missing a permission, or only works from certain IP addresses,
 - your account has as many open orders for one app and country as NumberHub allows (all your shops count together),
-- a proxy data package or a rented number ended up in your NumberHub account with no customer paying for it (their balance no longer covered it, or NumberHub gave no clear answer for 20 hours). The message says where to find it.
+- a proxy data package, an eSIM or a rented number ended up in your NumberHub account with no customer paying for it (their balance no longer covered it, or NumberHub gave no clear answer for 20 hours). The message says where to find it.
 
 While any of these lasts, customers who try to buy are told that buying is paused for a moment, and nothing is held from them.
 

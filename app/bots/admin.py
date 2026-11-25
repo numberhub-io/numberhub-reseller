@@ -91,6 +91,9 @@ async def dashboard(reseller: Reseller):
         "for one verification mail, your commission on top, paid only when the mail arrives",
         "🌐 Proxy data: <b>" + ("on" if getattr(reseller, "proxy_on", None) != 0 else "off") + "</b> · data "
         "packages in GB, your commission on top, paid from your NumberHub wallet when a customer buys one",
+        "🌍 eSIM: <b>" + ("on" if getattr(reseller, "esim_on", None) != 0 else "off") + "</b> · mobile data "
+        "plans by destination, your commission on top, paid from your NumberHub wallet when a customer "
+        "buys one and charged to them when it is delivered",
         "📅 Rented numbers: <b>" + ("on" if getattr(reseller, "rent_on", None) != 0 else "off") + "</b> · a number "
         "for 1 day to 1 month with every SMS, your commission on top, paid from your NumberHub wallet when a "
         "customer rents one. With no SMS yet they can give it back between the 2nd and the 20th minute: then "
@@ -124,9 +127,13 @@ async def dashboard(reseller: Reseller):
     rent_on = getattr(reseller, "rent_on", None) != 0
     kb.button(text="📅 Rented numbers: on" if rent_on else "📅 Rented numbers: off",
               callback_data=Adm(a="rent", arg="off" if rent_on else "on"))
+    # eSIM data plans: paid up front, delivered as a QR code.
+    esim_on = getattr(reseller, "esim_on", None) != 0
+    kb.button(text="🌍 eSIM: on" if esim_on else "🌍 eSIM: off",
+              callback_data=Adm(a="esim", arg="off" if esim_on else "on"))
     kb.button(text="🔄 Refresh", callback_data=Adm(a="home"))
     kb.button(text="🏠 Menu", callback_data=Nav(to="menu"))
-    kb.adjust(1, 2, 2, 2, 2, 2, 2, 1, 2)
+    kb.adjust(1, 2, 2, 2, 2, 2, 2, 2, 2)
     return text, kb.as_markup()
 
 
@@ -632,6 +639,13 @@ def register(r: Router) -> None:
             await c.answer("🌐 Proxy data is on: your customers see the button in the menu."
                            if callback_data.arg == "on" else
                            "🌐 Proxy data is off. A package a customer already bought still works.", show_alert=True)
+            return
+        elif a == "esim" and callback_data.arg in ("on", "off"):
+            await repo.update_reseller(reseller.id, esim_on=1 if callback_data.arg == "on" else 0)
+            await show(c, *await dashboard(await repo.get_reseller(reseller.id)))
+            await c.answer("🌍 eSIM is on: your customers see the button in the menu."
+                           if callback_data.arg == "on" else
+                           "🌍 eSIM is off. An eSIM a customer already bought still opens.", show_alert=True)
             return
         elif a == "rent" and callback_data.arg in ("on", "off"):
             await repo.update_reseller(reseller.id, rent_on=1 if callback_data.arg == "on" else 0)

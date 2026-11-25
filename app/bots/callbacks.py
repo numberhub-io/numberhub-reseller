@@ -32,7 +32,7 @@ class Buy(CallbackData, prefix="b"):
 
 
 class Ord(CallbackData, prefix="o"):
-    a: str                     # view | cancel
+    a: str                     # view | cancel | qr (an eSIM's QR code again)
     id: int
 
 
@@ -50,6 +50,15 @@ class Px(CallbackData, prefix="px"):
     a: str                     # home | pkg | buy
     g: int = 0                 # the package's size in GB
     c: int = 0                 # buy: the price on the button, in cents
+
+
+class Es(CallbackData, prefix="es"):
+    """eSIM data plans."""
+    a: str                     # home (destinations) | reg (a destination's plans) | ok (confirm) | buy
+    r: str = ""                # the destination's code
+    k: str = ""                # the plan's code
+    c: int = 0                 # buy: the price on the button, in cents
+    p: int = 0                 # the page of a list
 
 
 class Rn(CallbackData, prefix="rn"):

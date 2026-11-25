@@ -67,7 +67,7 @@ async def update_reseller(reseller_id: int, **values) -> None:
                "bot_token_enc", "api_key_enc", "api_key_hint", "max_profit", "deposit_info", "deposit_min",
                "oxapay_key_enc", "cryptobot_token_enc", "nh_pay", "daily_report",
                "kasera_key_enc", "kasera_rate", "key_by_owner", "email_on", "kasera_auto", "kasera_extra",
-               "pay_note", "proxy_on", "rent_on"}
+               "pay_note", "proxy_on", "rent_on", "esim_on"}
     values = {k: v for k, v in values.items() if k in allowed}
     if values:
         async with session_factory() as s:
@@ -482,6 +482,17 @@ async def proxy_active_count(member_id: int) -> int:
             Order.member_id == member_id, Order.kind == "proxy", Order.status.in_((Order.BUYING, "received")),
             or_(Order.expires_at.is_(None), Order.expires_at > _now()))
         return int(await s.scalar(q) or 0)
+
+
+async def esim_unannounced(reseller_id: int, minutes: int = 60) -> list[Order]:
+    """eSIMs that were delivered in the last hour and whose QR has not gone out to the
+    customer yet (the purchase sends it when the eSIM came with it; these came later,
+    or that message failed)."""
+    async with session_factory() as s:
+        q = select(Order).where(Order.reseller_id == reseller_id, Order.kind == "esim",
+                                Order.status.in_(Order.CHARGED_STATUSES), Order.codes_announced == 0,
+                                Order.nh_id.is_not(None), Order.updated_at >= _now() - dt.timedelta(minutes=minutes))
+        return list((await s.execute(q)).scalars())
 
 
 async def rent_active_count(member_id: int) -> int:
