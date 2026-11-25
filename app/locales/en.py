@@ -69,7 +69,7 @@ T = {
     "msg_credited": "💰 <b>{amount} added to your balance.</b>\nBalance: <b>{balance}</b>",
     "msg_debited": "💰 {amount} was removed from your balance. Balance: <b>{balance}</b>",
     # errors
-    "err_no_credit": "💰 Not enough balance: this number costs <b>{price}</b>, you have <b>{available}</b>.\n\nTo add balance, send your ID <code>{id}</code> to {support}.",
+    'err_no_credit': '💰 Not enough balance: the price is <b>{price}</b>, you have <b>{available}</b>.\n\nTo add balance, send your ID <code>{id}</code> to {support}.',
     "err_paused": "⏸ Sales are paused for a moment. Please try again later.",
     "err_sold_out": "😕 No numbers for this country right now. Please choose another one.",
     "err_price_changed": "💵 The price just changed to <b>{price}</b>. Please confirm again.",
@@ -101,7 +101,7 @@ T = {
     'dep_too_many': "⏳ You've sent several deposits today. Please wait for the seller.",
     # automatic top-ups with the seller's own OxaPay / @CryptoBot (app/payments.py)
     'balance_auto': '💰 <b>Your balance</b>\n\nAvailable: <b>{available}</b>\nReserved for open orders: {held}\n\n🆔 Your ID: <code>{id}</code>\nTo add balance, tap 💳 Add balance below.',
-    'err_no_credit_auto': '💰 Not enough balance: this number costs <b>{price}</b>, you have <b>{available}</b>.\n\nTap 💳 Add balance below to top up by crypto.',
+    'err_no_credit_auto': '💰 Not enough balance: the price is <b>{price}</b>, you have <b>{available}</b>.\n\nTap 💳 Add balance below to top up.',
     'pay_pick_amount': '💳 <b>Add balance</b>\n\nHow much do you want to add? You pay by crypto, and your balance goes up by itself as soon as the payment arrives.',
     'btn_amount_other': '✏️ Other amount',
     'btn_pay_other_way': '📝 I paid another way',
@@ -114,11 +114,12 @@ T = {
     'btn_pay_now': '💳 Pay {amount}',
     'btn_pay_check': "🔄 I've paid: check",
     'pay_received': '✅ <b>Payment received:</b> +{amount}\nYour balance: <b>{balance}</b>',
-    'pay_not_yet': "⏳ Not received yet. Crypto payments can take a few minutes to confirm: you'll get a message as soon as it arrives.",
-    'pay_expired': '⌛ This payment link has expired. Tap 💳 Add balance to get a new one.',
+    'pay_not_yet': "⏳ Not received yet. A payment can take a few minutes to arrive: you'll get a message as soon as it does.",
+    'pay_expired': '⌛ This payment has expired. Tap 💳 Add balance to start a new one.',
     'pay_already': '✅ This payment is already on your balance.',
     'pay_manual': 'The seller will add this payment to your balance by hand.',
-    'pay_too_many': '⏳ You already have several payment links open. Pay one of them, or try again later.',
+    'pay_too_many': '⏳ You already have several payments open. Pay one of them, or try again later.',
+    'pay_test': "✅ Test payment received. This shop's QRIS is in test mode, so no balance was added.",
     'pay_unavailable': '⚠️ Payments are not available right now. Please try again later, or contact {support}.',
     'pay_open_hint': '⏳ You have a payment link for <b>{amount}</b> open: tap it below to pay, or pick another amount.',
     # built-in USDT payments: an address instead of a link (app/payments.py, provider numberhub)

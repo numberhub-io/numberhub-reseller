@@ -15,7 +15,8 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app import crypto, repo, runtime
+from app import crypto, payments, repo, runtime
+from app.bots import errors
 from app.config import settings
 from app.models import Reseller
 from app.numberhub import NumberHub, NumberHubError, dec
@@ -23,6 +24,21 @@ from app.texts import esc, money
 
 log = logging.getLogger(__name__)
 router = Router(name="builder")
+errors.install(router)
+
+BUILTIN_OFF_NOTE = ("\n\n💵 <b>Built-in crypto payments are now off for this bot.</b> They work only on the API "
+                    "key NumberHub set up for the bot, and this key was sent by you. Your customers can still "
+                    "pay through your own gateway or by manual deposit (in the bot: ⚙️ Admin panel → 💳 "
+                    "Payments). To get built-in payments back, connect the bot again in @TheNumberHubBot "
+                    "(🤖 Your own bot).")
+
+
+async def _builtin_lost(before: Reseller, reseller_id: int) -> str:
+    """The note for an owner whose bot took built-in payments until this key change.
+    A key its owner sent turns them off (payments.builtin_allowed); until 2026-11-25
+    the answer only said that the bot was selling again."""
+    after = await repo.get_reseller(reseller_id)
+    return BUILTIN_OFF_NOTE if after is not None and payments.builtin_on(before) and not payments.builtin_on(after) else ""
 # Secrets are sent here: private chats only.
 router.message.filter(F.chat.type == "private")
 router.callback_query.filter(F.message.chat.type == "private")
@@ -452,8 +468,8 @@ async def _reconnect(m: Message, state: FSMContext, rid: int, data: dict, key: s
                                status=Reseller.ACTIVE if reseller.status != Reseller.DISABLED else Reseller.DISABLED,
                                key_by_owner=1)
     await runtime.restart(rid)
-    await m.answer(f"✅ <b>@{esc(data.get('username'))}</b> is reconnected, with its customers and balances.",
-                   reply_markup=home_kb())
+    await m.answer(f"✅ <b>@{esc(data.get('username'))}</b> is reconnected, with its customers and balances."
+                   + await _builtin_lost(reseller, rid), reply_markup=home_kb())
     log.info("reseller %s reconnected by %s", rid, m.from_user.id)
 
 
@@ -481,8 +497,8 @@ async def got_newkey(m: Message, state: FSMContext):
                                key_by_owner=1)
     await runtime.swap_key(reseller.id, key)
     await m.answer(f"✅ New key saved for @{esc(reseller.bot_username)}"
-                   + (" — it is selling again." if status == Reseller.ACTIVE else " (the bot is still paused)."),
-                   reply_markup=home_kb())
+                   + (" — it is selling again." if status == Reseller.ACTIVE else " (the bot is still paused).")
+                   + await _builtin_lost(reseller, reseller.id), reply_markup=home_kb())
 
 
 # ─── platform operators ──────────────────────────────────────────────────────
@@ -512,6 +528,10 @@ async def platform(m: Message):
         await m.answer(chunk)
 
 
+_STATUS_WORDS = {Reseller.ACTIVE: "selling", Reseller.DISABLED: "paused by its owner",
+                 Reseller.KEY_INVALID: "waiting for a new API key", Reseller.TOKEN_INVALID: "waiting for its bot token"}
+
+
 @router.message(Command("disable"))
 @router.message(Command("enable"))
 async def toggle(m: Message):
@@ -525,15 +545,28 @@ async def toggle(m: Message):
     if reseller is None:
         await m.answer("No such bot.")
         return
+    name = f"#{reseller.id} @{esc(reseller.bot_username)}"
     if parts[0].startswith("/disable"):
+        if reseller.status == Reseller.SUSPENDED:
+            await m.answer(f"⛔ {name} is already disabled.")
+            return
         # No new sales and the owner can't lift it; the bot keeps answering
-        # "paused" and finishes the orders it has.
-        await repo.update_reseller(reseller.id, status=Reseller.SUSPENDED)
-        await m.answer(f"⛔ #{reseller.id} @{esc(reseller.bot_username)} disabled (open orders still finish).")
-    else:
-        await repo.update_reseller(reseller.id, status=Reseller.ACTIVE)
-        await runtime.start(await repo.get_reseller(reseller.id))
-        await m.answer(f"▶️ #{reseller.id} @{esc(reseller.bot_username)} enabled.")
+        # "paused" and finishes the orders it has. What it was is kept for /enable.
+        await repo.update_reseller(reseller.id, status=Reseller.SUSPENDED, suspended_from=reseller.status)
+        await m.answer(f"⛔ {name} disabled (open orders still finish).")
+        return
+    # /enable lifts an operator's /disable and nothing else. Until 2026-11-25 it set any
+    # shop active: one its owner had paused, or one waiting for a new key or token.
+    if reseller.status != Reseller.SUSPENDED:
+        await m.answer(f"{name} is not disabled by an operator ({_STATUS_WORDS.get(reseller.status, reseller.status)}). "
+                       "Nothing changed.")
+        return
+    back = getattr(reseller, "suspended_from", None)
+    back = back if back in _STATUS_WORDS else Reseller.ACTIVE
+    await repo.update_reseller(reseller.id, status=back, suspended_from=None)
+    await runtime.start(await repo.get_reseller(reseller.id))
+    await m.answer(f"▶️ {name} enabled." if back == Reseller.ACTIVE else
+                   f"▶️ {name} is no longer disabled. It is as it was before: {_STATUS_WORDS[back]}.")
 
 
 # ─── anything else ───────────────────────────────────────────────────────────

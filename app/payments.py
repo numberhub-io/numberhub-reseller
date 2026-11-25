@@ -1047,8 +1047,8 @@ async def _announce_test(bot, reseller: Reseller, p: Payment) -> None:
             "added: connect your live key in ⚙️ Admin panel → 💳 Payments to take real payments.")
     await send(bot, reseller.owner_id, note)
     if member.telegram_id != reseller.owner_id:
-        await send(bot, member.telegram_id, "✅ Test payment received. This shop's QRIS is in test mode, so no "
-                                            "balance was added.")
+        from app.i18n import t
+        await send(bot, member.telegram_id, t(member.language or "en", "pay_test"))
 
 
 async def _announce_manual(bot, reseller: Reseller, p: Payment) -> None:

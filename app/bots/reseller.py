@@ -7,6 +7,7 @@ import datetime as dt
 import logging
 import hashlib
 import re
+import time
 from decimal import Decimal, InvalidOperation
 
 from aiogram import BaseMiddleware, F, Router
@@ -17,6 +18,7 @@ from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app import payments, repo, selling
+from app.bots import errors
 from app.bots.callbacks import AZ, Adm, Buy, Cty, Em, Es, Lang, Nav, Noop, Ord, Pay, Px, Rn, Svc, SvcPage
 from app.catalog_ui import ANY_OTHER, LETTERS, POPULAR, by_letter, icon, letter_counts, more_popular, nice_name
 from app.i18n import LANGS, resolve, t
@@ -94,7 +96,11 @@ class Context(BaseMiddleware):
         if reseller is None or user is None:
             return None
         is_owner = user.id == reseller.owner_id
-        await _leave_form(event, data.get("state"))
+        state = data.get("state")
+        if await _leave_form(event, state):
+            await _prompt_expired(event)
+            return None
+        await _leave_list(event, state)
         member = await repo.get_or_create_member(reseller.id, user.id, user.username, user.full_name,
                                                  resolve(user.language_code))
         lang = member.language or "en"
@@ -108,7 +114,10 @@ class Context(BaseMiddleware):
             await _reply(event, t(lang, "blocked"))
             return None
         data.update(reseller=reseller, member=member, lang=lang, is_owner=is_owner)
-        return await handler(event, data)
+        try:
+            return await handler(event, data)
+        finally:
+            await _stamp_form(state)
 
 
 # The buttons that belong to each form. Anything else ends it.
@@ -116,23 +125,85 @@ _FORM_BUTTONS = {"AdminForm": ("a:", "d:"), "EmailForm": ("e:",), "PayForm": ("p
                  "EsimForm": ("es:",)}
 
 
-async def _leave_form(event, state: FSMContext | None) -> None:
+# An owner's prompt takes the next text this long. The owner's chat fills with notices
+# (deposits, payments, the daily report) that push a prompt out of sight: a search typed
+# hours later was saved as the welcome text, and "15" as the commission. A customer's
+# form has no limit: the prompt is still the last thing on their screen.
+FORM_TTL_SEC = 15 * 60
+PROMPT_EXPIRED = ("⌛ <b>Not saved.</b> That prompt was open for more than 15 minutes, so this message was not "
+                  "used for it. Open it again in the ⚙️ Admin panel and send it once more.")
+
+
+async def _leave_form(event, state: FSMContext | None) -> bool:
     """A form (an owner's prompt, a top-up amount, a deposit's proof, an email site)
     ends as soon as its user does anything else: a command, or a button outside it.
     Otherwise a later search ("whatsapp") went out to every customer as a broadcast,
-    was filed with the owner as a deposit's proof, or opened a payment for "5"."""
+    was filed with the owner as a deposit's proof, or opened a payment for "5".
+
+    An owner's prompt also ends by age (FORM_TTL_SEC since its last step). True = the
+    message in hand was meant for a prompt that is too old: it is not handled at all,
+    and the owner is told."""
     if state is None:
-        return
+        return False
     current = await state.get_state()
     group = (current or "").split(":", 1)[0]
     if group not in _FORM_BUTTONS:
-        return
+        return False
     if isinstance(event, Message):
         leaving = (event.text or "").startswith("/")
+        if not leaving and group == "AdminForm":
+            at = (await state.get_data()).get("form_at")
+            if at is not None and time.monotonic() - at > FORM_TTL_SEC:
+                await state.set_state(None)
+                if current == "AdminForm:pay_key":
+                    try:
+                        await event.delete()        # a gateway key pasted into the old prompt
+                    except Exception:  # noqa: BLE001
+                        pass
+                return True
     else:
         leaving = not (event.data or "").startswith(_FORM_BUTTONS[group])
     if leaving:
         await state.set_state(None)
+    return False
+
+
+async def _stamp_form(state: FSMContext | None) -> None:
+    """Each step of an owner's prompt restarts its clock."""
+    if state is None:
+        return
+    if (await state.get_state() or "").startswith("AdminForm:"):
+        await state.update_data(form_at=time.monotonic())
+
+
+async def _prompt_expired(event) -> None:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⚙️ Admin panel", callback_data=Adm(a="home"))
+    try:
+        await event.answer(PROMPT_EXPIRED, reply_markup=kb.as_markup())
+    except Exception:  # noqa: BLE001
+        pass
+
+
+# The buttons of an app's country list and of what it leads to: its pages, a country
+# (the price to confirm), the purchase (one that fails comes back to the list; one that
+# succeeds leaves it, see `buy`), the page-number button. Anything else leaves the list.
+_LIST_BUTTONS = ("s:", "c:", "b:", "x:")
+
+
+async def _leave_list(event, state: FSMContext | None) -> None:
+    """Text typed on an app's country list is searched among that app's countries.
+    That ends when the customer goes anywhere else. Until 2026-11-25 the app of the
+    last list they had looked at was used on every later screen: "tg" typed in the
+    menu gave Togo, "tw" Taiwan."""
+    if state is None:
+        return
+    if isinstance(event, Message):
+        leaving = (event.text or "").startswith("/")
+    else:
+        leaving = not (event.data or "").startswith(_LIST_BUTTONS)
+    if leaving and (await state.get_data()).get("svc"):
+        await state.update_data(svc=None, cpage=None)
 
 
 def _tok(*parts) -> str:
@@ -845,6 +916,7 @@ def build_router(reseller_id: int) -> Router:
     ctx = Context(reseller_id)
     r.message.outer_middleware(ctx)
     r.callback_query.outer_middleware(ctx)
+    errors.install(r)
 
     # ── navigation ──
     @r.message(CommandStart())
@@ -957,7 +1029,8 @@ def build_router(reseller_id: int) -> Router:
             await c.answer(t(lang, "err_busy"), show_alert=True)
 
     @r.callback_query(Buy.filter())
-    async def buy(c: CallbackQuery, callback_data: Buy, reseller: Reseller, member: Member, lang: str):
+    async def buy(c: CallbackQuery, callback_data: Buy, reseller: Reseller, member: Member, lang: str,
+                  state: FSMContext):
         await c.answer(t(lang, "buying"))
         shown = Decimal(callback_data.cents) / 100
         try:
@@ -1002,6 +1075,8 @@ def build_router(reseller_id: int) -> Router:
         text, kb = order_card(member, order)
         await _show(c, text, kb)
         await repo.set_card(order.id, c.message.chat.id, c.message.message_id)
+        # Bought: the customer is on an order card now, not on that app's list any more.
+        await state.update_data(svc=None, cpage=None)
 
     # ── email codes ──
     async def _email_home(c: CallbackQuery, reseller: Reseller, lang: str, state: FSMContext) -> None:
@@ -1651,8 +1726,9 @@ def build_router(reseller_id: int) -> Router:
                 await _show(c, t(lang, "pay_received", amount=money(p.credited), balance=money(fresh.available)),
                             after_credit_kb(fresh))
             else:
+                # "test" = paid with the shop's test key: it works, and adds no balance.
                 key = {"already": "pay_already", "expired": "pay_expired", "manual": "pay_manual",
-                       "failed": "pay_expired"}.get(state_, "pay_not_yet")
+                       "failed": "pay_expired", "test": "pay_test"}.get(state_, "pay_not_yet")
                 if state_ == "already" and p.status != p.PAID:
                     key = "pay_expired" if p.status in (p.EXPIRED, p.FAILED) else "pay_manual"
                 await c.answer(t(lang, key), show_alert=True)

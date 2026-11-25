@@ -84,6 +84,9 @@ class Reseller(Base):
     rent_on: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # eSIM data plans in this shop: 0 = switched off by the owner, anything else on.
     esim_on: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # While an operator has the shop disabled (SUSPENDED): the status it had before,
+    # which /enable gives back. A shop its owner had paused stays paused.
+    suspended_from: Mapped[str | None] = mapped_column(String(16), nullable=True)
     # The morning report to the owner (app/reports.py): 0 = off, anything else on.
     # report_day = the UTC day it was last sent for, so it goes out once a day.
     daily_report: Mapped[int | None] = mapped_column(Integer, nullable=True)

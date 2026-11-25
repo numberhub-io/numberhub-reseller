@@ -1383,7 +1383,7 @@ async def test_auto_payments():
     n_open = len(await repo.open_payments(mem.id))
     await dp.feed_update(bot, tap(cust, Pay(a="via", g="ox", c=500).pack()))
     check("at most 3 open links per customer", n_open == 3 and len(await repo.open_payments(mem.id)) == 3
-          and "several payment links open" in session.last_text())
+          and "several payments open" in session.last_text())
     await dp.feed_update(bot, tap(cust, "n:deposit"))
     check("the amount screen shows the open link to pay", url_button(session, "Pay $5.00") is not None)
     for p in await repo.open_payments(mem.id):
@@ -4542,6 +4542,319 @@ async def test_esim():
     runtime._bots.pop(r.id, None)
 
 
+async def test_review_defects_2026_11_25():
+    """Six defects from the full review of the shop bot (2026-11-24), and a wording bug
+    found beside them."""
+    print("review defects: late taps, list search, prompt age, price pages, builder notes, payment wording")
+    import time
+    from aiogram.exceptions import TelegramBadRequest
+    from aiogram.methods import DeleteMessage, GetMe, SendMessage
+    from aiogram.types import ErrorEvent
+    from app import fx, payments
+    from app.bots import admin, builder, errors
+    from app.bots.callbacks import Adm, Cty, Es, Nav, Pay, Svc
+    from app.bots.reseller import build_router
+    from app.config import settings
+    from app.models import PriceRule
+    from fakes import FakeFx, FakeGateways
+    own, op = 5171, 424242
+    api = FakeNumberHub()
+    r = await make_reseller(api, owner=own, bot_id=88821)
+    session = FakeSession(bot_id=88821)
+    bot = fake_bot(session)
+    runtime._bots[r.id] = bot
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(build_router(r.id))
+    cust = 97001
+    await member(r, cust, "5.00")
+    labels = lambda: [b.text for row in (session.last_markup().inline_keyboard if session.last_markup() else [])  # noqa: E731
+                      for b in row]
+    sent_to = lambda uid: [x.text or "" for x in session.requests if isinstance(x, SendMessage) and x.chat_id == uid]  # noqa: E731
+    shop = lambda: repo.get_reseller(r.id)     # noqa: E731
+    bsession = FakeSession(bot_id=804, username="builder_bot")
+    bbot = fake_bot(bsession)
+    bdp = Dispatcher(storage=MemoryStorage())
+    builder.router._parent_router = None     # other tests attached it to their own dispatcher
+    bdp.include_router(builder.router)
+    keep = (settings.provision_secret, settings.admin_ids, runtime.swap_key, runtime.start, runtime.restart,
+            runtime.make_bot, builder.NumberHub)
+
+    async def fed(d, b, update):
+        """What feeding this update raises (None = nothing)."""
+        try:
+            await d.feed_update(b, update)
+        except Exception as exc:  # noqa: BLE001
+            return exc
+        return None
+
+    # ── a tap answered too late ──
+    await dp.feed_update(bot, msg(cust, "/start"))
+    shown = len(session.texts())
+    session.late_answers = 1
+    raised = await fed(dp, bot, tap(cust, Nav(to="orders").pack()))
+    check("a tap answered too late: the screen was drawn, and nothing is raised to be logged as an error",
+          raised is None and session.late_answers == 0 and len(session.texts()) == shown + 1, repr(raised))
+    bsession.late_answers = 1
+    raised = await fed(bdp, bbot, tap(own, "bd:create:0:"))
+    check("the same in the builder", raised is None and bsession.late_answers == 0, repr(raised))
+    session.bad_sends = 1
+    raised = await fed(dp, bot, msg(cust, "/start"))
+    check("any other refusal by Telegram is still raised, so it is logged with its traceback as before",
+          isinstance(raised, TelegramBadRequest) and "chat not found" in str(raised), repr(raised))
+    ev = lambda exc: ErrorEvent(update=msg(cust, "x"), exception=exc)     # noqa: E731
+    bad = lambda text: TelegramBadRequest(method=GetMe(), message=text)   # noqa: E731
+    check("harmless: a late answer and an edit that changes nothing; everything else is not",
+          errors.harmless(ev(bad("Bad Request: query is too old and response timeout expired or query ID is invalid")))
+          and errors.harmless(ev(bad("Bad Request: message is not modified: specified new message content is the same")))
+          and not errors.harmless(ev(bad("Bad Request: message to edit not found")))
+          and not errors.harmless(ev(RuntimeError("query is too old"))))
+
+    # ── a typed text and the country list it belongs to ──
+    await dp.feed_update(bot, tap(cust, Svc(code="wa", page=0).pack()))
+    await dp.feed_update(bot, msg(cust, "us"))
+    check("on an app's country list a two-letter code finds a country of that app",
+          "<b>WhatsApp</b> — countries for “us”" in session.last_text(), session.last_text()[:80])
+    await dp.feed_update(bot, tap(cust, Cty(code="wa", cc="187").pack()))
+    await dp.feed_update(bot, msg(cust, "indo"))
+    check("...and still on the price screen of one of its countries",
+          "countries for “indo”" in session.last_text(), session.last_text()[:80])
+    await dp.feed_update(bot, tap(cust, Nav(to="menu").pack()))
+    await dp.feed_update(bot, msg(cust, "us"))
+    check("after the customer left the list the same text is a search for an app (it gave that app's countries)",
+          "countries for" not in session.last_text()
+          and ("Results for “us”" in session.last_text() or "Nothing found for “us”" in session.last_text()),
+          session.last_text()[:80])
+    await dp.feed_update(bot, tap(cust, Svc(code="wa", page=0).pack()))
+    await dp.feed_update(bot, tap(cust, Cty(code="wa", cc="187").pack()))
+    bought, buy_button = len(api.orders), button(session, "Buy")
+    api.fail_next_buy = "sold_out"
+    await dp.feed_update(bot, tap(cust, buy_button))
+    await dp.feed_update(bot, msg(cust, "indo"))
+    check("a purchase that failed keeps the customer on that app's list",
+          len(api.orders) == bought and "countries for “indo”" in session.last_text(), session.last_text()[:80])
+    await dp.feed_update(bot, tap(cust, buy_button))
+    await dp.feed_update(bot, msg(cust, "us"))
+    check("a purchase that worked leaves it", len(api.orders) == bought + 1 and "countries for" not in session.last_text(),
+          session.last_text()[:80])
+
+    # ── an owner's prompt has a time limit ──
+    ctx = dp.fsm.get_context(bot, own, own)
+    hour_ago = lambda: ctx.update_data(form_at=time.monotonic() - 3600)   # noqa: E731
+    await dp.feed_update(bot, tap(own, Adm(a="welcome").pack()))
+    await dp.feed_update(bot, msg(own, "Hello, welcome to my shop"))
+    check("a prompt answered in time is saved", (await shop()).welcome_text == "Hello, welcome to my shop")
+    await dp.feed_update(bot, tap(own, Adm(a="welcome").pack()))
+    await hour_ago()
+    await dp.feed_update(bot, msg(own, "whatsapp"))
+    check("an hour later the next text is NOT saved (it became the welcome text), and the owner is told",
+          (await shop()).welcome_text == "Hello, welcome to my shop" and "Not saved" in session.last_text()
+          and button(session, "Admin panel") == Adm(a="home").pack() and await ctx.get_state() is None,
+          session.last_text()[:80])
+    await dp.feed_update(bot, msg(own, "whatsapp"))
+    check("...typed once more it is a search", "Results for “whatsapp”" in session.last_text())
+    before = (await shop()).markup_pct
+    await dp.feed_update(bot, tap(own, Adm(a="markup").pack()))
+    await hour_ago()
+    await dp.feed_update(bot, msg(own, "15"))
+    check("a number typed into an old commission prompt does not change the commission",
+          (await shop()).markup_pct == before == D("30") and "Not saved" in session.last_text())
+    await dp.feed_update(bot, tap(own, Adm(a="pay_on", arg=payments.OXAPAY).pack()))
+    await hour_ago()
+    deleted = sum(isinstance(x, DeleteMessage) for x in session.requests)
+    await dp.feed_update(bot, msg(own, "OXA-A-KEY-PASTED-TOO-LATE"))
+    check("a gateway key pasted into an old prompt is not stored, and its message is deleted",
+          not payments.has_key(await shop(), payments.OXAPAY) and "Not saved" in session.last_text()
+          and sum(isinstance(x, DeleteMessage) for x in session.requests) == deleted + 1)
+    await dp.feed_update(bot, tap(own, Adm(a="pr_add").pack()))
+    await hour_ago()
+    await dp.feed_update(bot, tap(own, Adm(a="pr_app", arg="wa").pack()))       # a step inside the prompt
+    await dp.feed_update(bot, tap(own, Adm(a="pr_cty", arg="wa|*").pack()))
+    await dp.feed_update(bot, msg(own, "0.45"))
+    check("each step of a prompt restarts its clock",
+          any(x.service == "wa" and x.country == "" and x.value == D("0.45") for x in await repo.price_rules(r.id))
+          and "Not saved" not in session.last_text(), session.last_text()[:80])
+    cctx = dp.fsm.get_context(bot, cust, cust)
+    await dp.feed_update(bot, tap(cust, Es(a="home").pack()))
+    await cctx.update_data(form_at=time.monotonic() - 3600)
+    await dp.feed_update(bot, msg(cust, "euro"))
+    check("a customer's own form has no time limit: its prompt is still the last thing on their screen",
+          labels()[0] == "🌍 Europe (42 areas)", str(labels()[:2]))
+
+    # ── the price screen in pages ──
+    for i in range(95):
+        await repo.set_price_rule(r.id, "wa", str(2000 + i), PriceRule.FIXED, D("0.50"), "WhatsApp",
+                                  f"Democratic Republic of Country {i:02d}")
+    rules = await repo.price_rules(r.id)
+    total = len(rules)
+    dels = lambda: [b for row in session.last_markup().inline_keyboard for b in row if b.text.startswith("🗑")]  # noqa: E731
+    check("(96 custom prices on one screen are more text than Telegram takes)",
+          total == 96 and sum(len(admin.rule_text(x)) + 6 for x in rules) > 4096)
+    await dp.feed_update(bot, tap(own, Adm(a="prices").pack()))
+    text = session.last_text()
+    check("with 96 custom prices the screen shows the first 20, in a message Telegram takes",
+          "<b>1–20 of 96</b>" in text and len(text) < 4096 and len(dels()) == 20 and "1/5" in labels()
+          and "▶️" in labels() and "◀️" not in labels(), f"{len(text)} {labels()[-6:]}")
+    await dp.feed_update(bot, tap(own, Adm(a="prices", arg="4").pack()))
+    check("the last page has the rest, and the way back",
+          "<b>81–96 of 96</b>" in session.last_text() and len(dels()) == 16 and "5/5" in labels()
+          and "◀️" in labels() and "▶️" not in labels(), str(labels()[-6:]))
+    await dp.feed_update(bot, tap(own, dels()[0].callback_data))
+    check("removing a price keeps the owner on that page",
+          "Custom price removed" in session.last_text() and "<b>81–95 of 95</b>" in session.last_text()
+          and await repo.count_price_rules(r.id) == 95, session.last_text()[:60])
+    await dp.feed_update(bot, tap(own, Adm(a="prices", arg="99").pack()))
+    check("a page that no longer exists shows the last one", "<b>81–95 of 95</b>" in session.last_text())
+    first = (await repo.price_rules(r.id))[0]
+    await dp.feed_update(bot, tap(own, Adm(a="pr_del", arg=str(first.id)).pack()))
+    check("a remove button from before the pages still removes its price",
+          await repo.count_price_rules(r.id) == 94 and "<b>1–20 of 94</b>" in session.last_text())
+    for x in (await repo.price_rules(r.id))[5:]:
+        await repo.delete_price_rule(r.id, x.id)
+    await dp.feed_update(bot, tap(own, Adm(a="prices").pack()))
+    check("a few custom prices: one page, no page buttons, as before",
+          len(dels()) == 5 and " of 5" not in session.last_text() and "1/1" not in labels() and "▶️" not in labels())
+    for x in await repo.price_rules(r.id):
+        await repo.delete_price_rule(r.id, x.id)
+    selling.forget_prices(r.id)
+
+    # ── the builder: what a new key changes, and what /enable may lift ──
+    swapped, started, restarted = [], [], []
+
+    async def fake_swap(rid, key):
+        swapped.append(rid)
+
+    async def fake_start(shop_row):
+        started.append(shop_row.id)
+
+    async def fake_restart(rid):
+        restarted.append(rid)
+    try:
+        runtime.swap_key, runtime.start, runtime.restart = fake_swap, fake_start, fake_restart
+        runtime.make_bot = lambda token: fake_bot(FakeSession(bot_id=88821, username="my_shop_bot"))
+        builder.NumberHub = lambda key: api.client(key)
+        builder._key_fails.clear()               # keys other tests had refused on purpose
+        builder._all_fails.clear()
+        settings.provision_secret, settings.admin_ids = "s" * 40, str(op)
+        await repo.update_reseller(r.id, key_by_owner=0)
+        await payments.set_builtin(r.id, True)
+        check("(a shop the wallet service set up takes built-in payments)", payments.builtin_on(await shop()))
+        await bdp.feed_update(bbot, tap(own, f"bd:newkey:{r.id}:"))
+        await bdp.feed_update(bbot, msg(own, api.key))
+        text = bsession.last_text()
+        check("a new key sent by the owner: the answer says built-in payments are now off, and how to get them back",
+              "New key saved" in text and "Built-in crypto payments are now off" in text and "@TheNumberHubBot" in text
+              and swapped == [r.id] and not payments.builtin_on(await shop()), text[:160])
+        await bdp.feed_update(bbot, tap(own, f"bd:newkey:{r.id}:"))
+        await bdp.feed_update(bbot, msg(own, api.key))
+        check("...said when it happens, not again for a shop already on its owner's key",
+              "New key saved" in bsession.last_text() and "Built-in" not in bsession.last_text())
+        await repo.update_reseller(r.id, key_by_owner=0)
+        await bdp.feed_update(bbot, tap(own, "bd:create:0:"))
+        await bdp.feed_update(bbot, msg(own, "123456789:" + "C" * 35))
+        await bdp.feed_update(bbot, msg(own, api.key))
+        check("a reconnect with a key the owner sends says it too",
+              "is reconnected" in bsession.last_text() and "Built-in crypto payments are now off" in bsession.last_text()
+              and restarted == [r.id], bsession.last_text()[:160])
+        settings.provision_secret = ""
+        await repo.update_reseller(r.id, key_by_owner=0)
+        await bdp.feed_update(bbot, tap(own, f"bd:newkey:{r.id}:"))
+        await bdp.feed_update(bbot, msg(own, api.key))
+        check("on a platform its owner runs for themselves nothing is switched off, and nothing is said",
+              "New key saved" in bsession.last_text() and "Built-in" not in bsession.last_text()
+              and payments.builtin_on(await shop()))
+
+        async def status():
+            row = await shop()
+            return row.status, row.suspended_from
+        started.clear()
+        await repo.update_reseller(r.id, status=Reseller.DISABLED)
+        await bdp.feed_update(bbot, msg(op, f"/enable {r.id}"))
+        check("/enable leaves a shop alone that its owner paused (it set it selling)",
+              await status() == (Reseller.DISABLED, None) and not started
+              and "not disabled by an operator (paused by its owner)" in bsession.last_text(), bsession.last_text())
+        await bdp.feed_update(bbot, msg(op, f"/disable {r.id}"))
+        await bdp.feed_update(bbot, msg(op, f"/disable {r.id}"))
+        check("/disable, twice: disabled, and what the shop was before is kept",
+              await status() == (Reseller.SUSPENDED, Reseller.DISABLED) and "already disabled" in bsession.last_text())
+        await bdp.feed_update(bbot, msg(op, f"/enable {r.id}"))
+        check("/enable gives a shop back as it was: one its owner paused stays paused",
+              await status() == (Reseller.DISABLED, None) and "paused by its owner" in bsession.last_text(),
+              bsession.last_text())
+        await repo.update_reseller(r.id, status=Reseller.KEY_INVALID)
+        await bdp.feed_update(bbot, msg(op, f"/disable {r.id}"))
+        await bdp.feed_update(bbot, msg(op, f"/enable {r.id}"))
+        check("...and one waiting for a new API key still waits for it",
+              await status() == (Reseller.KEY_INVALID, None) and "waiting for a new API key" in bsession.last_text())
+        await repo.update_reseller(r.id, status=Reseller.ACTIVE)
+        await bdp.feed_update(bbot, msg(op, f"/disable {r.id}"))
+        await bdp.feed_update(bbot, msg(own, f"/enable {r.id}"))
+        check("a shop owner is no operator: their /enable changes nothing",
+              await status() == (Reseller.SUSPENDED, Reseller.ACTIVE))
+        await bdp.feed_update(bbot, msg(op, f"/enable {r.id}"))
+        check("a selling shop that was disabled sells again",
+              await status() == (Reseller.ACTIVE, None) and bsession.last_text().endswith("enabled.")
+              and started[-1:] == [r.id], bsession.last_text())
+    finally:
+        (settings.provision_secret, settings.admin_ids, runtime.swap_key, runtime.start, runtime.restart,
+         runtime.make_bot, builder.NumberHub) = keep
+        await repo.update_reseller(r.id, status=Reseller.ACTIVE, suspended_from=None)
+
+    # ── payment texts for every way a shop is paid and every product ──
+    four = ("err_no_credit_auto", "pay_not_yet", "pay_expired", "pay_too_many")
+    crypto = ("crypto", "cripto", "kripto", "крипт", "العملات الرقمية", "ক্রিপ্টো", "رمزارز", "क्रिप्टो", "کرپٹو",
+              "tiền mã hóa", "加密")
+    link = ("link", "enlace", "lien", "tautan", "ссылк", "bağlantı", "liên kết", "链接", "رابط", "লিংক", "لینک",
+            "लिंक", "لنک")
+    said = [(lang, k) for lang in LANGS for k in four if any(w in _table(lang)[k].lower() for w in crypto + link)]
+    check("no customer text says 'crypto' or 'payment link' for a shop that may be paid by QRIS, in 14 languages",
+          not said, str(said[:4]))
+    apart = [lang for lang in LANGS
+             if _table(lang)["err_no_credit"].split("\n\n")[0] != _table(lang)["err_no_credit_auto"].split("\n\n")[0]
+             or "pay_test" not in _table(lang) or (lang != "en" and _table(lang)["pay_test"] == _table("en")["pay_test"])]
+    check("both 'not enough balance' texts open with the same sentence, and the test-payment text exists, in 14 languages",
+          not apart and "this number" not in _table("en")["err_no_credit"]
+          and "this number" not in _table("en")["err_no_credit_auto"], str(apart))
+    gw = FakeGateways()
+    gw.next = 13000                   # payment ids of its own (7000, 9000 and 11000 are other tests')
+    payments.TRANSPORT = gw.transport()
+    fakefx = FakeFx()
+    fx.TRANSPORT, fx._rate = fakefx.transport(), None
+    await fx.refresh()
+    await payments.set_builtin(r.id, False)
+    await payments.connect(r.id, payments.KASERA, gw.ks_test_key)
+    await repo.update_reseller(r.id, kasera_auto=1)      # as the panel does on connecting: today's rupiah rate
+    qris_shop = await shop()
+    check("(the shop is paid by QRIS only)", payments.connected(qris_shop) == [payments.KASERA])
+    selling.forget_prices(r.id)
+    broke = 97003
+    await member(r, broke, "0")
+    await dp.feed_update(bot, tap(broke, Svc(code="wa", page=0).pack()))
+    await dp.feed_update(bot, tap(broke, Cty(code="wa", cc="187").pack()))
+    await dp.feed_update(bot, tap(broke, button(session, "Buy")))
+    text = session.last_text()
+    check("a shop paid by QRIS only, a number the balance does not cover: told to top up, with no word of crypto",
+          "Not enough balance: the price is" in text and "Add balance below to top up." in text
+          and "crypto" not in text.lower(), text[:200])
+    await dp.feed_update(bot, tap(broke, Es(a="buy", r="US", k="USA1G7", c=130).pack()))
+    text = session.last_text()
+    check("an eSIM the balance does not cover is not called a number",
+          "the price is <b>$1.30</b>" in text and "number" not in text, text[:200])
+    payer = 97002
+    pm = await member(r, payer, "0")
+    await repo.set_member_language(pm.id, "id")
+    p = await payments.open_link(qris_shop, pm.id, payments.KASERA, D("7"))
+    gw.ks[p.invoice_id]["status"] = "succeeded"
+    await dp.feed_update(bot, tap(payer, Pay(a="chk", id=p.id).pack(), lang="id"))
+    check("a test payment the customer checks: told it was a test, in their language (it said 'Not received yet')",
+          "mode uji" in session.alerts()[-1] and (await repo.get_member(pm.id)).balance == 0, session.alerts()[-1])
+    check("...and the notice the shop sends them is in their language too (it was English only)",
+          any("mode uji" in x for x in sent_to(payer)) and not any("Test payment received" in x for x in sent_to(payer)),
+          str(sent_to(payer))[:200])
+    check("...while the owner is told in the panel's language that the test worked",
+          any("Test payment worked" in x for x in sent_to(own)))
+    runtime._bots.pop(r.id, None)
+
+
 async def main():
     await init_db()
     test_prices()
@@ -4550,6 +4863,7 @@ async def main():
                test_races_and_limits, test_bot_flow, test_builder, test_provision, test_custom_prices, test_picker_pages, test_rank_order, test_dead_token, test_rejected_key, test_deposits, test_auto_payments, test_builtin_payments, test_owner_stats, test_kasera_qris, test_paid_left, test_email_codes, test_paused_shop, test_review_money,
                test_review_sync, test_review_bots, test_review_runtime, test_small_topups_and_rupiah,
                test_proxy_data, test_rentals, test_esim, test_review_2026_11_24, test_number_cycling,
+               test_review_defects_2026_11_25,
                test_back_to_the_purchase,
                test_cards_render):
         try:

@@ -153,12 +153,18 @@ MAX_FIXED = Decimal("1000")
 
 
 def rule_text(r) -> str:
-    where = esc(r.country_name or r.country) if r.country else "all countries"
+    where = esc((r.country_name or r.country)[:40]) if r.country else "all countries"
     what = f"{money(r.value)} fixed" if r.mode == "fixed" else f"{pct(r.value)}% commission"
-    return f"{esc(r.service_name or r.service)} · {where}: <b>{what}</b>"
+    return f"{esc((r.service_name or r.service)[:40])} · {where}: <b>{what}</b>"
 
 
-async def prices_screen(reseller: Reseller, note: str = ""):
+PRICE_PAGE = 20     # rules on one page of the price screen
+
+
+async def prices_screen(reseller: Reseller, note: str = "", page: int = 0):
+    """The shop's custom prices, PRICE_PAGE to a page. Until 2026-11-25 all of them
+    (up to MAX_RULES) were printed on one screen: past about 90 the text was longer
+    than Telegram takes, and the owner could neither see nor remove a rule."""
     rules = await repo.price_rules(reseller.id)
     cap = getattr(reseller, "max_profit", None)
     lines = ([note, ""] if note else []) + [
@@ -172,17 +178,32 @@ async def prices_screen(reseller: Reseller, note: str = ""):
         "",
     ]
     kb = InlineKeyboardBuilder()
+    pages = max(1, -(-len(rules) // PRICE_PAGE))
+    page = max(0, min(page, pages - 1))
+    chunk = rules[page * PRICE_PAGE:(page + 1) * PRICE_PAGE]
+    n = len(chunk)
     if rules:
-        for i, r in enumerate(rules, 1):
+        if pages > 1:
+            lines += [f"<b>{page * PRICE_PAGE + 1}–{page * PRICE_PAGE + n} of {len(rules)}</b>", ""]
+        for i, r in enumerate(chunk, page * PRICE_PAGE + 1):
             lines.append(f"{i}. {rule_text(r)}")
-            kb.button(text=f"🗑 {i}", callback_data=Adm(a="pr_del", arg=str(r.id)))
+            kb.button(text=f"🗑 {i}", callback_data=Adm(a="pr_del", arg=f"{r.id}|{page}"))
     else:
         lines.append("No custom prices yet.")
-    n = len(rules)
+    nav = 0
+    if pages > 1:
+        if page > 0:
+            kb.button(text="◀️", callback_data=Adm(a="prices", arg=str(page - 1)))
+            nav += 1
+        kb.button(text=f"{page + 1}/{pages}", callback_data=Adm(a="prices", arg=str(page)))
+        nav += 1
+        if page < pages - 1:
+            kb.button(text="▶️", callback_data=Adm(a="prices", arg=str(page + 1)))
+            nav += 1
     kb.button(text="➕ Add a custom price", callback_data=Adm(a="pr_add"))
     kb.button(text="💰 Profit cap", callback_data=Adm(a="cap"))
     kb.button(text="⬅️ Admin panel", callback_data=Adm(a="home"))
-    kb.adjust(*([5] * (n // 5) + ([n % 5] if n % 5 else [])), 1, 1, 1)
+    kb.adjust(*([5] * (n // 5) + ([n % 5] if n % 5 else [])), *([nav] if nav else []), 1, 1, 1)
     return "\n".join(lines), kb.as_markup()
 
 
@@ -752,11 +773,15 @@ def register(r: Router) -> None:
                           "which bank apps work.\n\nPlain text, up to 300 characters. Send <code>-</code> to "
                           f"remove it.\n\nNow: {now}", _cancel_kb())
         elif a == "prices":
-            await show(c, *await prices_screen(reseller))
+            await show(c, *await prices_screen(reseller, page=int(callback_data.arg) if callback_data.arg.isdigit() else 0))
         elif a == "pr_del":
-            ok = callback_data.arg.isdigit() and await repo.delete_price_rule(reseller.id, int(callback_data.arg))
+            # "rule id|the page it was on": the owner stays on that page (a button from
+            # before the pages carries the id alone).
+            rule, _, pg = callback_data.arg.partition("|")
+            ok = rule.isdigit() and await repo.delete_price_rule(reseller.id, int(rule))
             selling.forget_prices(reseller.id)
-            await show(c, *await prices_screen(reseller, "🗑 Custom price removed." if ok else ""))
+            await show(c, *await prices_screen(reseller, "🗑 Custom price removed." if ok else "",
+                                               page=int(pg) if pg.isdigit() else 0))
         elif a == "pr_add":
             if await repo.count_price_rules(reseller.id) >= MAX_RULES:
                 await c.answer(f"You have {MAX_RULES} custom prices, the most a bot can have. Remove one first.",

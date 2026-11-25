@@ -51,6 +51,7 @@ _ADDED_COLUMNS = (
     ("resellers", "proxy_on", "INTEGER"),
     ("resellers", "rent_on", "INTEGER"),
     ("resellers", "esim_on", "INTEGER"),
+    ("resellers", "suspended_from", "VARCHAR(16)"),
     ("orders", "rent_hours", "INTEGER"),
     ("orders", "messages", "TEXT"),
     ("orders", "refund_until", "DATETIME"),

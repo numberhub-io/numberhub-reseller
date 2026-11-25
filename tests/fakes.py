@@ -688,6 +688,8 @@ class FakeSession(BaseSession):
         self.msg_id = 100
         self.fail_get_me = 0          # next N getMe calls fail (a network blip at boot)
         self.fail_send = 0            # next N sendMessage calls hit a flood limit
+        self.late_answers = 0         # next N answers to a tap come too late for Telegram
+        self.bad_sends = 0            # next N sendMessage calls are refused outright
 
     async def close(self) -> None:
         pass
@@ -705,6 +707,15 @@ class FakeSession(BaseSession):
             self.fail_send -= 1
             from aiogram.exceptions import TelegramRetryAfter
             raise TelegramRetryAfter(method=method, message="flood", retry_after=3)
+        if isinstance(method, AnswerCallbackQuery) and self.late_answers > 0:
+            self.late_answers -= 1
+            from aiogram.exceptions import TelegramBadRequest
+            raise TelegramBadRequest(method=method, message="Bad Request: query is too old and response timeout "
+                                                            "expired or query ID is invalid")
+        if isinstance(method, SendMessage) and self.bad_sends > 0:
+            self.bad_sends -= 1
+            from aiogram.exceptions import TelegramBadRequest
+            raise TelegramBadRequest(method=method, message="Bad Request: chat not found")
         if isinstance(method, GetMe):
             return User(id=self.bot_id, is_bot=True, first_name="My Shop", username=self.username)
         if isinstance(method, (SendMessage, EditMessageText)):
