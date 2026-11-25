@@ -1163,18 +1163,36 @@ async def rent_countries(reseller: Reseller, h: int) -> list[dict]:
     return out
 
 
-async def rent_periods_open(reseller: Reseller) -> list[dict]:
-    """The periods that have a country to rent in right now. The list of periods is
-    fixed, and the longest often has no number anywhere: offered, it led to an empty
-    screen (the real lists on 2026-11-25: 1 month, no country). A period that cannot
-    be asked about just now stays listed."""
-    out = []
+async def rent_places(reseller: Reseller) -> list[dict]:
+    """Every country a number can be rented in now, each with the periods it can be
+    rented for: [{country, name, iso, emoji, hours}], the countries asked for most
+    first. A customer picks where the number is from before for how long (the
+    platform's owner, 2026-11-25: "country first, then time"): the period came first
+    and hid that the longest one often has no country at all."""
+    seen: dict[str, dict] = {}
     for p in await rent_periods(reseller):
         try:
-            if await rent_countries(reseller, p["h"]):
-                out.append(p)
+            rows = await rent_countries(reseller, p["h"])
         except SellError:
-            out.append(p)
+            continue                    # that period cannot be asked about now: the others still show
+        for r in rows:
+            seen.setdefault(r["country"], {**r, "hours": []})["hours"].append(p["h"])
+    out = list(seen.values())
+    out.sort(key=lambda r: RENT_FIRST.index(r["iso"]) if r["iso"] in RENT_FIRST else len(RENT_FIRST))
+    return out
+
+
+async def rent_from_prices(reseller: Reseller, place: dict) -> dict[int, Decimal]:
+    """The cheapest thing to rent in this country for each of its periods: {hours: the
+    shop's price}. A period that cannot be priced now is left out."""
+    out: dict[int, Decimal] = {}
+    for h in place["hours"]:
+        try:
+            rows = await rent_services(reseller, h, place["country"])
+        except SellError:
+            continue
+        if rows:
+            out[h] = min(r["member_price"] for r in rows)
     return out
 
 

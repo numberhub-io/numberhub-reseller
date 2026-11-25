@@ -955,36 +955,43 @@ def _page_nav(kb, page: int, pages: int, make) -> int:
     return n
 
 
-def rent_home_screen(lang: str, periods: list[dict]):
-    """For how long: the periods the shop's API rents numbers for."""
+def rent_home_screen(lang: str, places: list[dict], page: int = 0, note: str = ""):
+    """The first screen of a rental: which country the number should be from, the ones
+    asked for most first. The words are the two texts the old order used, put together:
+    what a rental is, then the question about the country."""
     kb = InlineKeyboardBuilder()
-    for p in periods:
-        kb.button(text=rent_period(lang, p["h"]), callback_data=Rn(a="cty", h=p["h"]))
-    kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
-    kb.adjust(*_pairs(len(periods)), 1)
-    return t(lang, "rent_pick_period" if periods else "rent_none"), kb.as_markup()
-
-
-def rent_countries_screen(lang: str, h: int, rows: list[dict], page: int = 0, note: str = ""):
-    kb = InlineKeyboardBuilder()
-    if not rows:
-        kb.button(text=t(lang, "btn_back"), callback_data=Rn(a="home"))
+    if not places:
         kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
-        kb.adjust(2)
         return t(lang, "rent_none"), kb.as_markup()
-    pages = max(1, (len(rows) + RENT_CTY_PAGE - 1) // RENT_CTY_PAGE)
+    pages = max(1, (len(places) + RENT_CTY_PAGE - 1) // RENT_CTY_PAGE)
     page = max(0, min(page, pages - 1))
-    chunk = rows[page * RENT_CTY_PAGE:(page + 1) * RENT_CTY_PAGE]
+    chunk = places[page * RENT_CTY_PAGE:(page + 1) * RENT_CTY_PAGE]
     if pages > 1:
-        kb.button(text=t(lang, "btn_search"), callback_data=Rn(a="find", h=h))
+        kb.button(text=t(lang, "btn_search"), callback_data=Rn(a="find"))
     for r in chunk:
-        kb.button(text=f"{r['emoji']} {r['name']}"[:32], callback_data=Rn(a="svc", h=h, cc=r["country"]))
+        kb.button(text=f"{r['emoji']} {r['name']}"[:32], callback_data=Rn(a="per", cc=r["country"]))
     sizes = ([1] if pages > 1 else []) + _pairs(len(chunk))
-    nav = _page_nav(kb, page, pages, lambda p: Rn(a="cty", h=h, p=p))
+    nav = _page_nav(kb, page, pages, lambda p: Rn(a="home", p=p))
+    kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
+    kb.adjust(*sizes, *([nav] if nav else []), 1)
+    intro = "\n\n".join(t(lang, "rent_pick_period").split("\n\n")[:-1])
+    question = t(lang, "rent_pick_country", period="").split("\n\n")[-1]
+    return (note + "\n\n" if note else "") + intro + "\n\n" + question, kb.as_markup()
+
+
+def rent_periods_screen(lang: str, place: dict, prices: dict | None = None):
+    """For how long: only the periods this country has numbers for, each with the
+    price of the cheapest thing to rent there ("1 day · $1.04+")."""
+    kb = InlineKeyboardBuilder()
+    for h in place["hours"]:
+        low = (prices or {}).get(h)
+        kb.button(text=rent_period(lang, h) + (f" · {money(low)}+" if low is not None else ""),
+                  callback_data=Rn(a="svc", h=h, cc=place["country"]))
     kb.button(text=t(lang, "btn_back"), callback_data=Rn(a="home"))
     kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
-    kb.adjust(*sizes, *([nav] if nav else []), 2)
-    return (note + "\n\n" if note else "") + t(lang, "rent_pick_country", period=rent_period(lang, h)), kb.as_markup()
+    kb.adjust(*([1] * len(place["hours"])), 2)
+    return (f"📅 <b>{place['emoji']} {esc(place['name'])}</b>\n\n" + t(lang, "rent_pick_period").split("\n\n")[-1],
+            kb.as_markup())
 
 
 def rent_services_screen(lang: str, h: int, place: dict, rows: list[dict], page: int = 0, note: str = ""):
@@ -992,7 +999,7 @@ def rent_services_screen(lang: str, h: int, place: dict, rows: list[dict], page:
     kb = InlineKeyboardBuilder()
     cc = place["country"]
     if not rows:
-        kb.button(text=t(lang, "btn_back"), callback_data=Rn(a="cty", h=h))
+        kb.button(text=t(lang, "btn_back"), callback_data=Rn(a="per", cc=cc))
         kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
         kb.adjust(2)
         return t(lang, "rent_none"), kb.as_markup()
@@ -1007,7 +1014,7 @@ def rent_services_screen(lang: str, h: int, place: dict, rows: list[dict], page:
     if pages > 1:
         kb.button(text=t(lang, "btn_search"), callback_data=Rn(a="find", h=h, cc=cc))
         find = 1
-    kb.button(text=t(lang, "btn_back"), callback_data=Rn(a="cty", h=h))
+    kb.button(text=t(lang, "btn_back"), callback_data=Rn(a="per", cc=cc))        # back to this country's periods
     kb.button(text=t(lang, "btn_menu"), callback_data=Nav(to="menu"))
     kb.adjust(*([1] * len(chunk)), *([nav] if nav else []), *([1] if find else []), 2)
     return ((note + "\n\n" if note else "")
@@ -1574,27 +1581,29 @@ def build_router(reseller_id: int) -> Router:
             # The Search button of a rental list: the list stays, the next text is searched in it.
             await state.set_state(RentForm.find)
             await state.update_data(rent_h=callback_data.h, rent_cc=callback_data.cc)
-            await c.answer(t(lang, "find_hint", example="WhatsApp" if callback_data.cc else "USA"), show_alert=True)
+            await c.answer(t(lang, "find_hint", example="WhatsApp" if callback_data.cc and callback_data.h else "USA"),
+                           show_alert=True)
             return
         await state.clear()             # a site or an amount being typed is over: no later text is read as one
-        periods = await selling.rent_periods(reseller) if selling.rent_on(reseller) else []
-        if not periods:
+        if not selling.rent_on(reseller) or not await selling.rent_periods(reseller):
             await c.answer(t(lang, "err_paused"), show_alert=True)
             return
+        # The country first, then for how long, then what the number is for.
+        places = await selling.rent_places(reseller)
         a, h, cc = callback_data.a, callback_data.h, callback_data.cc
-        if a == "home" or h not in {p["h"] for p in periods}:
-            await _show(c, *rent_home_screen(lang, await selling.rent_periods_open(reseller)))
+        place = next((x for x in places if x["country"] == cc), None)
+        if a in ("home", "cty") or place is None:       # "cty" = a period button from before the new order
+            if places:
+                await state.set_state(RentForm.find)         # a typed name finds a country
+                await state.update_data(rent_h=0, rent_cc="")
+            await _show(c, *rent_home_screen(lang, places, callback_data.p))
+            await c.answer()
+            return
+        if a == "per" or h not in place["hours"]:
+            await _show(c, *rent_periods_screen(lang, place, await selling.rent_from_prices(reseller, place)))
             await c.answer()
             return
         try:
-            places = await selling.rent_countries(reseller, h)
-            place = next((x for x in places if x["country"] == cc), None)
-            if a == "cty" or place is None:
-                await state.set_state(RentForm.find)         # a typed name finds a country
-                await state.update_data(rent_h=h, rent_cc="")
-                await _show(c, *rent_countries_screen(lang, h, places, callback_data.p))
-                await c.answer()
-                return
             rows = await selling.rent_services(reseller, h, cc)
         except SellError as exc:
             await c.answer(re.sub(r"<[^>]+>", "", error_text(exc, reseller, member, lang)), show_alert=True)
@@ -1671,11 +1680,11 @@ def build_router(reseller_id: int) -> Router:
         q = " ".join(m.text.split()).casefold()[:40]
         nothing = t(lang, "svc_none", q=esc(m.text.strip()[:40]))
         try:
-            places = await selling.rent_countries(reseller, h) if selling.rent_on(reseller) else []
-            place = next((x for x in places if x["country"] == cc), None)
+            places = await selling.rent_places(reseller) if selling.rent_on(reseller) else []
+            place = next((x for x in places if x["country"] == cc), None) if h else None
             if place is None:
                 found = [x for x in places if q and (q in x["name"].casefold() or q == (x["iso"] or "").casefold())]
-                await _show(m, *rent_countries_screen(lang, h, found or places, note="" if found else nothing))
+                await _show(m, *rent_home_screen(lang, found or places, note="" if found else nothing))
                 return
             rows = await selling.rent_services(reseller, h, cc)
             found = [x for x in rows if q and (q in rent_service_label(lang, x["code"], x["name"]).casefold()

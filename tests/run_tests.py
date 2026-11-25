@@ -3872,12 +3872,16 @@ async def test_rentals():
     await dp.feed_update(bot, msg(cust, "/start"))
     check("the menu has a Rent a number button", button(session, "Rent a number") == Rn(a="home").pack())
     await dp.feed_update(bot, tap(cust, button(session, "Rent a number")))
-    check("the periods the wallet offers, in the customer's words",
-          labels()[:4] == ["1 day", "3 days", "1 week", "1 month"] and "For how long?" in session.last_text(), str(labels()))
-    await dp.feed_update(bot, tap(cust, button(session, "1 day")))
-    check("then the countries of that period",
-          labels()[:2] == ["🇺🇸 USA", "🇬🇧 United Kingdom"] and "Rent for 1 day" in session.last_text(), str(labels()))
+    check("first the country (the platform's owner: country first, then time), the ones asked for most first",
+          labels()[:2] == ["🇺🇸 USA", "🇬🇧 United Kingdom"] and "Which country should the number be from?" in session.last_text()
+          and "every SMS sent to it arrives here" in session.last_text() and "For how long" not in session.last_text(),
+          f"{labels()} {session.last_text()[-60:]}")
     await dp.feed_update(bot, tap(cust, button(session, "USA")))
+    check("then for how long: the periods that country has numbers for, each with its lowest price",
+          labels()[:4] == ["1 day · $1.04+", "3 days · $1.04+", "1 week · $1.04+", "1 month · $1.04+"]
+          and "🇺🇸 USA" in session.last_text() and "For how long?" in session.last_text()
+          and button(session, "Back") == Rn(a="home").pack(), str(labels()))
+    await dp.feed_update(bot, tap(cust, button(session, "1 day")))
     check("then what the number is for, at the shop's price: every SMS first, any other, the popular app, the rest; "
           "what is sold out is not listed",
           labels()[:4] == ["📨 Any service (all SMS) · $2.60", "❓ Any other app · $1.30", "WhatsApp · $1.95", "Zeta · $1.04"]
@@ -4050,8 +4054,8 @@ async def test_rentals():
           "can't be rented right now" in session.alerts()[-1] and len(api.rent_bodies) == n
           and "What is the number for?" in session.last_text())
     await dp.feed_update(bot, rent("full", 260, h=48))
-    check("a period the wallet does not offer shows the periods", "For how long?" in session.last_text()
-          and len(api.rent_bodies) == n)
+    check("a period the wallet does not offer shows that country's periods", "For how long?" in session.last_text()
+          and "🇺🇸 USA" in session.last_text() and len(api.rent_bodies) == n)
     api.fail_next_buy = "price_exceeded"
     await dp.feed_update(bot, rent("full", 260))
     check("the wallet says the price is higher: nothing held, and the price it named is the one to confirm",
@@ -4193,12 +4197,13 @@ async def test_rentals():
     check("switched on again: the button is back", button(session, "Rent a number") is not None)
     api.rent_empty_periods = {720}
     selling._rent_countries.clear()
-    await dp.feed_update(bot, tap(cust, Rn(a="home").pack()))
-    check("a period with no country to rent in right now is not offered",
-          labels()[:3] == ["1 day", "3 days", "1 week"] and "1 month" not in labels(), str(labels()))
+    await dp.feed_update(bot, tap(cust, Rn(a="per", cc="187").pack()))
+    check("a period with no number in that country right now is not offered for it",
+          [x.split(" · ")[0] for x in labels()[:3]] == ["1 day", "3 days", "1 week"] and not any("1 month" in x for x in labels()),
+          str(labels()))
     await dp.feed_update(bot, tap(cust, Rn(a="cty", h=720).pack()))
-    check("...and its old button says there is nothing to rent, with a way back",
-          "Nothing to rent here" in session.last_text() and button(session, "Back") == Rn(a="home").pack())
+    check("...and a period button from before the new order opens the countries",
+          "Which country should the number be from?" in session.last_text() and labels()[0] == "🇺🇸 USA")
     api.rent_empty_periods = {24, 72, 168, 720}
     selling._rent_countries.clear()
     await dp.feed_update(bot, tap(cust, Rn(a="home").pack()))
@@ -5421,12 +5426,13 @@ async def test_ux_review_batch():
     check("...and with enough balance it is Buy", rows_()[0] == ["✅ Buy · $0.64"])
 
     # ── rentals ──
-    await dp.feed_update(bot, tap(new, Rn(a="cty", h=24).pack()))
+    await dp.feed_update(bot, tap(new, Rn(a="home").pack()))
     check("rental countries: the ones asked for most come first (USA was after United Kingdom, in ABC order)",
           labels()[:2] == ["🇺🇸 USA", "🇬🇧 United Kingdom"], str(labels()))
     await dp.feed_update(bot, msg(new, "king"))
     check("a name typed on the rental countries finds a country (it was searched among apps for one-time numbers)",
-          labels()[0] == "🇬🇧 United Kingdom" and not any("USA" in x for x in labels()) and "Rent for 1 day" in session.last_text(),
+          labels()[0] == "🇬🇧 United Kingdom" and not any("USA" in x for x in labels())
+          and "Which country should the number be from?" in session.last_text(),
           str(labels()))
     await dp.feed_update(bot, msg(new, "zzzz"))
     check("a name that matches nothing says so and shows every country again",

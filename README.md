@@ -188,7 +188,7 @@ Every shop also sells **proxy data**: residential IPs worldwide, bought in GB an
 
 ### Rented numbers
 
-Every shop also **rents numbers**: a number that is the customer's for 1 day, 3 days, 1 week or 1 month, with every SMS sent to it delivered in the chat, whoever sends it and whether it carries a code or not. A customer taps 📅 Rent a number, picks the period, the country and what the number is for ("Any service" receives every SMS), confirms the price and gets a card with the number, until when it is theirs, and its newest SMS.
+Every shop also **rents numbers**: a number that is the customer's for 1 day, 3 days, 1 week or 1 month, with every SMS sent to it delivered in the chat, whoever sends it and whether it carries a code or not. A customer taps 📅 Rent a number, picks the country (the ones asked for most first), then for how long (only the periods that country has numbers for, each with its lowest price), then what the number is for ("Any service" receives every SMS), confirms the price and gets a card with the number, until when it is theirs, and its newest SMS.
 
 - **Your NumberHub wallet pays when the number is rented.** The customer's price is held on their balance at that moment and charged as soon as the number can no longer be given back: at its first SMS, or when NumberHub's refund time is over.
 - **A refund in the first minutes.** While no SMS has arrived, the customer can give the number back between the 2nd and the 20th minute. NumberHub refunds your wallet and the customer's hold is released, so they get back exactly what they paid. NumberHub decides: the bot releases the hold only on NumberHub's own answer to the cancel. After that time, or once an SMS has arrived, the rental runs to its end.
