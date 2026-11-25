@@ -483,7 +483,7 @@ async def test_bot_flow():
     check("can't remove more than they have", "available" in session.last_text())
     await dp.feed_update(bot, msg(OWNER, f"{bob.telegram_id} 0.004"))
     check("an amount that rounds to $0.00 is refused", "positive number" in session.last_text())
-    await dp.feed_update(bot, tap(OWNER, Adm(a="markup").pack()))
+    await dp.feed_update(bot, tap(OWNER, Adm(a="markup", arg="sms").pack()))
     await dp.feed_update(bot, msg(OWNER, "50"))
     rr = await repo.get_reseller(r.id)
     check("markup change applies to prices at once", rr.markup_pct == D("50"))
@@ -2867,8 +2867,9 @@ async def test_review_bots():
     sent_to_customer = [x for x in session.requests if type(x).__name__ == "SendMessage" and x.chat_id == ALICE + 601]
     check("an open broadcast prompt ends when the owner does something else (no accidental broadcast)",
           not sent_to_customer and "Results for" in session.last_text())
-    await dp.feed_update(bot, tap(OWNER, Adm(a="markup").pack()))
-    check("commission prompt shows plain numbers (no '3E+1')", "E+" not in session.last_text())
+    await dp.feed_update(bot, tap(OWNER, Adm(a="markup", arg="sms").pack()))
+    check("commission prompt shows plain numbers (no '3E+1')", "E+" not in session.last_text()
+          and "Now: <b>" in session.last_text())
     runtime._bots.pop(r.id, None)
 
     # Builder: reconnect the same bot with a new token, ration bad keys, check scopes.
@@ -4653,7 +4654,7 @@ async def test_review_defects_2026_11_25():
     await dp.feed_update(bot, msg(own, "whatsapp"))
     check("...typed once more it is a search", "Results for “whatsapp”" in session.last_text())
     before = (await shop()).markup_pct
-    await dp.feed_update(bot, tap(own, Adm(a="markup").pack()))
+    await dp.feed_update(bot, tap(own, Adm(a="markup", arg="sms").pack()))
     await hour_ago()
     await dp.feed_update(bot, msg(own, "15"))
     check("a number typed into an old commission prompt does not change the commission",
@@ -4855,6 +4856,161 @@ async def test_review_defects_2026_11_25():
     runtime._bots.pop(r.id, None)
 
 
+async def test_commission_per_product():
+    """The platform's owner, 2026-11-25: "commission must be per product". A shop had one
+    commission for everything it sells; live shops ran from 0% to 300%."""
+    print("a commission for each product")
+    from app.bots.callbacks import Adm, Cty, Es, Rn
+    from app.bots.reseller import build_router
+    from app.models import PriceRule
+    own = 5181
+    api = FakeNumberHub()
+    r = await make_reseller(api, owner=own, bot_id=88831)                # 30%
+    other = await make_reseller(api, owner=own + 1, bot_id=88832)
+    session = FakeSession(bot_id=88831)
+    bot = fake_bot(session)
+    runtime._bots[r.id] = bot
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(build_router(r.id))
+    cust = 98001
+    m = await member(r, cust, "20.00")
+    labels = lambda: [b.text for row in (session.last_markup().inline_keyboard if session.last_markup() else [])  # noqa: E731
+                      for b in row]
+    shop = lambda: repo.get_reseller(r.id)     # noqa: E731
+
+    async def prices(row=None):
+        """What this shop asks for one item of each product now."""
+        row = row or await shop()
+        return {
+            "sms": next(x for x in await selling.countries(row, "wa") if str(x["country"]) == "187")["member_price"],
+            "email": (await selling.email_domains(row, "openai.com"))[0]["member_price"],
+            "proxy": next(x for x in await selling.proxy_packages(row) if x["gb"] == 10)["member_price"],
+            "rent": next(x for x in await selling.rent_services(row, 24, "187") if x["code"] == "full")["member_price"],
+            "esim": next(x for x in await selling.esim_plans(row, "US") if x["code"] == "USA1G7")["member_price"],
+        }
+
+    async def set_to(kind, text):
+        await dp.feed_update(bot, tap(own, Adm(a="markup", arg=kind).pack()))
+        await dp.feed_update(bot, msg(own, text))
+
+    # NumberHub's prices in this test: a number $0.30, a mailbox $0.03, 10 GB $4.90, a day's rental $2.00, an eSIM $1.00.
+    start = await prices()
+    check("one commission (30%) prices every product, as before",
+          start == {"sms": D("0.39"), "email": D("0.04"), "proxy": D("6.37"), "rent": D("2.60"), "esim": D("1.30")},
+          str(start))
+
+    # ── the owner's screen ──
+    await dp.feed_update(bot, msg(own, "/admin"))
+    await dp.feed_update(bot, tap(own, button(session, "Commission")))
+    text = session.last_text()
+    check("💲 Commission lists the five products with what each is now",
+          "📱 Numbers: <b>30%</b>" in text and "🌍 eSIM: <b>30%</b> <i>(same as numbers)</i>" in text
+          and text.count("(same as numbers)") == 4
+          and labels() == ["📱 Numbers · 30%", "📧 Email codes · 30%", "🌐 Proxy data · 30%", "📅 Rented numbers · 30%",
+                           "🌍 eSIM · 30%", "⬅️ Admin panel"], str(labels()))
+    await dp.feed_update(bot, msg(own, "40"))
+    check("the list itself takes no text: a number typed there changes nothing",
+          (await shop()).markup_pct == D("30") and await prices() == start)
+    await dp.feed_update(bot, tap(own, Adm(a="markup", arg="esim").pack()))
+    check("a product's button asks for its percent, and says how to go back to the numbers' commission",
+          "Commission for 🌍 eSIM" in session.last_text() and "Now: <b>30%</b> (same as numbers)" in session.last_text()
+          and "Send <code>-</code>" in session.last_text())
+
+    # ── each product by itself ──
+    await dp.feed_update(bot, msg(own, "10"))
+    now = await prices()
+    check("eSIM at 10%: its price follows at once, every other product keeps its price",
+          now == dict(start, esim=D("1.10")) and (await shop()).markup_esim == D("10")
+          and "Commission for 🌍 eSIM set to <b>10%</b>" in session.last_text()
+          and "🌍 eSIM: <b>10%</b>" in session.last_text() and session.last_text().count("(same as numbers)") == 3,
+          f"{now} {session.last_text()[:90]}")
+    await set_to("rent", "5")
+    await set_to("proxy", "0")
+    await set_to("email", "100%")
+    now = await prices()
+    check("rented numbers 5%, proxy data 0% (at NumberHub's price), email codes 100%: each priced by its own",
+          now == {"sms": D("0.39"), "email": D("0.06"), "proxy": D("4.90"), "rent": D("2.10"), "esim": D("1.10")},
+          str(now))
+    check("...and an email price shown before the change is not kept (it stayed until its list ran out)",
+          now["email"] != start["email"])
+    check("another shop is not touched", await prices(await repo.get_reseller(other.id)) == start)
+
+    # ── what the customer pays and what the order records ──
+    await dp.feed_update(bot, tap(cust, Es(a="ok", r="US", k="USA1G7").pack()))
+    check("the customer's confirm screen shows the eSIM at the eSIM commission", "Price: <b>$1.10</b>" in session.last_text())
+    await dp.feed_update(bot, tap(cust, Es(a="buy", r="US", k="USA1G7", c=110).pack()))
+    o = (await repo.member_orders(m.id, 1))[0]
+    check("an eSIM bought: the customer pays $1.10, NumberHub is paid $1.00, the order records 10%",
+          o.kind == "esim" and o.member_price == D("1.10") and o.nh_price == D("1.00") and o.markup_pct_at_buy == D("10")
+          and api.esim_bodies[-1]["max_price"] == "1.00" and (await repo.get_member(m.id)).balance == D("18.90"),
+          f"{o.member_price} {o.markup_pct_at_buy} {(await repo.get_member(m.id)).balance}")
+    await dp.feed_update(bot, tap(cust, Rn(a="buy", h=24, cc="187", s="full", c=210).pack()))
+    o = (await repo.member_orders(m.id, 1))[0]
+    check("a number rented: $2.10 held, the order records 5%",
+          o.kind == "rent" and o.member_price == D("2.10") and o.markup_pct_at_buy == D("5")
+          and (await repo.get_member(m.id)).held == D("2.10"), f"{o.kind} {o.member_price} {o.markup_pct_at_buy}")
+    await dp.feed_update(bot, tap(cust, Rn(a="buy", h=24, cc="187", s="full", c=1).pack()))
+    check("a button made by hand with a lower price still buys nothing",
+          "price just changed to <b>$2.10</b>" in session.last_text() and len(api.rent_bodies) == 1)
+    await dp.feed_update(bot, tap(cust, Cty(code="wa", cc="187").pack()))
+    await dp.feed_update(bot, tap(cust, button(session, "Buy")))
+    o = (await repo.member_orders(m.id, 1))[0]
+    check("a number is sold at the numbers' commission, as before",
+          o.kind == "sms" and o.member_price == D("0.39") and o.markup_pct_at_buy == D("30"))
+
+    # ── the numbers' commission, and going back to it ──
+    await set_to("sms", "50")
+    now = await prices()
+    check("the numbers' commission changes numbers only: every product with its own keeps it",
+          now == {"sms": D("0.45"), "email": D("0.06"), "proxy": D("4.90"), "rent": D("2.10"), "esim": D("1.10")}
+          and "Commission set to <b>50%</b>" in session.last_text(), str(now))
+    await set_to("esim", "-")
+    now = await prices()
+    check("'-' puts a product back on the numbers' commission, and it follows it from then on",
+          now["esim"] == D("1.50") and (await shop()).markup_esim is None
+          and "uses the commission for numbers again (<b>50%</b>)" in session.last_text()
+          and "🌍 eSIM: <b>50%</b> <i>(same as numbers)</i>" in session.last_text(), f"{now} {session.last_text()[:90]}")
+    await set_to("sms", "-")
+    check("numbers have nothing to go back to: '-' is refused and nothing changes",
+          "Send a number from 0 to" in session.last_text() and (await shop()).markup_pct == D("50"))
+    for bad in ("abc", "-5", "99999", "1e3"):
+        await set_to("proxy", bad)
+    check("what is no percent is refused for a product too, and its commission stays",
+          "Send a number from 0 to" in session.last_text() and "Or <code>-</code>" in session.last_text()
+          and (await shop()).markup_proxy == D("0"), session.last_text()[:90])
+    await dp.feed_update(bot, tap(cust, Adm(a="markup", arg="esim").pack()))
+    await dp.feed_update(bot, msg(cust, "1"))
+    check("a customer cannot set a commission", (await shop()).markup_esim is None and (await shop()).markup_pct == D("50"))
+
+    # ── the profit cap ──
+    await repo.update_reseller(r.id, max_profit=D("0.10"), markup_rent=D("20"))
+    selling.forget_prices(r.id)
+    now = await prices()
+    check("a profit cap of $0.10 holds numbers and a product that follows them; a product with its own commission is not held",
+          now["sms"] == D("0.40") and now["esim"] == D("1.10") and now["rent"] == D("2.40") and now["proxy"] == D("4.90"),
+          str(now))
+    await dp.feed_update(bot, tap(own, Adm(a="markup").pack()))
+    check("the commission screen says what the cap holds",
+          "Your profit cap (<b>$0.10</b>) holds numbers and every product that uses the commission for numbers"
+          in session.last_text())
+    await dp.feed_update(bot, msg(own, "/admin"))
+    check("the panel names the products that have their own commission",
+          "Own commission: 📧 Email codes <b>100%</b> · 🌐 Proxy data <b>0%</b> · 📅 Rented numbers <b>20%</b>"
+          in session.last_text() and "Your commission: <b>50%</b>" in session.last_text(), session.last_text()[:400])
+    odp = Dispatcher(storage=MemoryStorage())
+    odp.include_router(build_router(other.id))
+    osession = FakeSession(bot_id=88832)
+    await odp.feed_update(fake_bot(osession), msg(own + 1, "/admin"))
+    check("a shop with one commission for everything shows no such line", "Own commission" not in osession.last_text()
+          and "Your commission: <b>30%</b>" in osession.last_text())
+    for i in range(21):
+        await repo.set_price_rule(r.id, "wa", str(3000 + i), PriceRule.FIXED, D("0.50"), "WhatsApp", f"Country {i:02d}")
+    await dp.feed_update(bot, tap(own, Adm(a="prices", arg="1").pack()))
+    check("a price page with one price is headed '21 of 21' (it read '21–21 of 21')",
+          "<b>21 of 21</b>" in session.last_text() and "21–21" not in session.last_text(), session.last_text()[-200:])
+    runtime._bots.pop(r.id, None)
+
+
 async def main():
     await init_db()
     test_prices()
@@ -4863,7 +5019,7 @@ async def main():
                test_races_and_limits, test_bot_flow, test_builder, test_provision, test_custom_prices, test_picker_pages, test_rank_order, test_dead_token, test_rejected_key, test_deposits, test_auto_payments, test_builtin_payments, test_owner_stats, test_kasera_qris, test_paid_left, test_email_codes, test_paused_shop, test_review_money,
                test_review_sync, test_review_bots, test_review_runtime, test_small_topups_and_rupiah,
                test_proxy_data, test_rentals, test_esim, test_review_2026_11_24, test_number_cycling,
-               test_review_defects_2026_11_25,
+               test_review_defects_2026_11_25, test_commission_per_product,
                test_back_to_the_purchase,
                test_cards_render):
         try:

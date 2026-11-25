@@ -107,7 +107,7 @@ Open your own shop bot and send `/admin`, or tap ⚙️ Admin panel in the menu 
 | ➖ Remove balance | The same format. Money reserved by an open order cannot be removed |
 | 👥 Customers | The latest 25 customers with their IDs and balances |
 | 📣 Broadcast | Sends your message to every customer of this bot. You see the message and how many customers get it first, and nothing goes out until you tap ✅ Send |
-| 💲 Commission | Changes your commission. It applies to new purchases only |
+| 💲 Commission | Your commission, and a commission of its own for email codes, proxy data, rented numbers and eSIM. It applies to new purchases only |
 | 💳 Payments | Built-in USDT payments (one switch, nothing to set up), automatic crypto top-ups with your own OxaPay or @CryptoBot, and manual deposits customers ask for in the bot (all below). Also a minimum, the recent payments, and the deposits that wait for you |
 | 🏷 Custom prices | Your own price for one app, or for one app in one country: a fixed price (`0.35`) or its own commission (`10%`). Also a profit cap: the most you earn on one number |
 | 📝 Welcome text | Replaces the greeting on the menu |
@@ -119,6 +119,19 @@ A prompt (welcome text, commission, a gateway key and so on) takes your next mes
 ### How the commission works
 
 Your commission is a percentage added on top of NumberHub's price for each country. With a 30% commission, a number NumberHub prices at $0.25 costs your customer $0.33 (rounded up to the cent) and you keep $0.08. The bot uses NumberHub's highest price for that route (`price_max`) as the base, so NumberHub can never charge you more for a sale than the customer paid.
+
+### A commission for each product
+
+A commission that suits numbers costing a few cents is often too much for a rental or an eSIM that costs dollars. ⚙️ Admin panel → 💲 Commission lists what your shop sells, each with its own button:
+
+| Product | Its commission |
+|---|---|
+| 📱 Numbers | The commission you chose when you made the bot |
+| 📧 Email codes, 🌐 Proxy data, 📅 Rented numbers, 🌍 eSIM | Its own percent, from 0 up. Until you set one, it uses the commission for numbers |
+
+- Send a percent to set it, or `-` to put a product back on the commission for numbers.
+- A change applies to new purchases at once; an order keeps the commission it was bought at.
+- The profit cap (the most you earn on one number) holds numbers and every product that uses the commission for numbers. A product with its own commission is priced by that commission alone, so a cap chosen for numbers does not cut what you earn on a 50 GB package.
 
 ### Back to the purchase after a top-up
 

@@ -47,6 +47,13 @@ class Reseller(Base):
     # Most the shop earns on one number, in dollars (None = no cap): with a percent
     # commission an expensive number would otherwise cost the member a lot more.
     max_profit: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    # The shop's own commission for one product, in percent (selling.commission).
+    # NULL = that product follows markup_pct, the commission for numbers, and its
+    # profit cap, as everything did before these existed.
+    markup_email: Mapped[Decimal | None] = mapped_column(Numeric(6, 2), nullable=True)
+    markup_proxy: Mapped[Decimal | None] = mapped_column(Numeric(6, 2), nullable=True)
+    markup_rent: Mapped[Decimal | None] = mapped_column(Numeric(6, 2), nullable=True)
+    markup_esim: Mapped[Decimal | None] = mapped_column(Numeric(6, 2), nullable=True)
     # Deposits: what customers see when they add balance (how to pay the owner).
     # None = deposits off (customers send their ID to the support contact instead).
     deposit_info: Mapped[str | None] = mapped_column(Text, nullable=True)

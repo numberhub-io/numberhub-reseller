@@ -84,21 +84,51 @@ async def price_rules(reseller_id: int) -> dict[tuple[str, str], PriceRule]:
     return {(r.service, r.country): r for r in await repo.price_rules(reseller_id)}
 
 
-def shop_price(reseller: Reseller, rules: dict, service: str, country: str, ceiling) -> Decimal:
-    """What a member pays for one number of this app in this country.
+# What a shop sells, and where each product's own commission is kept (numbers use
+# the shop's commission itself, markup_pct).
+PRODUCTS = {"sms": None, "email": "markup_email", "proxy": "markup_proxy", "rent": "markup_rent",
+            "esim": "markup_esim"}
+
+
+def own_commission(reseller: Reseller, kind: str) -> Decimal | None:
+    """The commission the owner set for this product alone, or None when it has none."""
+    field = PRODUCTS.get(kind)
+    value = getattr(reseller, field, None) if field else None
+    return Decimal(value) if value is not None else None
+
+
+def commission(reseller: Reseller, kind: str = "sms") -> Decimal:
+    """The percent this shop adds to NumberHub's price of one product: the product's
+    own, or the commission for numbers while its owner has set none for it.
+
+    Until 2026-11-25 a shop had one commission for everything. It is chosen for
+    numbers that cost a few cents: live shops ran up to 300%, which sold a $9.00
+    rental for $36.00."""
+    own = own_commission(reseller, kind)
+    return own if own is not None else Decimal(reseller.markup_pct)
+
+
+def shop_price(reseller: Reseller, rules: dict, service: str, country: str, ceiling, kind: str = "sms") -> Decimal:
+    """What a member pays for one number of this app in this country, or for one
+    item of another product (`kind`: an email code, a data package, a rental, an eSIM).
 
     The owner's most specific rule wins (this app in this country, then this app
-    everywhere), else the shop's commission; a percent price is then held to the
-    profit cap. A fixed price never goes below NumberHub's price for the number:
-    when NumberHub's price rises above it the number sells at NumberHub's price,
-    so the owner earns nothing on it but never pays for a customer's number."""
+    everywhere), else the commission; a percent price is then held to the profit
+    cap. A fixed price never goes below NumberHub's price for the number: when
+    NumberHub's price rises above it the number sells at NumberHub's price, so the
+    owner earns nothing on it but never pays for a customer's number.
+
+    A product with its own commission is priced by that commission alone. The cap
+    is "the most you earn on one number": it keeps holding numbers, and a product
+    that follows the numbers' commission, exactly as before."""
     ceiling = Decimal(ceiling)
     rule = rules.get((service, str(country))) or rules.get((service, ""))
     if rule is not None and rule.mode == PriceRule.FIXED:
         return max(Decimal(rule.value), ceiling).quantize(CENT, rounding=ROUND_CEILING)
-    price = member_price(ceiling, Decimal(rule.value) if rule is not None else reseller.markup_pct)
+    own = own_commission(reseller, kind)
+    price = member_price(ceiling, Decimal(rule.value) if rule is not None else commission(reseller, kind))
     cap = getattr(reseller, "max_profit", None)
-    if cap is not None:
+    if cap is not None and own is None:
         price = min(price, (ceiling + Decimal(cap)).quantize(CENT, rounding=ROUND_CEILING))
     return price
 
@@ -246,6 +276,10 @@ def forget_prices(reseller_id: int) -> None:
     """The commission changed: no screen may show a price from the old one."""
     invalidate_prices(reseller_id)
     _proxy_pkgs.pop(reseller_id, None)
+    # Email prices were left out until 2026-11-25: they stayed at the old commission
+    # until their list ran out by itself.
+    for k in [k for k in _email_domains if k[0] == reseller_id]:
+        _email_domains.pop(k, None)
     for k in [k for k in _rent_services if k[0] == reseller_id]:
         _rent_services.pop(k, None)
     for k in [k for k in _esim_plans if k[0] == reseller_id]:
@@ -652,7 +686,7 @@ async def email_domains(reseller: Reseller, site: str, fresh: bool = False) -> l
         if price <= 0 or not r.get("in_stock"):
             continue
         out.append({"domain": str(r["domain"])[:120], "nh_price": price,
-                    "member_price": shop_price(reseller, {}, site, str(r["domain"]), price),
+                    "member_price": shop_price(reseller, {}, site, str(r["domain"]), price, "email"),
                     "delivery": r.get("delivery") if r.get("delivery") in ("high", "low") else None})
     _email_domains[key] = (time.monotonic(), out)
     if len(_email_domains) > 2000:
@@ -700,11 +734,11 @@ async def _buy_email(reseller: Reseller, member: Member, site: str, site_name_: 
         raise SellError("price_changed", price)
     values = dict(reseller_id=reseller.id, member_id=member.id, kind="email", service=site,
                   service_name=(site_name_ or site)[:128], country=domain, country_name=domain, country_iso=None,
-                  member_price=price, markup_pct_at_buy=reseller.markup_pct, ceiling_at_buy=row["nh_price"])
+                  member_price=price, markup_pct_at_buy=commission(reseller, "email"), ceiling_at_buy=row["nh_price"])
 
     async def repriced(exc: NumberHubError) -> Decimal:
         _email_domains.pop((reseller.id, site), None)
-        return shop_price(reseller, {}, site, domain, dec(exc.data.get("price")))
+        return shop_price(reseller, {}, site, domain, dec(exc.data.get("price")), "email")
 
     order = await _backed_place(reseller, member, cli, values,
                                 lambda o: cli.buy_email(site, domain, row["nh_price"], idempotency_key(o)), repriced)
@@ -757,7 +791,7 @@ async def proxy_packages(reseller: Reseller, fresh: bool = False) -> list[dict]:
         nh_price = dec(p.get("price"))
         if gb <= 0 or nh_price <= 0:
             continue
-        price = shop_price(reseller, {}, "proxy", str(gb), nh_price)
+        price = shop_price(reseller, {}, "proxy", str(gb), nh_price, "proxy")
         rows.append({"gb": gb, "nh_price": nh_price, "member_price": price, "days": days,
                      "per_gb": (price / gb).quantize(CENT, rounding=ROUND_CEILING), "popular": bool(p.get("popular"))})
     rows.sort(key=lambda r: r["gb"])
@@ -793,11 +827,11 @@ async def _buy_proxy(reseller: Reseller, member: Member, gb: int, shown_price: D
         raise SellError("price_changed", price)
     values = dict(reseller_id=reseller.id, member_id=member.id, kind="proxy", service="proxy",
                   service_name=f"{gb} GB", country=str(gb), country_name=f"{gb} GB", country_iso=None,
-                  member_price=price, markup_pct_at_buy=reseller.markup_pct, ceiling_at_buy=row["nh_price"])
+                  member_price=price, markup_pct_at_buy=commission(reseller, "proxy"), ceiling_at_buy=row["nh_price"])
 
     async def repriced(exc: NumberHubError) -> Decimal:
         _proxy_pkgs.pop(reseller.id, None)
-        return shop_price(reseller, {}, "proxy", str(gb), dec(exc.data.get("price")))
+        return shop_price(reseller, {}, "proxy", str(gb), dec(exc.data.get("price")), "proxy")
 
     order = await _backed_place(reseller, member, cli, values,
                                 lambda o: cli.buy_proxy(gb, row["nh_price"], idempotency_key(o)), repriced)
@@ -922,7 +956,7 @@ async def esim_plans(reseller: Reseller, region: str, fresh: bool = False) -> li
         except (TypeError, ValueError):
             countries = 1
         out.append({"code": code, "name": str(p.get("name") or code)[:80], "data": str(p.get("gb") or "")[:16],
-                    "days": days, "nh_price": price, "member_price": shop_price(reseller, {}, "esim", code, price),
+                    "days": days, "nh_price": price, "member_price": shop_price(reseller, {}, "esim", code, price, "esim"),
                     "countries": countries, "country_names": [str(x)[:40] for x in names[:80] if x],
                     "active_type": p.get("active_type") if p.get("active_type") in (1, 2, 3) else None,
                     "region_name": str(data.get("region_name") or "")[:80]})
@@ -967,8 +1001,8 @@ async def _buy_esim(reseller: Reseller, member: Member, region: str, code: str,
     values = dict(reseller_id=reseller.id, member_id=member.id, kind="esim", service=code,
                   service_name=row["name"][:128], country=region,
                   country_name=(row["region_name"] or (place or {}).get("name") or region)[:128],
-                  country_iso=(place or {}).get("iso"), member_price=price, markup_pct_at_buy=reseller.markup_pct,
-                  ceiling_at_buy=row["nh_price"])
+                  country_iso=(place or {}).get("iso"), member_price=price,
+                  markup_pct_at_buy=commission(reseller, "esim"), ceiling_at_buy=row["nh_price"])
 
     async def repriced(exc: NumberHubError) -> Decimal:
         # The plan's price is read again when it is ordered and can differ from the
@@ -978,7 +1012,7 @@ async def _buy_esim(reseller: Reseller, member: Member, region: str, code: str,
         if real > 0:
             _esim_learned[(reseller.id, region, code)] = (time.monotonic(), real)
         _esim_plans.pop((reseller.id, region), None)
-        return shop_price(reseller, {}, "esim", code, real)
+        return shop_price(reseller, {}, "esim", code, real, "esim")
 
     order = await _backed_place(reseller, member, cli, values,
                                 lambda o: cli.buy_esim(region, code, row["nh_price"], idempotency_key(o)), repriced)
@@ -1167,7 +1201,8 @@ async def rent_services(reseller: Reseller, h: int, country: str, fresh: bool = 
         if learned and time.monotonic() - learned[0] < LEARNED_TTL:
             price = max(price, learned[1])
         out.append({"code": code, "name": nice_name(code, r.get("name"))[:60], "nh_price": price,
-                    "member_price": shop_price(reseller, {}, "rent", code, price), "popular": bool(r.get("popular"))})
+                    "member_price": shop_price(reseller, {}, "rent", code, price, "rent"),
+                    "popular": bool(r.get("popular"))})
     out.sort(key=lambda r: 0 if r["code"] == "full" else 1 if r["code"] == "ot" else 2 if r["popular"] else 3)
     out = out[:RENT_SERVICES_MAX]
     if len(_rent_services) > 3000:
@@ -1213,8 +1248,8 @@ async def _buy_rental(reseller: Reseller, member: Member, h: int, country: str, 
         place = None                    # only its name and flag: the purchase does not need them
     values = dict(reseller_id=reseller.id, member_id=member.id, kind="rent", service=code,
                   service_name=row["name"][:128], country=country, country_name=(place or {}).get("name") or country,
-                  country_iso=(place or {}).get("iso"), member_price=price, markup_pct_at_buy=reseller.markup_pct,
-                  ceiling_at_buy=row["nh_price"], rent_hours=h)
+                  country_iso=(place or {}).get("iso"), member_price=price,
+                  markup_pct_at_buy=commission(reseller, "rent"), ceiling_at_buy=row["nh_price"], rent_hours=h)
 
     async def repriced(exc: NumberHubError) -> Decimal:
         # The list can lag behind what a purchase really costs. The refusal's own price
@@ -1223,7 +1258,7 @@ async def _buy_rental(reseller: Reseller, member: Member, h: int, country: str, 
         if real > 0:
             _rent_learned[(reseller.id, h, country, code)] = (time.monotonic(), real)
         _rent_services.pop((reseller.id, h, country), None)
-        return shop_price(reseller, {}, "rent", code, real)
+        return shop_price(reseller, {}, "rent", code, real, "rent")
 
     order = await _backed_place(reseller, member, cli, values,
                                 lambda o: cli.buy_rental(h, country, code, row["nh_price"], idempotency_key(o)),

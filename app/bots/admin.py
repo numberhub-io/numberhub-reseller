@@ -31,6 +31,53 @@ def _cancel_kb():
     return kb.as_markup()
 
 
+PRODUCT_LABEL = {"sms": "📱 Numbers", "email": "📧 Email codes", "proxy": "🌐 Proxy data",
+                 "rent": "📅 Rented numbers", "esim": "🌍 eSIM"}
+
+
+def commission_screen(reseller: Reseller, note: str = ""):
+    """What the shop adds to NumberHub's price, product by product, with a button for each."""
+    lines = ([note, ""] if note else []) + [
+        "💲 <b>Commission</b>",
+        "",
+        "What you add on top of NumberHub's price. Each product can have its own commission. One that has "
+        "none uses the commission for numbers.",
+        "",
+    ]
+    kb = InlineKeyboardBuilder()
+    for kind, label in PRODUCT_LABEL.items():
+        now = pct(selling.commission(reseller, kind))
+        same = "" if kind == "sms" or selling.own_commission(reseller, kind) is not None else " <i>(same as numbers)</i>"
+        lines.append(f"{label}: <b>{now}%</b>{same}")
+        kb.button(text=f"{label} · {now}%", callback_data=Adm(a="markup", arg=kind))
+    cap = getattr(reseller, "max_profit", None)
+    if cap is not None:
+        lines += ["", f"💰 Your profit cap (<b>{money(cap)}</b>) holds numbers and every product that uses the "
+                      "commission for numbers. A product with its own commission is priced by that commission alone."]
+    lines += ["", "<i>A change applies to new purchases only.</i>"]
+    kb.button(text="⬅️ Admin panel", callback_data=Adm(a="home"))
+    kb.adjust(1)
+    return "\n".join(lines), kb.as_markup()
+
+
+def commission_prompt(reseller: Reseller, kind: str) -> str:
+    now = pct(selling.commission(reseller, kind))
+    if kind == "sms":
+        return (PROMPTS["markup"].format(max=pct(settings.max_markup_pct), now=now, n=0)
+                + "\n\nA product without its own commission follows this one.")
+    same = "" if selling.own_commission(reseller, kind) is not None else " (same as numbers)"
+    return (f"💲 <b>Commission for {PRODUCT_LABEL[kind]}</b>\n\nSend the percent you add on top of NumberHub's "
+            f"price (0–{pct(settings.max_markup_pct)}). Now: <b>{now}%</b>{same}.\n"
+            "Example: <code>15</code> — what costs you $10.00 sells for $11.50 and you earn $1.50.\n\n"
+            "Send <code>-</code> to use the commission for numbers again.")
+
+
+def _commission_cancel_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✖️ Cancel", callback_data=Adm(a="markup"))
+    return kb.as_markup()
+
+
 async def dashboard(reseller: Reseller):
     day, week, month = [await repo.stats(reseller.id, d) for d in (1, 7, 30)]
     wallet = "—"
@@ -57,6 +104,8 @@ async def dashboard(reseller: Reseller):
     else:
         cust = selling.shop_price(reseller, {}, "", "", Decimal("1.00"))
         example = f"<i>e.g. a $1.00 number sells for {money(cust)} → you earn {money(cust - Decimal('1.00'))}</i>"
+    own = [f"{label} <b>{pct(selling.commission(reseller, kind))}%</b>" for kind, label in PRODUCT_LABEL.items()
+           if selling.own_commission(reseller, kind) is not None]
     n_rules = await repo.count_price_rules(reseller.id)
     extras = []
     if getattr(reseller, "max_profit", None) is not None:
@@ -83,6 +132,7 @@ async def dashboard(reseller: Reseller):
         "",
         f"💲 Your commission: <b>{commission}%</b> on top of NumberHub's price",
         f"     {example}",
+        *([f"     Own commission: {' · '.join(own)}"] if own else []),
         *extras,
         f"🏦 NumberHub wallet: {wallet}",
         f"🔗 Share your bot: <code>t.me/{esc(reseller.bot_username)}</code>",
@@ -184,7 +234,8 @@ async def prices_screen(reseller: Reseller, note: str = "", page: int = 0):
     n = len(chunk)
     if rules:
         if pages > 1:
-            lines += [f"<b>{page * PRICE_PAGE + 1}–{page * PRICE_PAGE + n} of {len(rules)}</b>", ""]
+            first = page * PRICE_PAGE + 1
+            lines += [f"<b>{first}–{first + n - 1} of {len(rules)}</b>" if n > 1 else f"<b>{first} of {len(rules)}</b>", ""]
         for i, r in enumerate(chunk, page * PRICE_PAGE + 1):
             lines.append(f"{i}. {rule_text(r)}")
             kb.button(text=f"🗑 {i}", callback_data=Adm(a="pr_del", arg=f"{r.id}|{page}"))
@@ -809,6 +860,15 @@ def register(r: Router) -> None:
             await show(c, "💰 <b>Profit cap</b>\n\nSend the most you want to earn on one number, for example "
                           "<code>0.20</code>. Expensive numbers then sell at NumberHub's price + at most that.\n"
                           f"Send <code>-</code> to remove the cap. Now: <b>{now}</b>.", _cancel_kb())
+        elif a == "markup":
+            # The list of products first; a product's button opens its prompt.
+            kind = callback_data.arg
+            if kind not in PRODUCT_LABEL:
+                await show(c, *commission_screen(reseller))
+            else:
+                await state.set_state(AdminForm.markup)
+                await state.update_data(product=kind)
+                await show(c, commission_prompt(reseller, kind), _commission_cancel_kb())
         elif a in PROMPTS:
             n = len(await repo.member_chat_ids(reseller.id)) if a == "broadcast" else 0
             text = PROMPTS[a].format(max=pct(settings.max_markup_pct), now=pct(reseller.markup_pct), n=n)
@@ -881,17 +941,34 @@ def register(r: Router) -> None:
     @r.message(StateFilter(AdminForm.markup), F.text)
     @owner_only
     async def f_markup(m: Message, reseller: Reseller, state: FSMContext, is_owner: bool = False):
+        kind = (await state.get_data()).get("product")
+        kind = kind if kind in PRODUCT_LABEL else "sms"
+        field = selling.PRODUCTS[kind]
+        if field and m.text.strip() == "-":
+            # Back to the commission for numbers.
+            await repo.update_reseller(reseller.id, **{field: None})
+            selling.forget_prices(reseller.id)
+            await state.clear()
+            fresh = await repo.get_reseller(reseller.id)
+            await reply(m, commission_screen(fresh, f"✅ {PRODUCT_LABEL[kind]} uses the commission for numbers again "
+                                                    f"(<b>{pct(fresh.markup_pct)}%</b>). Prices update right away."))
+            return
         try:
             v = Decimal(m.text.replace("%", "").replace(",", ".").strip())
         except (InvalidOperation, ValueError):
             v = Decimal("-1")
         if not v.is_finite() or v < 0 or v > settings.max_markup_pct:
-            await m.answer(f"❌ Send a number from 0 to {pct(settings.max_markup_pct)}.", reply_markup=_cancel_kb())
+            await m.answer(f"❌ Send a number from 0 to {pct(settings.max_markup_pct)}."
+                           + (" Or <code>-</code> to use the commission for numbers." if field else ""),
+                           reply_markup=_commission_cancel_kb())
             return
         v = v.quantize(Decimal("0.01"))
-        await repo.update_reseller(reseller.id, markup_pct=v)
+        await repo.update_reseller(reseller.id, **{field or "markup_pct": v})
         selling.forget_prices(reseller.id)
-        await done(m, reseller, state, f"✅ Commission set to <b>{pct(v)}%</b>. Prices update right away.")
+        await state.clear()
+        note = (f"✅ Commission set to <b>{pct(v)}%</b>. Prices update right away." if kind == "sms" else
+                f"✅ Commission for {PRODUCT_LABEL[kind]} set to <b>{pct(v)}%</b>. Prices update right away.")
+        await reply(m, commission_screen(await repo.get_reseller(reseller.id), note))
 
     async def _mark_card(c: CallbackQuery, dep, member, status_line: str) -> None:
         """The owner's request message keeps its text and shows how it ended."""
